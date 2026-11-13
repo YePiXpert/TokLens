@@ -4,6 +4,8 @@
 *.dll
 bin/
 obj/
+dist/
+*.toklens.gz
 
 # Personal usage exports, reports & local caches (NEVER commit personal data)
 *.html

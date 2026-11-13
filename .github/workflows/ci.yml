@@ -1,11 +1,19 @@
-name: Build & Verify TokLens
+name: Build, Verify & Release TokLens
 
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 jobs:
   build-windows:
@@ -14,18 +22,116 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Verify Python VPS Agent syntax
+      - name: Verify Python VPS Agent syntax & smoke export
         shell: pwsh
-        run: python -m py_compile vps/toklens_agent.py
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m py_compile vps/toklens_agent.py
+
+          $tmpHome = Join-Path $env:RUNNER_TEMP "toklens_ci_fixture"
+          $claudeDir = Join-Path $tmpHome ".claude\projects\demo-proj"
+          New-Item -ItemType Directory -Force -Path $claudeDir | Out-Null
+          $sampleLine = '{"type":"assistant","timestamp":"2026-05-01T10:00:00Z","requestId":"req_ci_1","message":{"id":"msg_ci_1","role":"assistant","model":"claude-sonnet-4-6","usage":{"input_tokens":1200,"output_tokens":400,"cache_read_input_tokens":3000,"cache_creation_input_tokens":0}}}'
+          [System.IO.File]::WriteAllText((Join-Path $claudeDir "session.jsonl"), $sampleLine + "`n", (New-Object System.Text.UTF8Encoding($false)))
+
+          $agentSnap = Join-Path $env:RUNNER_TEMP "agent_smoke.json"
+          python vps/toklens_agent.py --home $tmpHome --name "CI-VPS" --id "ci-vps-node" --export $agentSnap
+          if (-not (Test-Path $agentSnap)) { throw "Agent snapshot file was not generated." }
+          $snapObj = Get-Content $agentSnap -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($snapObj.schema -ne "toklens.node.v2" -or $snapObj.records.Count -lt 1) {
+            throw "Unexpected agent snapshot schema or empty records."
+          }
 
       - name: Build TokLens.exe (.NET Framework 4.x)
         shell: cmd
         run: call build.bat --nopause
 
-      - name: Upload TokLens.exe Artifact
+      - name: Run Headless WPF UI Self-Test & CLI Export Verification
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tmpHome = Join-Path $env:RUNNER_TEMP "toklens_ci_fixture"
+          $env:TOKLENS_CONFIG_DIR = Join-Path $env:RUNNER_TEMP "toklens_ci_appdata"
+          $uiErr   = Join-Path $env:RUNNER_TEMP "ui_selftest_err.txt"
+
+          $pUi = Start-Process -FilePath ".\TokLens.exe" -ArgumentList @("--home", $tmpHome, "--self-test-ui", "--export-json", $uiErr) -Wait -PassThru
+          if ($pUi.ExitCode -ne 0) {
+            if (Test-Path $uiErr) { Get-Content $uiErr | Write-Host }
+            throw "Headless UI self-test failed with exit code $($pUi.ExitCode)"
+          }
+
+          $outJson = Join-Path $env:RUNNER_TEMP "summary.json"
+          $outCsv  = Join-Path $env:RUNNER_TEMP "records.csv"
+          $outHtml = Join-Path $env:RUNNER_TEMP "report.html"
+          $pCli = Start-Process -FilePath ".\TokLens.exe" -ArgumentList @("--home", $tmpHome, "--rate", "7.25", "--export-json", $outJson, "--export-csv", $outCsv, "--export-html", $outHtml) -Wait -PassThru
+          if ($pCli.ExitCode -ne 0) {
+            if (Test-Path "$outJson.err.txt") { Get-Content "$outJson.err.txt" | Write-Host }
+            throw "CLI export verification failed with exit code $($pCli.ExitCode)"
+          }
+          foreach ($f in @($outJson, $outCsv, $outHtml)) {
+            if (-not (Test-Path $f) -or (Get-Item $f).Length -le 0) {
+              throw "Expected non-empty export artifact missing: $f"
+            }
+          }
+
+      - name: Package Portable Bundle & Generate SHA256SUMS
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $distDir = "dist"
+          $stageDir = Join-Path $distDir "TokLens-Portable-Windows"
+          New-Item -ItemType Directory -Force -Path $stageDir | Out-Null
+
+          Copy-Item "TokLens.exe" -Destination $stageDir -Force
+          Copy-Item "vps/toklens_agent.py" -Destination $stageDir -Force
+          if (Test-Path "README.md") { Copy-Item "README.md" -Destination $stageDir -Force }
+
+          Copy-Item "TokLens.exe" -Destination $distDir -Force
+          Copy-Item "vps/toklens_agent.py" -Destination $distDir -Force
+
+          $zipPath = Join-Path $distDir "TokLens-Windows-x64-Portable.zip"
+          Compress-Archive -Path "$stageDir\*" -DestinationPath $zipPath -Force
+
+          $hashLines = @()
+          foreach ($fn in @("TokLens-Windows-x64-Portable.zip", "TokLens.exe", "toklens_agent.py")) {
+            $fp = Join-Path $distDir $fn
+            $h = (Get-FileHash -Path $fp -Algorithm SHA256).Hash.ToLowerInvariant()
+            $hashLines += "$h  $fn"
+          }
+          $sumsPath = Join-Path $distDir "SHA256SUMS.txt"
+          [System.IO.File]::WriteAllText((Resolve-Path $distDir).Path + "\SHA256SUMS.txt", ($hashLines -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
+          Get-Content $sumsPath | Write-Host
+
+      - name: Upload TokLens Portable Artifact
         uses: actions/upload-artifact@v4
         with:
           name: TokLens-Portable-Windows
+          retention-days: 30
           path: |
-            TokLens.exe
-            vps/toklens_agent.py
+            dist/TokLens-Windows-x64-Portable.zip
+            dist/TokLens.exe
+            dist/toklens_agent.py
+            dist/SHA256SUMS.txt
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build-windows
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Built Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: TokLens-Portable-Windows
+          path: release-assets
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            release-assets/TokLens-Windows-x64-Portable.zip
+            release-assets/TokLens.exe
+            release-assets/toklens_agent.py
+            release-assets/SHA256SUMS.txt

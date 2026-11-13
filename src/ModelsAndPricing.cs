@@ -11,6 +11,13 @@ using System.Web.Script.Serialization;
 
 namespace TokLens
 {
+    public static class AppConstants
+    {
+        public const string Version = "2.2";
+        public const string VersionTag = "v2.2";
+        public const string ProductTitle = "知微 · TokLens v2.2";
+    }
+
     internal sealed class WinSqlite : IDisposable
     {
         private const int SQLITE_OK = 0;
@@ -19,7 +26,9 @@ namespace TokLens
         private const int SQLITE_OPEN_READONLY = 0x00000001;
         private const int SQLITE_OPEN_READWRITE = 0x00000002;
         private const int SQLITE_OPEN_CREATE = 0x00000004;
+        private const int SQLITE_OPEN_URI = 0x00000040;
         private const int SQLITE_OPEN_NOMUTEX = 0x00008000;
+        private const long MaxTempCopyBytes = 256L * 1024L * 1024L;
 
         [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
         private static extern int sqlite3_open_v2(byte[] filenameUtf8, out IntPtr ppDb, int flags, IntPtr zVfs);
@@ -43,6 +52,9 @@ namespace TokLens
         private static extern IntPtr sqlite3_column_text(IntPtr stmt, int iCol);
 
         [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr sqlite3_column_blob(IntPtr stmt, int iCol);
+
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
         private static extern int sqlite3_column_bytes(IntPtr stmt, int iCol);
 
         [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
@@ -64,7 +76,8 @@ namespace TokLens
         public static string SqlQuote(string val)
         {
             if (val == null) return "''";
-            return "'" + val.Replace("'", "''") + "'";
+            string clean = val.IndexOf('\0') >= 0 ? val.Replace("\0", "") : val;
+            return "'" + clean.Replace("'", "''") + "'";
         }
 
         public static WinSqlite OpenReadWrite(string dbPath)
@@ -91,7 +104,9 @@ namespace TokLens
 
         public static WinSqlite OpenReadOnly(string dbPath)
         {
-            IntPtr db = TryOpenDirect(dbPath);
+            if (string.IsNullOrWhiteSpace(dbPath)) return null;
+
+            IntPtr db = TryOpenDirect(dbPath, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX);
             if (db != IntPtr.Zero && CanQueryMaster(db))
             {
                 return new WinSqlite(db, null);
@@ -101,55 +116,156 @@ namespace TokLens
                 sqlite3_close_v2(db);
             }
 
-            // Avoid copying multi-hundred-MB locked IDE state DBs into %TEMP% on UI refresh
+            // Zero-copy SQLite URI read-only fallback for large or locked IDE databases (e.g. >120MB Cursor state.vscdb)
+            string roUri = BuildSqliteFileUri(dbPath, "mode=ro");
+            if (!string.IsNullOrEmpty(roUri))
+            {
+                IntPtr dbUriRo = TryOpenDirect(roUri, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX);
+                if (dbUriRo != IntPtr.Zero && CanQueryMaster(dbUriRo))
+                {
+                    return new WinSqlite(dbUriRo, null);
+                }
+                if (dbUriRo != IntPtr.Zero)
+                {
+                    sqlite3_close_v2(dbUriRo);
+                }
+            }
+
+            // Copy to private %TEMP% directory using shared FileStream (up to 256MB) and open READWRITE so SQLite can recover WAL frames
+            bool canCopy = true;
             try
             {
                 FileInfo fi = new FileInfo(dbPath);
-                if (fi.Exists && fi.Length > 120L * 1024L * 1024L)
-                    return null;
+                if (fi.Exists && fi.Length > MaxTempCopyBytes)
+                    canCopy = false;
             }
             catch { }
 
-            string tempDir = Path.Combine(Path.GetTempPath(), "TokLens_" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(tempDir);
-            try
+            if (canCopy)
             {
-                string dst = Path.Combine(tempDir, Path.GetFileName(dbPath));
-                File.Copy(dbPath, dst, true);
-                string[] suffixes = new string[] { "-wal", "-shm" };
-                for (int i = 0; i < suffixes.Length; i++)
+                string tempDir = Path.Combine(Path.GetTempPath(), "TokLens_" + Guid.NewGuid().ToString("N"));
+                try
                 {
-                    string side = dbPath + suffixes[i];
-                    if (File.Exists(side))
+                    Directory.CreateDirectory(tempDir);
+                    string dst = Path.Combine(tempDir, Path.GetFileName(dbPath));
+                    if (CopyFileShared(dbPath, dst, MaxTempCopyBytes))
                     {
-                        try { File.Copy(side, dst + suffixes[i], true); } catch { }
+                        string[] suffixes = new string[] { "-wal", "-shm" };
+                        for (int i = 0; i < suffixes.Length; i++)
+                        {
+                            string side = dbPath + suffixes[i];
+                            try
+                            {
+                                if (File.Exists(side))
+                                    CopyFileShared(side, dst + suffixes[i], MaxTempCopyBytes);
+                            }
+                            catch { }
+                        }
+
+                        IntPtr dbCopy = TryOpenDirect(dst, SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX);
+                        if (dbCopy == IntPtr.Zero || !CanQueryMaster(dbCopy))
+                        {
+                            if (dbCopy != IntPtr.Zero) sqlite3_close_v2(dbCopy);
+                            dbCopy = TryOpenDirect(dst, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX);
+                        }
+                        if (dbCopy != IntPtr.Zero && CanQueryMaster(dbCopy))
+                        {
+                            return new WinSqlite(dbCopy, tempDir);
+                        }
+                        if (dbCopy != IntPtr.Zero)
+                        {
+                            sqlite3_close_v2(dbCopy);
+                        }
                     }
                 }
-                IntPtr dbCopy = TryOpenDirect(dst);
-                if (dbCopy != IntPtr.Zero)
+                catch
                 {
-                    return new WinSqlite(dbCopy, tempDir);
                 }
-            }
-            catch
-            {
+
+                try { Directory.Delete(tempDir, true); } catch { }
             }
 
-            try { Directory.Delete(tempDir, true); } catch { }
+            // Final zero-copy immutable URI fallback for >256MB locked databases
+            string immUri = BuildSqliteFileUri(dbPath, "immutable=1");
+            if (!string.IsNullOrEmpty(immUri))
+            {
+                IntPtr dbImm = TryOpenDirect(immUri, SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX);
+                if (dbImm != IntPtr.Zero && CanQueryMaster(dbImm))
+                {
+                    return new WinSqlite(dbImm, null);
+                }
+                if (dbImm != IntPtr.Zero)
+                {
+                    sqlite3_close_v2(dbImm);
+                }
+            }
+
             return null;
         }
 
-        private static IntPtr TryOpenDirect(string path)
+        private static string BuildSqliteFileUri(string rawPath, string queryParam)
         {
-            byte[] utf8 = Encoding.UTF8.GetBytes(path + "\0");
+            if (string.IsNullOrWhiteSpace(rawPath)) return null;
+            string p = rawPath.Trim();
+            if (p.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+                p = @"\\" + p.Substring(8);
+            else if (p.StartsWith(@"\\?\", StringComparison.Ordinal))
+                p = p.Substring(4);
+
+            string escaped = p.Replace("%", "%25").Replace("?", "%3f").Replace("#", "%23").Replace('\\', '/');
+            string uriBase;
+            if (escaped.StartsWith("//", StringComparison.Ordinal))
+                uriBase = "file:" + escaped;
+            else if (escaped.StartsWith("/", StringComparison.Ordinal))
+                uriBase = "file://" + escaped;
+            else
+                uriBase = "file:///" + escaped;
+
+            if (string.IsNullOrEmpty(queryParam))
+                return uriBase;
+            return uriBase + "?" + queryParam;
+        }
+
+        private static bool CopyFileShared(string srcPath, string dstPath, long maxBytes)
+        {
+            using (FileStream src = new FileStream(srcPath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, 65536))
+            {
+                if (maxBytes > 0 && src.Length > maxBytes)
+                    return false;
+                using (FileStream dst = new FileStream(dstPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536))
+                {
+                    byte[] buf = new byte[65536];
+                    int read;
+                    long total = 0L;
+                    while ((read = src.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        total += read;
+                        if (maxBytes > 0 && total > maxBytes)
+                            return false;
+                        dst.Write(buf, 0, read);
+                    }
+                }
+            }
+            return true;
+        }
+
+        private static IntPtr TryOpenDirect(string pathOrUri, int flags)
+        {
+            byte[] utf8 = Encoding.UTF8.GetBytes(pathOrUri + "\0");
             IntPtr db;
-            int rc = sqlite3_open_v2(utf8, out db, SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX, IntPtr.Zero);
+            int rc = sqlite3_open_v2(utf8, out db, flags, IntPtr.Zero);
             if (rc == SQLITE_OK && db != IntPtr.Zero)
             {
                 return db;
             }
             if (db != IntPtr.Zero) sqlite3_close_v2(db);
             return IntPtr.Zero;
+        }
+
+        public bool IsHealthy()
+        {
+            if (_db == IntPtr.Zero) return false;
+            return CanQueryMaster(_db);
         }
 
         private static bool CanQueryMaster(IntPtr db)
@@ -218,6 +334,17 @@ namespace TokLens
                 return Encoding.UTF8.GetString(buf);
             }
 
+            public byte[] GetBlob(int col)
+            {
+                IntPtr ptr = sqlite3_column_blob(_stmt, col);
+                if (ptr == IntPtr.Zero) return null;
+                int len = sqlite3_column_bytes(_stmt, col);
+                if (len <= 0) return new byte[0];
+                byte[] buf = new byte[len];
+                Marshal.Copy(ptr, buf, 0, len);
+                return buf;
+            }
+
             public long GetInt64(int col)
             {
                 return sqlite3_column_int64(_stmt, col);
@@ -240,6 +367,167 @@ namespace TokLens
             {
                 try { Directory.Delete(_tempDir, true); } catch { }
                 _tempDir = null;
+            }
+        }
+    }
+
+    // 原生系统 archiveint.dll Zstandard (.zst) 流式解压器（Windows 10/11 零外部依赖）
+    internal static class WinZstdReader
+    {
+        [DllImport("archiveint.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr archive_read_new();
+
+        [DllImport("archiveint.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int archive_read_support_filter_zstd(IntPtr a);
+
+        [DllImport("archiveint.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int archive_read_support_format_raw(IntPtr a);
+
+        [DllImport("archiveint.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int archive_read_open_filename_w(IntPtr a, [MarshalAs(UnmanagedType.LPWStr)] string filename, UIntPtr blockSize);
+
+        [DllImport("archiveint.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int archive_read_next_header(IntPtr a, out IntPtr entry);
+
+        [DllImport("archiveint.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr archive_read_data(IntPtr a, byte[] buff, UIntPtr size);
+
+        [DllImport("archiveint.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int archive_read_free(IntPtr a);
+
+        private static bool MatchesAnyKeyword(string line, string[] keywords)
+        {
+            if (keywords == null || keywords.Length == 0) return true;
+            for (int i = 0; i < keywords.Length; i++)
+            {
+                string kw = keywords[i];
+                if (!string.IsNullOrEmpty(kw) && line.IndexOf(kw, StringComparison.Ordinal) >= 0)
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool IsBalancedJsonLine(string line)
+        {
+            if (string.IsNullOrEmpty(line)) return false;
+            string t = line.Trim();
+            return t.Length >= 2 && t[0] == '{' && t[t.Length - 1] == '}';
+        }
+
+        internal static bool TryScanLines(string filePath, string[] anyKeywords, Action<string, int> onLine)
+        {
+            if (string.IsNullOrWhiteSpace(filePath) || onLine == null)
+                return false;
+
+            IntPtr a = IntPtr.Zero;
+            try
+            {
+                a = archive_read_new();
+                if (a == IntPtr.Zero) return false;
+                if (archive_read_support_filter_zstd(a) != 0) return false;
+                if (archive_read_support_format_raw(a) != 0) return false;
+
+                UIntPtr blockSz = new UIntPtr(65536U);
+                int openRc = archive_read_open_filename_w(a, filePath, blockSz);
+                if (openRc != 0 && !filePath.StartsWith(@"\\?\", StringComparison.Ordinal))
+                {
+                    archive_read_free(a);
+                    a = archive_read_new();
+                    if (a == IntPtr.Zero) return false;
+                    if (archive_read_support_filter_zstd(a) != 0) return false;
+                    if (archive_read_support_format_raw(a) != 0) return false;
+                    string longPath = filePath.StartsWith(@"\\", StringComparison.Ordinal)
+                        ? @"\\?\UNC\" + filePath.Substring(2)
+                        : @"\\?\" + filePath;
+                    openRc = archive_read_open_filename_w(a, longPath, blockSz);
+                }
+                if (openRc != 0) return false;
+
+                IntPtr entry;
+                if (archive_read_next_header(a, out entry) != 0)
+                    return false;
+
+                byte[] byteBuf = new byte[65536];
+                char[] charBuf = new char[65544];
+                Decoder decoder = Encoding.UTF8.GetDecoder();
+                StringBuilder lineSb = new StringBuilder(4096);
+                int lineIdx = 0;
+
+                while (true)
+                {
+                    IntPtr nPtr = archive_read_data(a, byteBuf, blockSz);
+                    long n = nPtr.ToInt64();
+                    if (n <= 0L)
+                    {
+                        if (n < 0L) return false;
+                        break;
+                    }
+
+                    int byteCount = (int)Math.Min((long)byteBuf.Length, n);
+                    int charCount = decoder.GetChars(byteBuf, 0, byteCount, charBuf, 0, false);
+                    for (int i = 0; i < charCount; i++)
+                    {
+                        char ch = charBuf[i];
+                        if (ch == '\n')
+                        {
+                            int len = lineSb.Length;
+                            if (len > 0 && lineSb[len - 1] == '\r')
+                                lineSb.Length = len - 1;
+                            if (lineSb.Length > 0)
+                            {
+                                string line = lineSb.ToString();
+                                lineSb.Length = 0;
+                                lineIdx++;
+                                if (MatchesAnyKeyword(line, anyKeywords))
+                                    onLine(line, lineIdx);
+                            }
+                        }
+                        else
+                        {
+                            lineSb.Append(ch);
+                        }
+                    }
+                }
+
+                int tailChars = decoder.GetChars(byteBuf, 0, 0, charBuf, 0, true);
+                for (int i = 0; i < tailChars; i++)
+                {
+                    char ch = charBuf[i];
+                    if (ch != '\n') lineSb.Append(ch);
+                }
+                if (lineSb.Length > 0)
+                {
+                    if (lineSb[lineSb.Length - 1] == '\r')
+                        lineSb.Length = lineSb.Length - 1;
+                    string rem = lineSb.ToString();
+                    if (IsBalancedJsonLine(rem))
+                    {
+                        lineIdx++;
+                        if (MatchesAnyKeyword(rem, anyKeywords))
+                            onLine(rem, lineIdx);
+                    }
+                }
+
+                return true;
+            }
+            catch (DllNotFoundException)
+            {
+                return false;
+            }
+            catch (EntryPointNotFoundException)
+            {
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+            finally
+            {
+                if (a != IntPtr.Zero)
+                {
+                    try { archive_read_free(a); } catch { }
+                }
             }
         }
     }
@@ -284,18 +572,24 @@ namespace TokLens
         public string DedupKey;
         public long TimestampMs;
         public int DurationMs;
+        public long CacheWrite1h;
 
         public UsageEvent(string tool, string model, string date, long fi, long outTok, long cr, long cw, double loggedCost, int turns)
-            : this(tool, model, date, fi, outTok, cr, cw, loggedCost, turns, "", 0L, 0)
+            : this(tool, model, date, fi, outTok, cr, cw, loggedCost, turns, "", 0L, 0, 0L)
         {
         }
 
         public UsageEvent(string tool, string model, string date, long fi, long outTok, long cr, long cw, double loggedCost, int turns, string dedupKey)
-            : this(tool, model, date, fi, outTok, cr, cw, loggedCost, turns, dedupKey, 0L, 0)
+            : this(tool, model, date, fi, outTok, cr, cw, loggedCost, turns, dedupKey, 0L, 0, 0L)
         {
         }
 
         public UsageEvent(string tool, string model, string date, long fi, long outTok, long cr, long cw, double loggedCost, int turns, string dedupKey, long timestampMs, int durationMs)
+            : this(tool, model, date, fi, outTok, cr, cw, loggedCost, turns, dedupKey, timestampMs, durationMs, 0L)
+        {
+        }
+
+        public UsageEvent(string tool, string model, string date, long fi, long outTok, long cr, long cw, double loggedCost, int turns, string dedupKey, long timestampMs, int durationMs, long cacheWrite1h)
         {
             Tool = tool;
             Model = model;
@@ -309,6 +603,12 @@ namespace TokLens
             DedupKey = dedupKey ?? "";
             TimestampMs = timestampMs;
             DurationMs = durationMs;
+            CacheWrite1h = cacheWrite1h > 0L ? cacheWrite1h : 0L;
+        }
+
+        public UsageEvent Clone()
+        {
+            return new UsageEvent(Tool, Model, Date, FreshInput, Output, CacheRead, CacheWrite, LoggedCostUsd, Turns, DedupKey, TimestampMs, DurationMs, CacheWrite1h);
         }
     }
 
@@ -377,7 +677,36 @@ namespace TokLens
 
         public long TotalTokens
         {
-            get { return FreshInput + Output + CacheRead + CacheWrite; }
+            get
+            {
+                long a = FreshInput > 0L ? FreshInput : 0L;
+                long b = Output > 0L ? Output : 0L;
+                long c = CacheRead > 0L ? CacheRead : 0L;
+                long d = CacheWrite > 0L ? CacheWrite : 0L;
+                double sumD = (double)a + (double)b + (double)c + (double)d;
+                if (sumD >= 9000000000000000000.0) return 9000000000000000000L;
+                return a + b + c + d;
+            }
+        }
+
+        public RecordBucket Clone()
+        {
+            RecordBucket c = new RecordBucket();
+            c.MachineId = MachineId;
+            c.MachineName = MachineName;
+            c.MachineType = MachineType;
+            c.Tool = Tool;
+            c.Model = Model;
+            c.Date = Date;
+            c.Turns = Turns;
+            c.FreshInput = FreshInput;
+            c.Output = Output;
+            c.CacheRead = CacheRead;
+            c.CacheWrite = CacheWrite;
+            c.CostUsd = CostUsd;
+            c.BaselineUsd = BaselineUsd;
+            c.RateLabel = RateLabel;
+            return c;
         }
     }
 
@@ -389,7 +718,30 @@ namespace TokLens
         public string OsInfo;
         public string SyncedAt;
         public bool IsLocal;
+        public int ScannerRev = 27;
         public List<RecordBucket> Records = new List<RecordBucket>();
+
+        public NodeSnapshot Clone()
+        {
+            NodeSnapshot c = new NodeSnapshot();
+            c.MachineId = MachineId;
+            c.MachineName = MachineName;
+            c.MachineType = MachineType;
+            c.OsInfo = OsInfo;
+            c.SyncedAt = SyncedAt;
+            c.IsLocal = IsLocal;
+            c.ScannerRev = ScannerRev;
+            c.Records = new List<RecordBucket>(Records != null ? Records.Count : 0);
+            if (Records != null)
+            {
+                for (int i = 0; i < Records.Count; i++)
+                {
+                    if (Records[i] != null)
+                        c.Records.Add(Records[i].Clone());
+                }
+            }
+            return c;
+        }
     }
 
     public sealed class MachineRowView
@@ -397,6 +749,9 @@ namespace TokLens
         public string MachineId { get; set; }
         public string MachineName { get; set; }
         public string TypeBadge { get; set; }
+        public string OsInfo { get; set; }
+        public bool IsOnline { get; set; }
+        public string StatusText { get; set; }
         public string SyncedAt { get; set; }
         public string ToolsSummary { get; set; }
         public int ToolCount { get; set; }
@@ -421,6 +776,24 @@ namespace TokLens
         public bool IsLocal { get; set; }
     }
 
+    public sealed class SubscriptionPlanConfig
+    {
+        public string EcoId = "";       // "google", "claude", "openai", "cursor", "windsurf", "coding_plan"
+        public bool Enabled = false;    // 用户是否持有/开启该订阅
+        public string PlanName = "";    // 例如 "Google AI Pro"、"Claude Max 5x"、"自定义月费"
+        public double MonthlyUsd = 20.0;// 等效月费（USD）
+
+        public SubscriptionPlanConfig Clone()
+        {
+            SubscriptionPlanConfig c = new SubscriptionPlanConfig();
+            c.EcoId = this.EcoId ?? "";
+            c.Enabled = this.Enabled;
+            c.PlanName = this.PlanName ?? "";
+            c.MonthlyUsd = this.MonthlyUsd;
+            return c;
+        }
+    }
+
     public sealed class SyncConfig
     {
         public string MachineId = "";
@@ -433,6 +806,13 @@ namespace TokLens
         public string WebDavUrl = "";
         public string WebDavUser = "";
         public string WebDavPass = "";
+        public bool IsDarkTheme = true;
+        public bool PreferCny = true;
+        public bool MinimizeToTray = false;
+        public double DailyBudgetUsd = 0.0;
+        public Dictionary<string, string> NodeAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        public bool SubscriptionsCustomized = false;
+        public List<SubscriptionPlanConfig> Subscriptions = new List<SubscriptionPlanConfig>();
 
         public bool IsConfigured
         {
@@ -441,6 +821,51 @@ namespace TokLens
                 if (string.Equals(Provider, "webdav", StringComparison.OrdinalIgnoreCase))
                     return !string.IsNullOrWhiteSpace(WebDavUrl);
                 return !string.IsNullOrWhiteSpace(GistId) && !string.IsNullOrWhiteSpace(GistToken);
+            }
+        }
+
+        public SyncConfig Clone()
+        {
+            SyncConfig copy = new SyncConfig();
+            copy.CopyFrom(this);
+            return copy;
+        }
+
+        public void CopyFrom(SyncConfig other)
+        {
+            if (other == null) return;
+            MachineId = other.MachineId ?? "";
+            MachineName = other.MachineName ?? "";
+            Provider = other.Provider ?? "gist";
+            AutoSync = other.AutoSync;
+            ScanLocalWsl = other.ScanLocalWsl;
+            GistId = other.GistId ?? "";
+            GistToken = other.GistToken ?? "";
+            WebDavUrl = other.WebDavUrl ?? "";
+            WebDavUser = other.WebDavUser ?? "";
+            WebDavPass = other.WebDavPass ?? "";
+            IsDarkTheme = other.IsDarkTheme;
+            PreferCny = other.PreferCny;
+            MinimizeToTray = other.MinimizeToTray;
+            DailyBudgetUsd = other.DailyBudgetUsd;
+            NodeAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            if (other.NodeAliases != null)
+            {
+                foreach (KeyValuePair<string, string> kv in other.NodeAliases)
+                {
+                    if (!string.IsNullOrEmpty(kv.Key))
+                        NodeAliases[kv.Key] = kv.Value ?? "";
+                }
+            }
+            SubscriptionsCustomized = other.SubscriptionsCustomized;
+            Subscriptions = new List<SubscriptionPlanConfig>();
+            if (other.Subscriptions != null)
+            {
+                for (int i = 0; i < other.Subscriptions.Count; i++)
+                {
+                    if (other.Subscriptions[i] != null)
+                        Subscriptions.Add(other.Subscriptions[i].Clone());
+                }
             }
         }
     }
@@ -479,10 +904,13 @@ namespace TokLens
         public string OutputText { get; set; }
         public long TotalTokens { get; set; }
         public string TotalTokensText { get; set; }
+        public double InputPerM { get; set; }
         public string RateLabel { get; set; }
+        public string CacheHitText { get; set; }
         public double CostUsd { get; set; }
         public double DisplayCost { get; set; }
         public string FormattedCost { get; set; }
+        public double BarRatio { get; set; }
         public string ShareText { get; set; }
     }
 
@@ -494,6 +922,8 @@ namespace TokLens
         public string FreshInputText { get; set; }
         public long CacheRead { get; set; }
         public string CacheReadText { get; set; }
+        public long CacheWrite { get; set; }
+        public string CacheWriteText { get; set; }
         public long Output { get; set; }
         public string OutputText { get; set; }
         public long TotalTokens { get; set; }
@@ -502,6 +932,7 @@ namespace TokLens
         public string UsdText { get; set; }
         public double CostCny { get; set; }
         public string CnyText { get; set; }
+        public string FormattedCost { get; set; }
     }
 
     public sealed class ScanResult
@@ -538,17 +969,24 @@ namespace TokLens
     // 100% Self-Sufficient Cloud & Builtin Pricing Engine (Zero External Software Dependency)
     public sealed class PricingEngine
     {
+        private readonly string _homeDir;
+        private readonly bool _isCustomHome;
         private readonly Dictionary<string, ModelRate> _rates = new Dictionary<string, ModelRate>(StringComparer.OrdinalIgnoreCase);
         private static readonly object CacheLock = new object();
         private static Dictionary<string, ModelRate> _memCloudRates = null;
         private static long _memCloudCacheMtimeTicks = -1;
+        private static string _memCloudCachePath = "";
         private static string _lastCloudSource = "内置基准";
         private static string _lastCloudUpdated = "";
 
         private static readonly Regex ParenRegex = new Regex(@"\s*\([^)]*\)\s*", RegexOptions.Compiled);
         private static readonly Regex SpaceUnderscoreRegex = new Regex(@"[\s_]+", RegexOptions.Compiled);
-        private static readonly Regex TierSuffixRegex = new Regex(@"-(high|medium|low|minimal|thinking|preview|latest)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
-        private static readonly Regex DateSuffixRegex = new Regex(@"-\d{8}$", RegexOptions.Compiled);
+        private static readonly Regex TierSuffixRegex = new Regex(@"-(?:xhigh|high|medium|low|minimal|thinking|nothinking|reasoning|preview|latest|beta|exp|experimental|fast|max|auto|online|nitro|exacto|1m)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex DateSuffixRegex = new Regex(@"-(?:20\d{6}|20\d{2}-\d{2}-\d{2}|\d{4})$", RegexOptions.Compiled);
+        private static readonly Regex ClaudeDotVerRegex = new Regex(@"^(claude-(?:opus|sonnet|haiku|fable|mythos)-\d+)\.(\d+.*)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex ClaudeDashVerRegex = new Regex(@"^(claude-(?:opus|sonnet|haiku|fable|mythos)-\d+)-(\d+)(?=-|$)(.*)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex ClaudeLegacyDotRegex = new Regex(@"^(claude-\d+)\.(\d+-(?:opus|sonnet|haiku).*)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex ClaudeLegacyDashRegex = new Regex(@"^(claude-\d+)-(\d+-(?:opus|sonnet|haiku).*)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         public int Count { get { return _rates.Count; } }
         public static string CurrentSourceLabel { get { return _lastCloudSource; } }
@@ -565,6 +1003,12 @@ namespace TokLens
 
         public PricingEngine(string homeDir)
         {
+            string defaultHome = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            bool hasExplicit = !string.IsNullOrWhiteSpace(homeDir);
+            _homeDir = hasExplicit ? homeDir : defaultHome;
+            _isCustomHome = hasExplicit &&
+                            !string.IsNullOrWhiteSpace(defaultHome) &&
+                            !string.Equals(_homeDir.TrimEnd('\\', '/'), defaultHome.TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase);
             InitBuiltin();
             LoadCloudPricingFast();
             InitInternalModelOverrides();
@@ -578,59 +1022,113 @@ namespace TokLens
 
         private void InitBuiltin()
         {
-            // Anthropic Claude
+            // Anthropic Claude (both dash and dot minor version forms registered to prevent prefix mismatch)
             Add("claude-opus-4-6", 5.0, 25.0, 0.5, 6.25);
+            Add("claude-opus-4.6", 5.0, 25.0, 0.5, 6.25);
             Add("claude-opus-4-5", 5.0, 25.0, 0.5, 6.25);
+            Add("claude-opus-4.5", 5.0, 25.0, 0.5, 6.25);
             Add("claude-opus-4-1", 15.0, 75.0, 1.5, 18.75);
+            Add("claude-opus-4.1", 15.0, 75.0, 1.5, 18.75);
             Add("claude-opus-4", 15.0, 75.0, 1.5, 18.75);
+            Add("claude-opus-4-0", 15.0, 75.0, 1.5, 18.75);
+            Add("claude-opus-4.0", 15.0, 75.0, 1.5, 18.75);
             Add("claude-sonnet-4-6", 3.0, 15.0, 0.3, 3.75);
+            Add("claude-sonnet-4.6", 3.0, 15.0, 0.3, 3.75);
             Add("claude-sonnet-4-5", 3.0, 15.0, 0.3, 3.75);
+            Add("claude-sonnet-4.5", 3.0, 15.0, 0.3, 3.75);
             Add("claude-sonnet-4", 3.0, 15.0, 0.3, 3.75);
+            Add("claude-sonnet-4-0", 3.0, 15.0, 0.3, 3.75);
+            Add("claude-sonnet-4.0", 3.0, 15.0, 0.3, 3.75);
             Add("claude-3-7-sonnet", 3.0, 15.0, 0.3, 3.75);
+            Add("claude-3.7-sonnet", 3.0, 15.0, 0.3, 3.75);
             Add("claude-3-5-sonnet", 3.0, 15.0, 0.3, 3.75);
+            Add("claude-3.5-sonnet", 3.0, 15.0, 0.3, 3.75);
             Add("claude-haiku-4-5", 1.0, 5.0, 0.1, 1.25);
+            Add("claude-haiku-4.5", 1.0, 5.0, 0.1, 1.25);
             Add("claude-3-5-haiku", 0.8, 4.0, 0.08, 1.0);
+            Add("claude-3.5-haiku", 0.8, 4.0, 0.08, 1.0);
+            Add("claude-3-opus", 15.0, 75.0, 1.5, 18.75);
+            Add("claude-3-haiku", 0.25, 1.25, 0.03, 0.3);
 
             // OpenAI / Codex
+            Add("gpt-5.4-pro", 15.0, 60.0, 1.5, 0.0);
             Add("gpt-5.4", 2.5, 15.0, 0.25, 0.0);
+            Add("gpt-5.4-mini", 0.4, 1.6, 0.04, 0.0);
+            Add("gpt-5.4-nano", 0.1, 0.4, 0.01, 0.0);
             Add("gpt-5.3-codex", 1.75, 14.0, 0.175, 0.0);
             Add("gpt-5.2-codex", 1.75, 14.0, 0.175, 0.0);
             Add("gpt-5.2", 1.75, 14.0, 0.175, 0.0);
+            Add("gpt-5.1-codex-max", 1.25, 10.0, 0.125, 0.0);
             Add("gpt-5.1-codex", 1.25, 10.0, 0.125, 0.0);
+            Add("gpt-5.1-codex-mini", 0.25, 2.0, 0.025, 0.0);
             Add("gpt-5.1", 1.25, 10.0, 0.125, 0.0);
             Add("gpt-5-codex", 1.25, 10.0, 0.125, 0.0);
             Add("gpt-5", 1.25, 10.0, 0.125, 0.0);
             Add("gpt-5-mini", 0.25, 2.0, 0.025, 0.0);
+            Add("gpt-5-nano", 0.05, 0.4, 0.005, 0.0);
+            Add("codex-mini", 1.5, 6.0, 0.375, 0.0);
+            Add("codex-mini-latest", 1.5, 6.0, 0.375, 0.0);
             Add("gpt-4.1", 2.0, 8.0, 0.5, 0.0);
             Add("gpt-4.1-mini", 0.4, 1.6, 0.1, 0.0);
+            Add("gpt-4.1-nano", 0.1, 0.4, 0.025, 0.0);
             Add("gpt-4o", 2.5, 10.0, 1.25, 0.0);
             Add("gpt-4o-mini", 0.15, 0.6, 0.075, 0.0);
+            Add("o3-pro", 20.0, 80.0, 5.0, 0.0);
             Add("o3", 2.0, 8.0, 0.5, 0.0);
+            Add("o3-mini", 1.1, 4.4, 0.275, 0.0);
             Add("o4-mini", 1.1, 4.4, 0.275, 0.0);
+            Add("o1", 15.0, 60.0, 7.5, 0.0);
+            Add("o1-mini", 1.1, 4.4, 0.55, 0.0);
 
             // Google Gemini
             Add("gemini-3.1-pro", 2.0, 12.0, 0.2, 0.0);
+            Add("gemini-3.1-flash", 0.5, 3.0, 0.05, 0.0);
+            Add("gemini-3.1-flash-lite", 0.1, 0.4, 0.025, 0.0);
             Add("gemini-3-pro", 2.0, 12.0, 0.2, 0.0);
+            Add("gemini-3.0-pro", 2.0, 12.0, 0.2, 0.0);
             Add("gemini-3-flash", 0.5, 3.0, 0.05, 0.0);
+            Add("gemini-3.0-flash", 0.5, 3.0, 0.05, 0.0);
             Add("gemini-2.5-pro", 1.25, 10.0, 0.125, 0.0);
             Add("gemini-2.5-flash", 0.3, 2.5, 0.03, 0.0);
+            Add("gemini-2.5-flash-lite", 0.1, 0.4, 0.025, 0.0);
             Add("gemini-2.0-flash", 0.1, 0.4, 0.025, 0.0);
+            Add("gemini-2.0-flash-lite", 0.075, 0.3, 0.01875, 0.0);
 
-            // Zhipu GLM / Kimi / DeepSeek / Qwen / Mistral / Grok
+            // Zhipu GLM / Kimi / DeepSeek / MiniMax / Qwen / Doubao / Mistral / Grok
             Add("glm-5", 1.0, 3.2, 0.2, 0.0);
             Add("glm-4.7", 0.6, 2.2, 0.11, 0.0);
             Add("glm-4.6", 0.6, 2.2, 0.11, 0.0);
             Add("glm-4.5", 0.6, 2.2, 0.11, 0.0);
+            Add("glm-4.5-air", 0.2, 1.1, 0.03, 0.0);
+            Add("glm-4.5-flash", 0.1, 0.3, 0.01, 0.0);
             Add("kimi-k2.5", 0.6, 3.0, 0.1, 0.0);
+            Add("kimi-k2-thinking", 0.6, 2.5, 0.15, 0.0);
+            Add("kimi-k2-turbo", 0.6, 2.5, 0.15, 0.0);
             Add("kimi-k2", 0.6, 2.5, 0.15, 0.0);
-            Add("deepseek-v3.2", 0.28, 0.42, 0.028, 0.0);
-            Add("deepseek-chat", 0.27, 1.1, 0.07, 0.0);
+            Add("deepseek-r1", 0.55, 2.19, 0.14, 0.0);
             Add("deepseek-reasoner", 0.55, 2.19, 0.14, 0.0);
+            Add("deepseek-v3.2", 0.28, 0.42, 0.028, 0.0);
+            Add("deepseek-v3.1", 0.55, 1.67, 0.055, 0.0);
+            Add("deepseek-v3", 0.27, 1.1, 0.07, 0.0);
+            Add("deepseek-chat", 0.27, 1.1, 0.07, 0.0);
+            Add("minimax-m2.5", 0.3, 1.2, 0.03, 0.375);
+            Add("minimax-m2.5-highspeed", 0.3, 1.2, 0.03, 0.375);
+            Add("minimax-m2.1", 0.3, 1.2, 0.03, 0.375);
+            Add("minimax-m2", 0.3, 1.2, 0.03, 0.375);
+            Add("minimax-m1", 0.4, 2.2, 0.04, 0.0);
+            Add("qwen3.5-plus", 0.4, 1.2, 0.04, 0.0);
+            Add("qwen3.5-coder", 1.0, 4.0, 0.1, 0.0);
             Add("qwen3-coder-plus", 1.0, 5.0, 0.1, 0.0);
             Add("qwen3-coder", 0.3, 1.2, 0.03, 0.0);
+            Add("qwen3-coder-flash", 0.15, 0.6, 0.015, 0.0);
             Add("qwen3-max", 1.2, 6.0, 0.12, 0.0);
+            Add("qwen3-235b-a22b", 0.3, 1.2, 0.03, 0.0);
+            Add("qwen3-32b", 0.15, 0.6, 0.015, 0.0);
+            Add("qwq-32b", 0.15, 0.6, 0.015, 0.0);
             Add("qwen-max", 1.6, 6.4, 0.16, 0.0);
             Add("qwen-plus", 0.4, 1.2, 0.04, 0.0);
+            Add("doubao-seed-code", 0.15, 0.6, 0.03, 0.0);
+            Add("doubao-1.5-pro", 0.15, 0.6, 0.03, 0.0);
             Add("codestral", 0.3, 0.9, 0.03, 0.0);
             Add("devstral", 0.1, 0.3, 0.01, 0.0);
             Add("mistral-large", 2.0, 6.0, 0.2, 0.0);
@@ -643,15 +1141,21 @@ namespace TokLens
         {
             // Next-gen / harness-specific model IDs that may not yet exist in public registries
             Add("claude-fable-5-2", 8.0, 40.0, 0.2, 10.0);
+            Add("claude-fable-5.2", 8.0, 40.0, 0.2, 10.0);
             Add("claude-fable-5-1", 10.0, 50.0, 0.25, 12.5);
+            Add("claude-fable-5.1", 10.0, 50.0, 0.25, 12.5);
             Add("claude-fable-5", 10.0, 50.0, 1.0, 12.5);
             Add("claude-mythos-5", 10.0, 50.0, 1.0, 12.5);
             Add("claude-opus-5-5", 4.0, 20.0, 0.2, 5.0);
+            Add("claude-opus-5.5", 4.0, 20.0, 0.2, 5.0);
             Add("claude-opus-5", 5.0, 25.0, 0.5, 6.25);
             Add("claude-sonnet-5-5", 2.0, 10.0, 0.1, 2.5);
+            Add("claude-sonnet-5.5", 2.0, 10.0, 0.1, 2.5);
             Add("claude-sonnet-5", 2.0, 10.0, 0.2, 2.5);
             Add("claude-opus-4-8", 5.0, 25.0, 0.5, 6.25);
+            Add("claude-opus-4.8", 5.0, 25.0, 0.5, 6.25);
             Add("claude-opus-4-7", 5.0, 25.0, 0.5, 6.25);
+            Add("claude-opus-4.7", 5.0, 25.0, 0.5, 6.25);
 
             Add("gpt-6-astra", 10.0, 50.0, 1.0, 12.5);
             Add("gpt-6.1-sol", 2.0, 10.0, 0.1, 2.5);
@@ -659,9 +1163,22 @@ namespace TokLens
             Add("gpt-6.1-terra", 1.0, 5.0, 0.05, 1.25);
             Add("gpt-6-luna", 0.1, 0.5, 0.01, 0.125);
 
-            Add("gemini-4-carbon", 2.0, 10.0, 0.2, 0.0);
+            Add("gemini-4-carbon", 2.0, 10.0, 0.1, 0.0);
             Add("gemini-4-neon", 0.4, 2.0, 0.04, 0.0);
-            Add("orchestrator", 2.0, 10.0, 0.2, 0.0);
+            Add("gemini-4-argon", 2.0, 10.0, 0.1, 0.0);
+            Add("gemini-4-hydrogen", 1.5, 7.5, 0.075, 0.0);
+            Add("gemini-pro-orchestrator", 2.0, 10.0, 0.1, 0.0);
+            Add("orchestrator-carbon", 2.0, 10.0, 0.1, 0.0);
+            Add("orchestrator", 2.0, 10.0, 0.1, 0.0);
+            Add("gemini-flash-worker-agy", 0.75, 3.75, 0.075, 0.0);
+            Add("gemini-3.8-flash", 0.75, 3.75, 0.075, 0.0);
+            Add("gemini-3.8-flash-tiered", 0.4, 2.0, 0.04, 0.0);
+            Add("gemini-3.8-flash-low", 0.2, 1.0, 0.02, 0.0);
+            Add("gemini-3.5-flash-lite", 0.1, 0.4, 0.025, 0.0);
+            Add("gemini-3.1-flash", 0.3, 1.5, 0.03, 0.0);
+            Add("gemini-3.1-pro", 1.5, 8.0, 0.15, 0.0);
+            Add("qwen3.5-coder", 0.4, 1.6, 0.08, 0.0);
+            Add("qwen3.5-plus", 0.4, 1.2, 0.08, 0.0);
 
             Add("glm-5.3", 1.4, 4.4, 0.28, 0.0);
             Add("glm-5.3-flash", 0.1, 0.4, 0.02, 0.0);
@@ -669,11 +1186,17 @@ namespace TokLens
             Add("glm-5.1", 1.0, 3.2, 0.2, 0.0);
 
             Add("kimi-for-coding", 0.95, 4.0, 0.14, 0.0);
+            Add("kimi-k3.1-pro-highspeed", 4.0, 20.0, 0.2, 4.0);
+            Add("kimi-k3.1-pro", 2.0, 10.0, 0.2, 2.0);
+            Add("kimi-k2.7-code", 0.95, 4.0, 0.19, 0.0);
+            Add("kimi-k2.6", 0.95, 4.0, 0.16, 0.0);
             Add("k3", 1.2, 5.0, 0.18, 0.0);
             Add("k3-256k", 1.2, 5.0, 0.18, 0.0);
             Add("kimi-k3", 1.2, 5.0, 0.18, 0.0);
 
             Add("deepseek-v4.1-flash", 0.1, 0.4, 0.01, 0.0);
+            Add("deepseek-v4-pro", 0.66, 1.98, 0.022, 0.0);
+            Add("deepseek-v4-flash", 0.14, 0.28, 0.0028, 0.0);
             Add("deepseek-v4", 0.3, 1.2, 0.03, 0.0);
             Add("deepseek-flash", 0.07, 0.28, 0.007, 0.0);
             Add("workbuddy-default", 0.6, 2.4, 0.06, 0.0);
@@ -683,19 +1206,26 @@ namespace TokLens
         {
             try
             {
-                string fp = CloudPriceCachePath;
+                string fp = _isCustomHome
+                    ? Path.Combine(_homeDir, ".toklens", "pricing_cache.json")
+                    : CloudPriceCachePath;
                 if (!File.Exists(fp)) return;
                 long mtimeTicks = File.GetLastWriteTimeUtc(fp).Ticks;
 
                 lock (CacheLock)
                 {
-                    if (_memCloudRates == null || _memCloudCacheMtimeTicks != mtimeTicks)
+                    if (_memCloudRates == null ||
+                        _memCloudCacheMtimeTicks != mtimeTicks ||
+                        !string.Equals(_memCloudCachePath, fp, StringComparison.OrdinalIgnoreCase))
                     {
                         Dictionary<string, ModelRate> parsed = new Dictionary<string, ModelRate>(StringComparer.OrdinalIgnoreCase);
                         JavaScriptSerializer js = new JavaScriptSerializer();
                         js.MaxJsonLength = int.MaxValue;
                         Dictionary<string, object> root = js.DeserializeObject(File.ReadAllText(fp, Encoding.UTF8)) as Dictionary<string, object>;
-                        if (root != null)
+                        bool validSchema = root != null &&
+                                           root.ContainsKey("schema") &&
+                                           string.Equals(Convert.ToString(root["schema"], CultureInfo.InvariantCulture), "v2.2", StringComparison.Ordinal);
+                        if (validSchema)
                         {
                             if (root.ContainsKey("source") && root["source"] != null)
                                 _lastCloudSource = Convert.ToString(root["source"], CultureInfo.InvariantCulture);
@@ -723,26 +1253,47 @@ namespace TokLens
                         }
                         _memCloudRates = parsed;
                         _memCloudCacheMtimeTicks = mtimeTicks;
+                        _memCloudCachePath = fp;
                     }
 
                     if (_memCloudRates != null)
                     {
                         foreach (KeyValuePair<string, ModelRate> kv in _memCloudRates)
-                            _rates[kv.Key] = kv.Value;
+                        {
+                            ModelRate existing;
+                            if (_rates.TryGetValue(kv.Key, out existing))
+                            {
+                                // 保护内置官方直连单价免受第三方代理网关（如 +5% 手续费 $0.42 vs $0.40）微幅加价污染
+                                if (string.Equals(existing.Source, "builtin", StringComparison.OrdinalIgnoreCase) &&
+                                    existing.InputPerM > 0 && existing.OutputPerM > 0 &&
+                                    Math.Abs(existing.InputPerM - kv.Value.InputPerM) <= existing.InputPerM * 0.15 &&
+                                    Math.Abs(existing.OutputPerM - kv.Value.OutputPerM) <= existing.OutputPerM * 0.15)
+                                {
+                                    continue;
+                                }
+                                double crc = kv.Value.CacheReadPerM > 0 ? kv.Value.CacheReadPerM : (Math.Abs(existing.InputPerM - kv.Value.InputPerM) <= kv.Value.InputPerM * 0.25 ? existing.CacheReadPerM : 0.0);
+                                double cwc = kv.Value.CacheWritePerM > 0 ? kv.Value.CacheWritePerM : (Math.Abs(existing.InputPerM - kv.Value.InputPerM) <= kv.Value.InputPerM * 0.25 ? existing.CacheWritePerM : 0.0);
+                                _rates[kv.Key] = new ModelRate(kv.Value.InputPerM, kv.Value.OutputPerM, crc, cwc, "cloud");
+                            }
+                            else
+                            {
+                                _rates[kv.Key] = kv.Value;
+                            }
+                        }
                     }
                 }
             }
             catch { }
         }
 
-        private void LoadCustomPricing()
+        private void LoadCustomPricingFromFile(string fp)
         {
+            if (string.IsNullOrWhiteSpace(fp)) return;
             try
             {
-                string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-                string fp = Path.Combine(appData, "TokLens", "custom_prices.json");
                 if (!File.Exists(fp)) return;
                 JavaScriptSerializer js = new JavaScriptSerializer();
+                js.MaxJsonLength = int.MaxValue;
                 Dictionary<string, object> map = js.DeserializeObject(File.ReadAllText(fp, Encoding.UTF8)) as Dictionary<string, object>;
                 if (map == null) return;
                 foreach (KeyValuePair<string, object> kv in map)
@@ -753,11 +1304,114 @@ namespace TokLens
                     double oc = m.ContainsKey("output") ? Convert.ToDouble(m["output"], CultureInfo.InvariantCulture) : 0;
                     double crc = m.ContainsKey("cache_read") ? Convert.ToDouble(m["cache_read"], CultureInfo.InvariantCulture) : 0;
                     double cwc = m.ContainsKey("cache_write") ? Convert.ToDouble(m["cache_write"], CultureInfo.InvariantCulture) : 0;
-                    if (ic > 0 || oc > 0)
-                        _rates[kv.Key.ToLowerInvariant()] = new ModelRate(ic, oc, crc, cwc, "custom");
+                    if (ic >= 0 && oc >= 0 && (m.ContainsKey("input") || m.ContainsKey("output")))
+                    {
+                        ModelRate customRate = new ModelRate(ic, oc, crc, cwc, "custom");
+                        string rawKey = kv.Key.Trim().ToLowerInvariant();
+                        _rates[rawKey] = customRate;
+                        string normKey = NormalizeModelId(kv.Key, "");
+                        if (!string.IsNullOrEmpty(normKey))
+                            _rates[normKey] = customRate;
+                    }
                 }
             }
             catch { }
+        }
+
+        private void LoadCustomPricing()
+        {
+            try
+            {
+                if (_isCustomHome)
+                {
+                    if (!string.IsNullOrWhiteSpace(_homeDir))
+                    {
+                        LoadCustomPricingFromFile(Path.Combine(_homeDir, ".toklens", "custom_prices.json"));
+                    }
+                    return;
+                }
+
+                string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                if (!string.IsNullOrWhiteSpace(userProfile))
+                {
+                    LoadCustomPricingFromFile(Path.Combine(userProfile, ".toklens", "custom_prices.json"));
+                }
+                if (!string.IsNullOrWhiteSpace(_homeDir) &&
+                    !string.Equals(_homeDir.TrimEnd('\\', '/'), (userProfile ?? "").TrimEnd('\\', '/'), StringComparison.OrdinalIgnoreCase))
+                {
+                    LoadCustomPricingFromFile(Path.Combine(_homeDir, ".toklens", "custom_prices.json"));
+                }
+
+                string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+                if (!string.IsNullOrWhiteSpace(appData))
+                {
+                    LoadCustomPricingFromFile(Path.Combine(appData, "TokLens", "custom_prices.json"));
+                }
+            }
+            catch { }
+        }
+
+        private static bool IsFirstPartyProviderKey(string rawKey)
+        {
+            if (string.IsNullOrEmpty(rawKey)) return false;
+            int slash = rawKey.IndexOf('/');
+            if (slash < 0 && rawKey.IndexOf(':') < 0)
+                return true;
+            if (slash > 0)
+            {
+                string prov = rawKey.Substring(0, slash).ToLowerInvariant();
+                return prov == "anthropic" || prov == "openai" || prov == "google" || prov == "gemini" ||
+                       prov == "deepseek" || prov == "qwen" || prov == "moonshotai" || prov == "moonshot" ||
+                       prov == "z-ai" || prov == "zhipu" || prov == "minimax" || prov == "x-ai" || prov == "mistralai";
+            }
+            return false;
+        }
+
+        private static void UpsertMergedCloudRate(
+            Dictionary<string, double[]> merged,
+            Dictionary<string, int> mergedPriority,
+            string slug,
+            double ic,
+            double oc,
+            double crc,
+            double cwc,
+            int priority)
+        {
+            if (string.IsNullOrEmpty(slug) || slug.Length < 2) return;
+            double rIc = Math.Round(ic, 4);
+            double rOc = Math.Round(oc, 4);
+            double rCrc = Math.Round(crc, 4);
+            double rCwc = Math.Round(cwc, 4);
+
+            double[] prev;
+            if (!merged.TryGetValue(slug, out prev))
+            {
+                merged[slug] = new double[] { rIc, rOc, rCrc, rCwc };
+                mergedPriority[slug] = priority;
+                return;
+            }
+
+            int prevPrio = 0;
+            mergedPriority.TryGetValue(slug, out prevPrio);
+            bool similarInput = prev[0] > 0 && Math.Abs(prev[0] - rIc) <= Math.Max(prev[0], rIc) * 0.25;
+
+            if (priority < prevPrio)
+            {
+                if (similarInput)
+                {
+                    if (prev[2] <= 0 && rCrc > 0) prev[2] = rCrc;
+                    if (prev[3] <= 0 && rCwc > 0) prev[3] = rCwc;
+                }
+                return;
+            }
+
+            if (similarInput)
+            {
+                if (rCrc <= 0 && prev[2] > 0) rCrc = prev[2];
+                if (rCwc <= 0 && prev[3] > 0) rCwc = prev[3];
+            }
+            merged[slug] = new double[] { rIc, rOc, rCrc, rCwc };
+            mergedPriority[slug] = priority;
         }
 
         public static PricingSyncInfo SyncCloudPricing(bool forceRefresh)
@@ -770,7 +1424,11 @@ namespace TokLens
                     JavaScriptSerializer jsCheck = new JavaScriptSerializer();
                     jsCheck.MaxJsonLength = int.MaxValue;
                     Dictionary<string, object> old = jsCheck.DeserializeObject(File.ReadAllText(fp, Encoding.UTF8)) as Dictionary<string, object>;
-                    if (old != null && old.ContainsKey("ts_utc") && old.ContainsKey("models"))
+                    if (old != null &&
+                        old.ContainsKey("schema") &&
+                        string.Equals(Convert.ToString(old["schema"], CultureInfo.InvariantCulture), "v2.2", StringComparison.Ordinal) &&
+                        old.ContainsKey("ts_utc") &&
+                        old.ContainsKey("models"))
                     {
                         long tsUtc = Convert.ToInt64(old["ts_utc"], CultureInfo.InvariantCulture);
                         long nowUtc = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
@@ -792,6 +1450,7 @@ namespace TokLens
             try { ServicePointManager.SecurityProtocol |= (SecurityProtocolType)12288; } catch { }
 
             Dictionary<string, double[]> merged = new Dictionary<string, double[]>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, int> mergedPrio = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             List<string> sourcesOk = new List<string>();
             JavaScriptSerializer js = new JavaScriptSerializer();
             js.MaxJsonLength = int.MaxValue;
@@ -823,8 +1482,8 @@ namespace TokLens
                                 double crc = ParsePerTokenToMillion(item, "cache_read_input_token_cost");
                                 double cwc = ParsePerTokenToMillion(item, "cache_creation_input_token_cost");
                                 string slug = NormalizeModelId(kv.Key, "");
-                                if (slug.Length >= 2)
-                                    merged[slug] = new double[] { Math.Round(ic, 4), Math.Round(oc, 4), Math.Round(crc, 4), Math.Round(cwc, 4) };
+                                int prio = IsFirstPartyProviderKey(kv.Key) ? 20 : 10;
+                                UpsertMergedCloudRate(merged, mergedPrio, slug, ic, oc, crc, cwc, prio);
                             }
                             sourcesOk.Add("LiteLLM");
                             break;
@@ -860,8 +1519,8 @@ namespace TokLens
                                 double crc = ParsePerTokenToMillion(pr, "input_cache_read");
                                 double cwc = ParsePerTokenToMillion(pr, "input_cache_write");
                                 string slug = NormalizeModelId(rawId, "");
-                                if (slug.Length >= 2)
-                                    merged[slug] = new double[] { Math.Round(ic, 4), Math.Round(oc, 4), Math.Round(crc, 4), Math.Round(cwc, 4) };
+                                int prio = IsFirstPartyProviderKey(rawId) ? 25 : 15;
+                                UpsertMergedCloudRate(merged, mergedPrio, slug, ic, oc, crc, cwc, prio);
                             }
                             sourcesOk.Add("OpenRouter");
                         }
@@ -886,6 +1545,7 @@ namespace TokLens
                             if (provObj == null || !provObj.ContainsKey("models")) continue;
                             Dictionary<string, object> modelsObj = provObj["models"] as Dictionary<string, object>;
                             if (modelsObj == null) continue;
+                            bool firstPartyProv = IsFirstPartyProviderKey(provKv.Key + "/x");
                             foreach (KeyValuePair<string, object> mKv in modelsObj)
                             {
                                 Dictionary<string, object> mObj = mKv.Value as Dictionary<string, object>;
@@ -900,7 +1560,8 @@ namespace TokLens
                                 string slug = NormalizeModelId(mKv.Key, "");
                                 if (slug.Length >= 2)
                                 {
-                                    merged[slug] = new double[] { Math.Round(ic, 4), Math.Round(oc, 4), Math.Round(crc, 4), Math.Round(cwc, 4) };
+                                    int prio = firstPartyProv ? 30 : 18;
+                                    UpsertMergedCloudRate(merged, mergedPrio, slug, ic, oc, crc, cwc, prio);
                                     mdAdded++;
                                 }
                             }
@@ -921,6 +1582,7 @@ namespace TokLens
                     string fp = CloudPriceCachePath;
                     Directory.CreateDirectory(Path.GetDirectoryName(fp));
                     Dictionary<string, object> saveObj = new Dictionary<string, object>();
+                    saveObj["schema"] = "v2.2";
                     saveObj["source"] = srcJoined;
                     saveObj["updated_at"] = nowStr;
                     saveObj["ts_utc"] = nowUtc;
@@ -961,7 +1623,7 @@ namespace TokLens
             {
                 HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
                 req.Method = "GET";
-                req.UserAgent = "TokLens/2.1";
+                req.UserAgent = "TokLens/2.2";
                 req.Accept = "application/json";
                 req.Timeout = timeoutMs;
                 req.ReadWriteTimeout = timeoutMs;
@@ -985,7 +1647,25 @@ namespace TokLens
         public static string NormalizeModelId(string rawModel, string fallback)
         {
             if (string.IsNullOrWhiteSpace(rawModel)) return fallback;
-            string m = rawModel.Trim();
+            StringBuilder sbClean = null;
+            for (int i = 0; i < rawModel.Length; i++)
+            {
+                char ch = rawModel[i];
+                if (ch < ' ')
+                {
+                    if (sbClean == null)
+                    {
+                        sbClean = new StringBuilder(rawModel.Length);
+                        sbClean.Append(rawModel, 0, i);
+                    }
+                }
+                else if (sbClean != null)
+                {
+                    sbClean.Append(ch);
+                }
+            }
+            string m = (sbClean != null ? sbClean.ToString() : rawModel).Trim();
+            if (string.IsNullOrEmpty(m)) return fallback;
             if (m == "<synthetic>" || m == "agent-loop" || m == "unknown" || m == "none" || m == "null")
                 return fallback;
             int slashIdx = m.LastIndexOf('/');
@@ -1002,31 +1682,98 @@ namespace TokLens
             return string.IsNullOrEmpty(slug) ? fallback : slug;
         }
 
+        private static string ConvertClaudeVersionForm(string s)
+        {
+            if (string.IsNullOrEmpty(s) || !s.StartsWith("claude-", StringComparison.OrdinalIgnoreCase))
+                return null;
+            Match mDot = ClaudeDotVerRegex.Match(s);
+            if (mDot.Success)
+                return mDot.Groups[1].Value + "-" + mDot.Groups[2].Value;
+            Match mDash = ClaudeDashVerRegex.Match(s);
+            if (mDash.Success)
+                return mDash.Groups[1].Value + "." + mDash.Groups[2].Value + mDash.Groups[3].Value;
+            Match mLegDot = ClaudeLegacyDotRegex.Match(s);
+            if (mLegDot.Success)
+                return mLegDot.Groups[1].Value + "-" + mLegDot.Groups[2].Value;
+            Match mLegDash = ClaudeLegacyDashRegex.Match(s);
+            if (mLegDash.Success)
+                return mLegDash.Groups[1].Value + "." + mLegDash.Groups[2].Value;
+            return null;
+        }
+
+        private bool TryDirectOrClaudeAlias(string candidate, out ModelRate rate)
+        {
+            rate = null;
+            if (string.IsNullOrEmpty(candidate)) return false;
+            if (_rates.TryGetValue(candidate, out rate)) return true;
+            string alt = ConvertClaudeVersionForm(candidate);
+            if (!string.IsNullOrEmpty(alt) && _rates.TryGetValue(alt, out rate))
+                return true;
+            return false;
+        }
+
         private static bool IsPrefixBoundaryMatch(string text, string prefix)
         {
+            if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(prefix)) return false;
             if (!text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return false;
             if (text.Length == prefix.Length) return true;
             char next = text[prefix.Length];
-            return next == '-' || next == '.' || next == '_';
+            // Do not treat decimal point between digits (e.g. claude-opus-4 vs claude-opus-4.6) as a prefix boundary
+            if (next != '-' && next != '_') return false;
+
+            // Prevent base model prefixes (e.g. gpt-5.4 or deepseek-v4) from shadowing distinct sub-tiers (-mini, -nano, -flash, -lite, -air, -pro)
+            string rest = text.Substring(prefix.Length).ToLowerInvariant();
+            if (rest.Contains("-mini") || rest.Contains("_mini") ||
+                rest.Contains("-nano") || rest.Contains("_nano") ||
+                rest.Contains("-lite") || rest.Contains("_lite") ||
+                rest.Contains("-flash") || rest.Contains("_flash") ||
+                rest.Contains("-air") || rest.Contains("_air") ||
+                rest.Contains("-pro") || rest.Contains("_pro") ||
+                rest.Contains("-highspeed") || rest.Contains("_highspeed"))
+            {
+                return false;
+            }
+            return true;
         }
 
         public ModelRate Lookup(string rawModel)
         {
             string slug = NormalizeModelId(rawModel, "unknown");
             ModelRate r;
-            if (_rates.TryGetValue(slug, out r)) return r;
+            if (TryDirectOrClaudeAlias(slug, out r)) return r;
 
-            string stripped = TierSuffixRegex.Replace(slug, "");
-            if (_rates.TryGetValue(stripped, out r)) return r;
+            string cur = slug;
+            for (int iter = 0; iter < 6; iter++)
+            {
+                string next = TierSuffixRegex.Replace(cur, "");
+                if (!string.Equals(next, cur, StringComparison.Ordinal))
+                {
+                    cur = next;
+                    if (TryDirectOrClaudeAlias(cur, out r)) return r;
+                }
+                string nextNoDate = DateSuffixRegex.Replace(cur, "");
+                if (!string.Equals(nextNoDate, cur, StringComparison.Ordinal))
+                {
+                    cur = nextNoDate;
+                    if (TryDirectOrClaudeAlias(cur, out r)) return r;
+                }
+                else if (string.Equals(next, cur, StringComparison.Ordinal))
+                {
+                    break;
+                }
+            }
 
-            string noDate = DateSuffixRegex.Replace(stripped, "");
-            if (_rates.TryGetValue(noDate, out r)) return r;
+            string curAlt = ConvertClaudeVersionForm(cur);
+            string slugAlt = ConvertClaudeVersionForm(slug);
 
             string bestKey = null;
             foreach (string key in _rates.Keys)
             {
-                if (key.Length < 4) continue;
-                if (IsPrefixBoundaryMatch(slug, key) || IsPrefixBoundaryMatch(noDate, key))
+                if (key.Length < 2) continue;
+                if (IsPrefixBoundaryMatch(slug, key) ||
+                    IsPrefixBoundaryMatch(cur, key) ||
+                    (!string.IsNullOrEmpty(slugAlt) && IsPrefixBoundaryMatch(slugAlt, key)) ||
+                    (!string.IsNullOrEmpty(curAlt) && IsPrefixBoundaryMatch(curAlt, key)))
                 {
                     if (bestKey == null || key.Length > bestKey.Length)
                         bestKey = key;
@@ -1034,27 +1781,164 @@ namespace TokLens
             }
             if (bestKey != null) return _rates[bestKey];
 
-            if (slug.Contains("kimi") || slug.StartsWith("k3", StringComparison.Ordinal)) return _rates["kimi-for-coding"];
-            if (slug.Contains("glm")) return _rates[slug.Contains("flash") ? "glm-5.3-flash" : "glm-5.3"];
-            if (slug.Contains("deepseek")) return _rates[slug.Contains("flash") ? "deepseek-v4.1-flash" : "deepseek-v3.2"];
-            if (slug.Contains("qwen")) return _rates["qwen3-coder-plus"];
-            if (slug.Contains("devstral") || slug.Contains("codestral")) return _rates["devstral"];
-            if (slug.Contains("opus")) return _rates["claude-opus-5-5"];
+            if (slug.Contains("minimax")) return _rates["minimax-m2.5"];
+            if (slug.Contains("kimi") || slug.Contains("moonshot") || slug.StartsWith("k3", StringComparison.Ordinal))
+                return slug.Contains("k2") ? _rates["kimi-k2.5"] : _rates["kimi-for-coding"];
+            if (slug.Contains("glm"))
+                return slug.Contains("flash") ? _rates["glm-4.5-flash"] : (slug.Contains("air") ? _rates["glm-4.5-air"] : _rates["glm-5"]);
+            if (slug.Contains("deepseek"))
+            {
+                if (slug.Contains("r1") || slug.Contains("reasoner")) return _rates["deepseek-r1"];
+                return slug.Contains("flash") ? _rates["deepseek-v4.1-flash"] : _rates["deepseek-v3.2"];
+            }
+            if (slug.Contains("qwen") || slug.Contains("qwq"))
+                return slug.Contains("max") ? _rates["qwen3-max"] : _rates["qwen3-coder-plus"];
+            if (slug.Contains("doubao")) return _rates["doubao-seed-code"];
+            if (slug.Contains("devstral")) return _rates["devstral"];
+            if (slug.Contains("codestral")) return _rates["codestral"];
+            if (slug.Contains("opus")) return _rates["claude-opus-4-6"];
             if (slug.Contains("sonnet")) return _rates["claude-sonnet-4-6"];
             if (slug.Contains("haiku")) return _rates["claude-haiku-4-5"];
-            if (slug.Contains("gemini")) return _rates["gemini-4-carbon"];
-            if (slug.Contains("gpt") || slug.Contains("codex")) return _rates["gpt-5.2-codex"];
+            if (slug.Contains("gemini"))
+            {
+                if (slug.Contains("flash-lite") || slug.Contains("lite")) return _rates["gemini-2.5-flash-lite"];
+                if (slug.Contains("flash")) return _rates["gemini-2.5-flash"];
+                return _rates["gemini-2.5-pro"];
+            }
+            if (slug.Contains("gpt") || slug.Contains("codex"))
+            {
+                if (slug.Contains("nano")) return _rates["gpt-5-nano"];
+                if (slug.Contains("mini")) return _rates["gpt-5-mini"];
+                return _rates["gpt-5.2-codex"];
+            }
 
             return new ModelRate(1.0, 4.0, 0.1, 0.0, "fallback");
         }
 
+        private static void ApplyLongContextTierIfApplicable(
+            string normModel,
+            ModelRate baseRate,
+            long avgPromptTokens,
+            out double effIn,
+            out double effOut,
+            out double effCr,
+            out double effCw)
+        {
+            effIn = baseRate.InputPerM;
+            effOut = baseRate.OutputPerM;
+            effCr = baseRate.CacheReadPerM;
+            effCw = baseRate.CacheWritePerM;
+
+            if (avgPromptTokens <= 200000L || string.Equals(baseRate.Source, "custom", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            if (normModel.StartsWith("gemini-2.5-pro", StringComparison.Ordinal) ||
+                normModel.StartsWith("gemini-3-pro", StringComparison.Ordinal) ||
+                normModel.StartsWith("gemini-3.0-pro", StringComparison.Ordinal) ||
+                normModel.StartsWith("gemini-3.1-pro", StringComparison.Ordinal))
+            {
+                effIn = baseRate.InputPerM * 2.0;
+                effOut = baseRate.OutputPerM * 1.5;
+                effCr = baseRate.CacheReadPerM * 2.0;
+            }
+            else if (normModel.StartsWith("claude-sonnet-4", StringComparison.Ordinal) ||
+                     normModel.StartsWith("claude-4-sonnet", StringComparison.Ordinal) ||
+                     normModel.StartsWith("claude-4.5-sonnet", StringComparison.Ordinal) ||
+                     normModel.StartsWith("claude-4.6-sonnet", StringComparison.Ordinal))
+            {
+                effIn = baseRate.InputPerM * 2.0;
+                effOut = baseRate.OutputPerM * 1.5;
+                effCr = baseRate.CacheReadPerM * 2.0;
+                effCw = baseRate.CacheWritePerM * 2.0;
+            }
+        }
+
         public void ComputeCost(string model, long fi, long outTok, long cr, long cw, double loggedUsd, out double actualUsd, out double baselineUsd, out ModelRate rate)
         {
+            ComputeBucketCost(model, 1, fi, outTok, cr, cw, loggedUsd, out actualUsd, out baselineUsd, out rate);
+        }
+
+        public void ComputeBucketCost(string model, int turns, long fi, long outTok, long cr, long cw, double loggedUsd, out double actualUsd, out double baselineUsd, out ModelRate rate)
+        {
+            ComputeBucketCost(model, turns, fi, outTok, cr, cw, 0L, loggedUsd, out actualUsd, out baselineUsd, out rate);
+        }
+
+        public void ComputeBucketCost(string model, int turns, long fi, long outTok, long cr, long cw, long cw1h, double loggedUsd, out double actualUsd, out double baselineUsd, out ModelRate rate)
+        {
             rate = Lookup(model);
-            double calc = (fi * rate.InputPerM + outTok * rate.OutputPerM + cr * rate.CacheReadPerM + cw * rate.CacheWritePerM) / 1000000.0;
-            double baseCost = ((fi + cr + cw) * rate.InputPerM + outTok * rate.OutputPerM) / 1000000.0;
-            actualUsd = loggedUsd > 0.0 ? loggedUsd : calc;
+            int safeTurns = turns > 0 ? turns : 1;
+            long safeFi = fi > 0L ? fi : 0L;
+            long safeOut = outTok > 0L ? outTok : 0L;
+            long safeCr = cr > 0L ? cr : 0L;
+            long safeCw = cw > 0L ? cw : 0L;
+            long safeCw1h = cw1h > 0L ? (cw1h > safeCw ? safeCw : cw1h) : 0L;
+            long safeCw5m = safeCw - safeCw1h;
+
+            double totalPromptD = (double)safeFi + (double)safeCr + (double)safeCw;
+            long avgPrompt = (long)Math.Min((double)long.MaxValue, totalPromptD / safeTurns);
+            string norm = NormalizeModelId(model, "");
+
+            double effIn, effOut, effCr, effCw;
+            ApplyLongContextTierIfApplicable(norm, rate, avgPrompt, out effIn, out effOut, out effCr, out effCw);
+
+            // Anthropic 1 小时缓存写入按 2.0x Input 计费（区别于 5 分钟缓存写入 1.25x）
+            double effCw1h = string.Equals(rate.Source, "custom", StringComparison.OrdinalIgnoreCase)
+                ? effCw
+                : Math.Max(effCw, effIn * 2.0);
+
+            double calc = ((double)safeFi * effIn + (double)safeOut * effOut + (double)safeCr * effCr + (double)safeCw5m * effCw + (double)safeCw1h * effCw1h) / 1000000.0;
+            if (double.IsNaN(calc) || double.IsInfinity(calc) || calc < 0.0) calc = 0.0;
+            else if (calc > 1000000000000.0) calc = 1000000000000.0;
+
+            double baseCost = (totalPromptD * effIn + (double)safeOut * effOut) / 1000000.0;
+            if (double.IsNaN(baseCost) || double.IsInfinity(baseCost) || baseCost < 0.0) baseCost = 0.0;
+            else if (baseCost > 1000000000000.0) baseCost = 1000000000000.0;
+
+            bool validLogged = loggedUsd > 0.0 && loggedUsd <= 1000000000.0 && !double.IsNaN(loggedUsd) && !double.IsInfinity(loggedUsd);
+            actualUsd = validLogged ? loggedUsd : calc;
             baselineUsd = baseCost > actualUsd ? baseCost : actualUsd;
+        }
+
+        public void RecalculateRemoteSnapshot(NodeSnapshot snap)
+        {
+            if (snap == null || snap.Records == null) return;
+            for (int i = 0; i < snap.Records.Count; i++)
+            {
+                RecordBucket r = snap.Records[i];
+                if (r == null || r.TotalTokens <= 0) continue;
+
+                ModelRate rate = Lookup(r.Model);
+                bool isCustom = string.Equals(rate.Source, "custom", StringComparison.OrdinalIgnoreCase);
+                bool missingCost = r.CostUsd <= 0.0;
+                string trimmedLabel = r.RateLabel != null ? r.RateLabel.Trim() : "";
+                bool wasFallbackRate = string.IsNullOrEmpty(trimmedLabel) ||
+                                       string.Equals(trimmedLabel, "$1 / $4", StringComparison.Ordinal);
+                bool hasBetterLocalRate = !string.Equals(rate.Source, "fallback", StringComparison.OrdinalIgnoreCase);
+
+                if (isCustom || missingCost || (wasFallbackRate && hasBetterLocalRate))
+                {
+                    double actualUsd, baseUsd;
+                    ModelRate appliedRate;
+                    ComputeBucketCost(r.Model, r.Turns, r.FreshInput, r.Output, r.CacheRead, r.CacheWrite, 0.0, out actualUsd, out baseUsd, out appliedRate);
+                    r.CostUsd = actualUsd;
+                    r.BaselineUsd = baseUsd;
+                    r.RateLabel = appliedRate.Label;
+                }
+            }
+        }
+
+        /// <summary>返回当前价格库内所有合法模型标识（已排序），供平替模拟器自定义搜索选择器使用。</summary>
+        public List<string> GetAllModelIds()
+        {
+            List<string> list = new List<string>(_rates.Count);
+            foreach (string key in _rates.Keys)
+            {
+                if (string.IsNullOrWhiteSpace(key)) continue;
+                if (key.StartsWith("__", StringComparison.Ordinal)) continue;
+                list.Add(key);
+            }
+            list.Sort(StringComparer.OrdinalIgnoreCase);
+            return list;
         }
     }
 
@@ -1210,7 +2094,7 @@ namespace TokLens
             {
                 HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
                 req.Method = "GET";
-                req.UserAgent = "TokLens/2.1";
+                req.UserAgent = "TokLens/2.2";
                 req.Accept = "application/json";
                 req.Timeout = timeoutMs;
                 req.ReadWriteTimeout = timeoutMs;

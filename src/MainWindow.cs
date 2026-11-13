@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
@@ -6,32 +7,34 @@ using System.Globalization;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
+using System.Web.Script.Serialization;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Data;
+using System.Windows.Documents;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
-using System.Windows.Shapes;
+using System.Windows.Shell;
 using System.Windows.Threading;
+using Shapes = System.Windows.Shapes;
 using Drawing = System.Drawing;
 using WinForms = System.Windows.Forms;
 
-[assembly: AssemblyTitle("知微 TokLens")]
-[assembly: AssemblyDescription("多设备与 Linux VPS AI Token 实时监控与账单透镜（绿色便携单文件版）")]
-[assembly: AssemblyCompany("TokLens Local-First")]
-[assembly: AssemblyProduct("知微 · TokLens v2.1")]
-[assembly: AssemblyCopyright("Copyright © 2026 TokLens")]
-[assembly: AssemblyVersion("2.1.0.0")]
-[assembly: AssemblyFileVersion("2.1.0.0")]
+// 程序集版本与元数据（知微 · TokLens v2.2 / 2.2.0.0）已集中声明于 src\AssemblyInfo.cs，避免全目录 *.cs 编译产生 CS0579 重复特性。
 
 namespace TokLens
 {
     internal static class Program
     {
+        private const string SingleInstanceMutexName = @"Local\TokLens_GUI_SingleInstance";
+        private const string SingleInstanceActivateEventName = @"Local\TokLens_GUI_ActivateEvent";
+
         [DllImport("user32.dll")]
         private static extern bool SetProcessDpiAwarenessContext(IntPtr dpiFlag);
 
@@ -65,6 +68,7 @@ namespace TokLens
             string exportHtml = null;
             bool requireFullAccess = false;
             bool selfTestUi = false;
+            bool startMinimized = false;
             bool customCliRate = false;
             double cliRate = ExchangeRateService.DefaultRate;
 
@@ -92,7 +96,7 @@ namespace TokLens
                     else if (string.Equals(a, "--rate", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
                     {
                         double r;
-                        if (double.TryParse(args[++i], NumberStyles.Any, CultureInfo.InvariantCulture, out r) && r > 0)
+                        if (double.TryParse(args[++i], NumberStyles.Any, CultureInfo.InvariantCulture, out r) && r > 0.0)
                         {
                             cliRate = r;
                             customCliRate = true;
@@ -106,13 +110,20 @@ namespace TokLens
                     {
                         selfTestUi = true;
                     }
+                    else if (string.Equals(a, "--minimized", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(a, "-minimized", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(a, "/minimized", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(a, "--background", StringComparison.OrdinalIgnoreCase))
+                    {
+                        startMinimized = true;
+                    }
                 }
 
                 if (selfTestUi)
                 {
                     try
                     {
-                        Application testApp = new Application();
+                        Application testApp = Application.Current ?? new Application();
                         MainWindow testWin = new MainWindow(homeDir, true);
                         testWin.RunHeadlessUiSelfTest();
                         return 0;
@@ -121,12 +132,9 @@ namespace TokLens
                     {
                         if (!string.IsNullOrEmpty(exportJson))
                         {
-                            try { File.WriteAllText(exportJson, ex.ToString()); } catch { }
+                            try { File.WriteAllText(exportJson, ex.ToString(), new UTF8Encoding(false)); } catch { }
                         }
-                        else
-                        {
-                            Console.Error.WriteLine(ex.ToString());
-                        }
+                        try { Console.Error.WriteLine(ex.ToString()); } catch { }
                         return 3;
                     }
                 }
@@ -148,60 +156,215 @@ namespace TokLens
                         SyncConfig cfg = SyncService.LoadConfig();
                         TokenScanner scanner = new TokenScanner(homeDir, cfg.ScanLocalWsl);
                         ScanResult res = scanner.Run();
+                        PricingEngine pricing = new PricingEngine(homeDir);
 
                         NodeSnapshot localSnap = SyncService.BuildLocalSnapshot(res, cfg);
+                        ApplyNodeAliasToSnapshot(localSnap, cfg);
+
                         List<NodeSnapshot> remoteSnaps = SyncService.LoadCachedRemoteNodes(cfg.MachineId);
-                        List<RecordBucket> mergedRows = new List<RecordBucket>(localSnap.Records);
+                        List<RecordBucket> mergedRows = new List<RecordBucket>(localSnap.Records.Count + 64);
+                        mergedRows.AddRange(localSnap.Records);
+
                         for (int r = 0; r < remoteSnaps.Count; r++)
                         {
-                            if (remoteSnaps[r].Records != null)
-                                mergedRows.AddRange(remoteSnaps[r].Records);
+                            NodeSnapshot rs = remoteSnaps[r];
+                            if (rs == null) continue;
+                            pricing.RecalculateRemoteSnapshot(rs);
+                            ApplyNodeAliasToSnapshot(rs, cfg);
+                            if (rs.Records != null)
+                                mergedRows.AddRange(rs.Records);
                         }
 
                         if (!string.IsNullOrEmpty(exportJson))
-                            FormatterUtil.ExportSummaryJson(res, cliRate, rateSrc, exportJson);
+                            MainWindow.WriteMergedSummaryJson(res, mergedRows, 1 + remoteSnaps.Count, cliRate, rateSrc, exportJson);
                         if (!string.IsNullOrEmpty(exportCsv))
                             FormatterUtil.ExportCsv(mergedRows, cliRate, exportCsv);
                         if (!string.IsNullOrEmpty(exportHtml))
                             HtmlExporter.ExportHtmlReport(mergedRows, res, cliRate, exportHtml);
 
-                        if (requireFullAccess && res.Warnings.Count > 0)
+                        if (requireFullAccess && res.Warnings != null && res.Warnings.Count > 0)
                             return 2;
                         return 0;
                     }
                     catch (Exception ex)
                     {
+                        try { Console.Error.WriteLine(ex.ToString()); } catch { }
                         if (!string.IsNullOrEmpty(exportJson))
                         {
-                            try { File.WriteAllText(exportJson + ".err.txt", ex.ToString()); } catch { }
+                            try { File.WriteAllText(exportJson + ".err.txt", ex.ToString(), new UTF8Encoding(false)); } catch { }
                         }
                         return 1;
                     }
                 }
+
+                int cliExitCode;
+                if (CliRunner.TryHandleCommandLine(args, out cliExitCode))
+                {
+                    return cliExitCode;
+                }
             }
 
+            // GUI 模式：单实例互斥锁 + 跨进程唤醒（允许从最小化或系统托盘瞬间恢复置顶）
+            bool createdNew = true;
+            Mutex instanceMutex = null;
+            try
+            {
+                instanceMutex = new Mutex(true, SingleInstanceMutexName, out createdNew);
+            }
+            catch
+            {
+                createdNew = true;
+            }
+
+            if (!createdNew)
+            {
+                try
+                {
+                    using (EventWaitHandle wakeEvt = new EventWaitHandle(false, EventResetMode.AutoReset, SingleInstanceActivateEventName))
+                    {
+                        wakeEvt.Set();
+                    }
+                }
+                catch { }
+                if (instanceMutex != null)
+                {
+                    try { instanceMutex.Dispose(); } catch { }
+                }
+                return 0;
+            }
+
+            WindowsShellIntegration.TryEnablePerMonitorDpiAwareness();
             TryEnableDpiAwareness();
             try { WinForms.Application.EnableVisualStyles(); } catch { }
 
-            Application app = new Application();
-            MainWindow win = new MainWindow(homeDir, false);
-            app.Run(win);
-            return 0;
+            EventWaitHandle listenEvt = null;
+            ManualResetEvent stopWakeThreadEvt = new ManualResetEvent(false);
+
+            try
+            {
+                Application app = new Application();
+                MainWindow win = new MainWindow(homeDir, false);
+                if (startMinimized)
+                {
+                    win.WindowState = WindowState.Minimized;
+                    win.ShowInTaskbar = false;
+                }
+
+                try
+                {
+                    listenEvt = new EventWaitHandle(false, EventResetMode.AutoReset, SingleInstanceActivateEventName);
+                    Thread wakeThread = new Thread(delegate()
+                    {
+                        WaitHandle[] handles = new WaitHandle[] { listenEvt, stopWakeThreadEvt };
+                        while (true)
+                        {
+                            int signaled;
+                            try
+                            {
+                                signaled = WaitHandle.WaitAny(handles);
+                            }
+                            catch
+                            {
+                                break;
+                            }
+                            if (signaled != 0)
+                                break;
+                            try
+                            {
+                                win.Dispatcher.BeginInvoke(new Action(delegate()
+                                {
+                                    win.RestoreAndActivateFromTray();
+                                }));
+                            }
+                            catch { }
+                        }
+                    });
+                    wakeThread.IsBackground = true;
+                    wakeThread.Name = "TokLens-SingleInstanceWake";
+                    wakeThread.Start();
+                }
+                catch { }
+
+                app.Run(win);
+                return 0;
+            }
+            finally
+            {
+                try { stopWakeThreadEvt.Set(); } catch { }
+                if (listenEvt != null)
+                {
+                    try { listenEvt.Dispose(); } catch { }
+                }
+                try { stopWakeThreadEvt.Dispose(); } catch { }
+                if (instanceMutex != null)
+                {
+                    try { instanceMutex.ReleaseMutex(); } catch { }
+                    try { instanceMutex.Dispose(); } catch { }
+                }
+            }
+        }
+
+        internal static void ApplyNodeAliasToSnapshot(NodeSnapshot snap, SyncConfig cfg)
+        {
+            if (snap == null || cfg == null || cfg.NodeAliases == null || string.IsNullOrEmpty(snap.MachineId))
+                return;
+            string alias;
+            if (cfg.NodeAliases.TryGetValue(snap.MachineId, out alias) && !string.IsNullOrWhiteSpace(alias))
+            {
+                string trimmed = alias.Trim();
+                snap.MachineName = trimmed;
+                if (snap.Records != null)
+                {
+                    for (int i = 0; i < snap.Records.Count; i++)
+                    {
+                        if (snap.Records[i] != null)
+                            snap.Records[i].MachineName = trimmed;
+                    }
+                }
+            }
         }
     }
 
     public sealed class MainWindow : Window
     {
-        private static readonly string[] ToolPalette = new string[]
+        // 十一大独立全高旗舰视图索引
+        private const int ViewOverview = 0;
+        private const int ViewLiveStream = 1;
+        private const int ViewModels = 2;
+        private const int ViewProjects = 3;
+        private const int ViewInsights = 4;
+        private const int ViewWhatIf = 5;
+        private const int ViewBloat = 6;
+        private const int ViewDevices = 7;
+        private const int ViewDailyExport = 8;
+        private const int ViewDoctor = 9;
+        private const int ViewSettings = 10;
+        private const int TotalViewCount = 11;
+
+        private const double SidebarExpandedWidth = 200.0;
+        private const double SidebarCollapsedWidth = 58.0;
+        private const double TopBarLockedHeight = 48.0;
+
+        private static readonly int[] PresetRangeDays = new int[] { 1, 3, 7, 30, 0 };
+
+        private static readonly string[] ViewTitles = new string[]
         {
-            "#38BDF8", "#818CF8", "#34D399", "#FBBF24", "#F472B6",
-            "#FB7185", "#A78BFA", "#2DD4BF", "#F97316", "#60A5FA",
-            "#A3E635", "#E879F9"
+            "概览看板",
+            "实时请求流",
+            "模型与工具账单",
+            "项目与工作区归因",
+            "智算洞察与 FinOps",
+            "模型平替成本模拟器",
+            "上下文膨胀显微镜",
+            "设备与 VPS 集群",
+            "每日流水与导出",
+            "AI 环境体检医生",
+            "同步与设置"
         };
 
-        private static readonly int[] PresetRangeDays = new int[] { 0, 30, 7, 3, 1 };
-
+        // 核心运行状态与配置
         private string _homeDir;
+        private readonly bool _skipAutoScan;
         private SyncConfig _syncCfg;
         private ScanResult _scanResult;
         private NodeSnapshot _localNode;
@@ -212,93 +375,223 @@ namespace TokLens
         private double _usdToCny = ExchangeRateService.DefaultRate;
         private string _fxSource = "内置默认";
         private string _fxUpdatedAt = "";
+        private bool _fxIsLive = false;
         private bool _fxIsSyncing = false;
+
         private bool _priceIsSyncing = false;
         private string _priceSyncSource = "内置+云端缓存";
         private string _priceSyncTime = "";
+
         private bool _cloudSyncRunning = false;
+        private bool _cloudHasAttempted = false;
+        private bool _cloudLastOk = true;
         private string _lastSyncStatus = "";
 
         private bool _suppressRateEvent = false;
         private bool _suppressCustomDaysEvent = false;
-        private int _rangeDays = 0;
-        private bool _rankByCost = true;
-        private bool _leftRankByMachine = false;
+
+        // 筛选与视图状态
+        private int _activeView = ViewOverview;
+        private bool _sidebarCollapsed = false;
+        private int _rangeDays = 1;
+        private string _selectedDate = null;
         private string _selectedTool = null;
         private string _selectedMachineId = null;
-        private int _activeTab = 0; // 0 = live requests, 1 = models, 2 = machines, 3 = daily, 4 = methodology
-        private bool _isScanning = false;
-        private bool _pendingRescan = false;
+
+        private bool _rankByCost = true;
+        private bool _leftRankByMachine = false;
+        private bool _chartLineMode = true;
+
+        private bool _livePaused = false;
+        private int _pausedBufferedCount = 0;
+        private bool _hasUnreadLivePulse = false;
         private long _lastTopRequestTs = 0L;
 
-        // Real-time background watchers & timers
+        private string _liveSearchQuery = "";
+        private string _modelSearchQuery = "";
+        private string _dailySearchQuery = "";
+
+        // 并发安全扫描合并标志
+        private bool _isScanning = false;
+        private bool _pendingRescan = false;
+        private bool _pendingForceUi = false;
+        private bool _pendingTriggerCloud = false;
+
+        // 实时监听与后台定时器
         private readonly List<FileSystemWatcher> _watchers = new List<FileSystemWatcher>();
+        private readonly HashSet<string> _watchedDirPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        private int _watcherTickCounter = 0;
         private DispatcherTimer _fsDebounceTimer;
         private DispatcherTimer _livePulseTimer;
         private DispatcherTimer _cloudAutoTimer;
         private DispatcherTimer _cloudDebounceTimer;
 
-        // Layout regions (kept for pixel-stability assertions)
-        private Border _headerBarBorder;
-        private Border _deviceStripBorder;
-        private Border _warningBanner;
-        private TextBlock _warningText;
+        // 系统托盘与桌面集成（悬浮胶囊 HUD、全局热键、预算守卫）
+        private Drawing.Icon _nativeExeIcon;
+        private WinForms.NotifyIcon _trayIcon;
+        private WinForms.ContextMenuStrip _trayMenu;
+        private WinForms.ToolStripMenuItem _trayTodaySummaryItem;
+        private WinForms.ToolStripMenuItem _trayHudToggleItem;
+        private WinForms.ToolStripMenuItem _trayMinimizeToggleItem;
+        private bool _explicitExitRequested = false;
+        private bool _trayHintShownOnce = false;
+        private MiniHudWindow _miniHud;
+        private GlobalHotkeyHost _globalHotkey;
+        private readonly BudgetGuardService _budgetGuard = new BudgetGuardService();
 
-        // Header controls
+        // 布局核心骨架（供 0.0px 零跳动无头自测断言）与全局命令面板覆盖层
+        private Border _rootShellBorder;
+        private ToastManager _toastManager;
+        private CommandPaletteOverlay _commandPalette;
+        private ColumnDefinition _sidebarColDef;
+        private Border _sidebarBorder;
+        private Border _topContextBarBorder;
+        private Button _maxCaptionBtn;
+        private Shapes.Path _maxCaptionPath;
+
+        // 左侧导航栏控件
+        private StackPanel _brandTextPanel;
+        private Shapes.Ellipse _sidebarPulseDot;
+        private Border _sidebarBrandHitBox;
+        private Border[] _navItemBorders;
+        private Border[] _navActiveBars;
+        private TextBlock[] _navTitleLabels;
+        private Shapes.Ellipse _navLiveNewDot;
+        private Border _navDeviceCountBadge;
+        private TextBlock _navDeviceCountText;
+        private TextBlock _navSyncSubText;
+        private Border _sidebarDataPanel;
+        private TextBlock _sidebarPriceText;
+        private Button _sidebarPriceRefreshBtn;
+        private Shapes.Ellipse _sidebarFxDot;
+        private TextBox _rateInput;
+        private Button _sidebarFxRefreshBtn;
+        private Button _themeToggleBtn;
+        private Shapes.Path _themeToggleIcon;
+        private Button _sidebarRefreshBtn;
+        private Button _sidebarHudBtn;
+        private Button _sidebarHelpBtn;
+        private Button _sidebarCollapseBtn;
+
+        // 顶栏上下文与全局筛选控件
+        private TextBlock _viewTitleText;
+        private TextBlock _viewSubContextText;
+        private Border _inlineAlertBadge;
+        private TextBlock _inlineAlertText;
+        private StackPanel _globalFilterGroup;
+        private StackPanel _settingsHeaderActions;
+        private Button _autoStartToggleBtn;
+        private Button _deviceSelectorBtn;
+        private Shapes.Ellipse _deviceSelectorDot;
+        private TextBlock _deviceSelectorText;
         private Button[] _rangeBtns;
         private TextBox _customDaysInput;
         private Button[] _currencyBtns;
-        private TextBox _rateInput;
-        private TextBlock _fxStatusBtnText;
-        private Border _fxStatusBtnBorder;
-        private Button _syncBtn;
-        private Button _refreshBtn;
-        private Button _moreBtn;
-        private MenuItem _themeMenuItem;
+        private Button _exportMenuBtn;
 
-        // Device Rail controls
-        private StackPanel _devicePillsStack;
-        private ScrollViewer _deviceScroll;
+        // 十一大全高视图根节点与专项分析引擎视图
+        private Grid _workspaceHostGrid;
+        private UIElement[] _viewPages;
+        private ProjectAttributionView _projectView;
+        private InsightsView _insightsView;
+        private WhatIfSimulatorView _whatIfView;
+        private SessionBloatAnalyzerView _bloatView;
+        private DiagnosticsDoctorView _doctorView;
+        private SyncSettingsView _settingsView;
+        private bool _doctorLoadedOnce = false;
 
-        // KPI elements
+        // 视图 0（概览看板）控件
         private TextBlock _kpiCostVal;
+        private Border _kpiTodayPill;
+        private TextBlock _kpiTodayPillText;
         private TextBlock _kpiCostSub;
+        private Border _kpiBudgetBarHost;
+        private Border _kpiBudgetBarFill;
+        private Border _kpiCardCost;
+
         private TextBlock _kpiTokVal;
         private TextBlock _kpiTokSub;
+        private ColumnDefinition _tokSegInputCol;
+        private ColumnDefinition _tokSegCacheCol;
+        private ColumnDefinition _tokSegOutputCol;
+
         private TextBlock _kpiHitVal;
         private TextBlock _kpiHitSub;
+
         private TextBlock _kpiSaveVal;
         private TextBlock _kpiSaveSub;
+        private Border _kpiSavePctBadge;
+        private TextBlock _kpiSavePctText;
 
-        // Middle Insights controls
         private Button[] _leftModeBtns;
-        private Button[] _metricBtns;
-        private StackPanel _toolsStack;
         private Button _clearFilterBtn;
+        private StackPanel _toolsStack;
+
         private TextBlock _trendTitleText;
-        private TextBlock _trendHoverText;
+        private Border _selectedDatePill;
+        private TextBlock _selectedDatePillText;
+        private Button[] _chartTypeBtns;
+        private Button[] _metricBtns;
+        private Grid _chartInteractiveHost;
         private Canvas _chartCanvas;
-        private Border _chartHost;
+        private Canvas _chartOverlayCanvas;
+        private Shapes.Line _chartCrosshairLine;
+        private Shapes.Ellipse _chartHoverDot;
+        private Border _chartFloatingCard;
+        private TextBlock _chartFloatingDateText;
+        private TextBlock _chartFloatingPrimaryText;
+        private TextBlock _chartFloatingSubText;
         private List<DailyRowView> _currentDailyAsc = new List<DailyRowView>();
 
-        // Bottom Table controls
-        private Button[] _tabBtns;
-        private Button _methodologyLinkBtn;
-        private DataGrid _liveGrid;
-        private DataGrid _modelGrid;
-        private DataGrid _machineGrid;
-        private DataGrid _dailyGrid;
-        private FrameworkElement _aboutPanel;
+        private TextBlock _overviewLiveTickerText;
+        private DataGrid _overviewLiveGrid;
+        private Border _overviewLiveEmpty;
 
-        // Bottom Status Bar controls
-        private Ellipse _statusPulseDot;
-        private TextBlock _statusLeftText;
-        private TextBlock _statusLiveTickerText;
-        private Border _statusLiveTickerBorder;
-        private TextBlock _statusPriceText;
-        private Border _statusPriceBorder;
-        private TextBlock _statusCloudText;
-        private Border _statusCloudBorder;
+        // 视图 1（实时请求流）控件与右侧单笔账单透视抽屉
+        private TextBox _liveSearchInput;
+        private Button _liveClearFilterBtn;
+        private Button _livePauseBtn;
+        private Shapes.Path _livePauseIcon;
+        private TextBlock _livePauseBtnText;
+        private Button _toggleInspectorBtn;
+        private TextBlock _liveStreamSummaryText;
+        private DataGrid _liveGrid;
+        private Border _liveEmptyOverlay;
+        private TextBlock _liveEmptyTitle;
+        private ColumnDefinition _requestInspectorGapCol;
+        private RequestInspectorPanel _requestInspector;
+
+        // 视图 2（模型与工具账单）控件
+        private Grid _modelStackedBarGrid;
+        private WrapPanel _modelLegendWrap;
+        private TextBox _modelSearchInput;
+        private TextBlock _modelCountSummaryText;
+        private DataGrid _modelGrid;
+        private Border _modelEmptyOverlay;
+
+        // 视图 7（设备与 VPS 集群）控件
+        private StackPanel _deviceCardsStack;
+        private TextBlock _deviceClusterSummaryText;
+        private DataGrid _machineGrid;
+
+        // 视图 8（每日流水与导出）控件
+        private TextBox _dailySearchInput;
+        private TextBlock _dailyFilteredSummaryText;
+        private DataGrid _dailyGrid;
+        private Border _dailyEmptyOverlay;
+
+        // 缓存的最新视图列表供导出、单价工作台、专项分析与桌面 HUD 复用
+        private List<MachineRowView> _latestMachineViews = new List<MachineRowView>();
+        private List<RecordBucket> _latestExportBuckets = new List<RecordBucket>();
+        private List<RecordBucket> _latestSpecialistMachineRows = new List<RecordBucket>();
+        private List<RecordBucket> _latestSpecialistActiveRows = new List<RecordBucket>();
+        private List<RecordBucket> _latestFullHistoryMachineRows = new List<RecordBucket>();
+        private List<RecordBucket> _latestFullHistoryScopedRows = new List<RecordBucket>();
+        private List<string> _latestUniqueModelNames = new List<string>();
+        private string _latestReferenceDate = "";
+        private string _latestHudModelTps = "等待新请求";
+        private double _latestTodayUsd = 0.0;
+        private long _latestTodayTokens = 0L;
 
         public MainWindow(string initialHomeDir) : this(initialHomeDir, false)
         {
@@ -306,49 +599,81 @@ namespace TokLens
 
         public MainWindow(string initialHomeDir, bool skipAutoScan)
         {
-            _homeDir = initialHomeDir;
-            _syncCfg = SyncService.LoadConfig();
-            _remoteNodes = SyncService.LoadCachedRemoteNodes(_syncCfg.MachineId);
+            _homeDir = string.IsNullOrWhiteSpace(initialHomeDir)
+                ? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile)
+                : initialHomeDir;
+            _skipAutoScan = skipAutoScan;
 
-            Title = "知微 · TokLens v2.1 — 多设备与 VPS AI Token 实时监控与账单透镜";
+            _syncCfg = SyncService.LoadConfig();
+            if (_syncCfg.NodeAliases == null)
+                _syncCfg.NodeAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            _isDark = _syncCfg.IsDarkTheme;
+            _isCny = _syncCfg.PreferCny;
+
+            _remoteNodes = LoadAndRecalculateRemoteNodes(_syncCfg.MachineId, _homeDir, _syncCfg);
+
+            Title = AppConstants.ProductTitle + " — 多设备与 VPS AI Token 实时监控与账单透镜";
 
             bool recentCache;
             ExchangeRateInfo initFx = ExchangeRateService.LoadCachedOrDefault(out recentCache);
             _usdToCny = initFx.Rate;
             _fxSource = initFx.Source;
             _fxUpdatedAt = initFx.UpdatedAt;
+            _fxIsLive = initFx.IsLive;
 
             Rect workArea = SystemParameters.WorkArea;
-            Width = Math.Min(1360.0, Math.Max(1020.0, workArea.Width * 0.92));
-            Height = Math.Min(880.0, Math.Max(680.0, workArea.Height * 0.90));
-            MinWidth = 1000.0;
+            Width = Math.Min(1400.0, Math.Max(1060.0, workArea.Width * 0.92));
+            Height = Math.Min(900.0, Math.Max(700.0, workArea.Height * 0.90));
+            MinWidth = 1020.0;
             MinHeight = 660.0;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
-            FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI, sans-serif");
+            ResizeMode = ResizeMode.CanResize;
+            FontFamily = DesignSystem.FontUi;
             UseLayoutRounding = true;
             SnapsToDevicePixels = true;
 
             TryLoadExeIcon();
-            ApplyThemeResources();
+            DesignSystem.ApplyTheme(this, _isDark);
             SetResourceReference(Window.BackgroundProperty, "BgWindow");
             SetResourceReference(Window.ForegroundProperty, "FgPrimary");
 
-            Content = BuildLayout();
-            UpdateFxBadgeUi(initFx.IsLive, false);
-            UpdatePriceBadgeUi(false);
-            UpdateCloudStatusUi();
+            Content = BuildRootShellLayout();
 
-            if (!skipAutoScan)
+            ModernWindowChrome.Attach(
+                this,
+                _rootShellBorder,
+                _maxCaptionBtn,
+                _maxCaptionPath,
+                TopBarLockedHeight,
+                delegate() { return _isDark; });
+
+            PreviewKeyDown += OnMainWindowPreviewKeyDown;
+            Closing += OnMainWindowClosing;
+
+            UpdateFxUiState(_fxIsLive, false);
+            UpdatePriceUiState(false);
+            UpdateCloudStatusUi();
+            SwitchActiveView(ViewOverview);
+
+            if (!_skipAutoScan)
             {
-                // 0ms Instant UI Hydration from SQLite Snapshot Store (Zero Modal / Zero Blank Screen!)
+                InitializeSystemTray();
+
+                // 0ms 秒开：从本地 SQLite 快照库直接水合首屏数据（零遮罩、零白屏）
                 ScanResult instantSnap = LocalUsageStore.TryLoadInstantSnapshot(_homeDir);
                 if (instantSnap != null)
                 {
                     _scanResult = instantSnap;
                     _localNode = SyncService.BuildLocalSnapshot(instantSnap, _syncCfg);
+                    Program.ApplyNodeAliasToSnapshot(_localNode, _syncCfg);
                     if (instantSnap.RecentRequests != null && instantSnap.RecentRequests.Count > 0)
                         _lastTopRequestTs = instantSnap.RecentRequests[0].TimestampMs;
-                    UpdatePriceBadgeUi(false);
+                    UpdatePriceUiState(false);
+                    RefreshDashboardView();
+                }
+                else
+                {
                     RefreshDashboardView();
                 }
 
@@ -357,21 +682,309 @@ namespace TokLens
             }
         }
 
+        private static List<NodeSnapshot> LoadAndRecalculateRemoteNodes(string localMachineId, string homeDir, SyncConfig cfg)
+        {
+            List<NodeSnapshot> nodes = SyncService.LoadCachedRemoteNodes(localMachineId);
+            if (nodes == null) return new List<NodeSnapshot>();
+            try
+            {
+                PricingEngine pe = new PricingEngine(homeDir);
+                for (int i = 0; i < nodes.Count; i++)
+                {
+                    if (nodes[i] == null) continue;
+                    pe.RecalculateRemoteSnapshot(nodes[i]);
+                    Program.ApplyNodeAliasToSnapshot(nodes[i], cfg);
+                }
+            }
+            catch { }
+            return nodes;
+        }
+
         private void OnMainWindowLoaded(object sender, RoutedEventArgs e)
         {
             SetupRealtimeWatchersAndTimers();
+            try
+            {
+                _globalHotkey = new GlobalHotkeyHost(this, delegate()
+                {
+                    OnGlobalHotkeyTriggered();
+                });
+            }
+            catch { }
+
+            Task.Run(delegate()
+            {
+                try { WindowsShellIntegration.SyncAutoStartPathIfRegistered(); } catch { }
+                try { BackupAndMigrationService.EnsureDailyAutoBackup(); } catch { }
+            });
+
             RunSilentScanAsync(_homeDir, true, _scanResult == null);
             StartExchangeRateSyncAsync(false);
             StartCloudPricingSyncAsync(false);
         }
 
+        private void OnMainWindowClosing(object sender, CancelEventArgs e)
+        {
+            if (_skipAutoScan || _explicitExitRequested)
+                return;
+
+            if (_syncCfg != null && _syncCfg.MinimizeToTray && _trayIcon != null)
+            {
+                e.Cancel = true;
+                Hide();
+                if (!_trayHintShownOnce)
+                {
+                    _trayHintShownOnce = true;
+                    try
+                    {
+                        _trayIcon.BalloonTipTitle = AppConstants.ProductTitle;
+                        _trayIcon.BalloonTipText = "已最小化至系统托盘继续静默监控实时 Token 账单。双击托盘图标或按 Ctrl+Alt+T 可随时唤起。";
+                        _trayIcon.ShowBalloonTip(2500);
+                    }
+                    catch { }
+                }
+            }
+        }
+
         private void OnMainWindowClosed(object sender, EventArgs e)
         {
+            if (_globalHotkey != null)
+            {
+                try { _globalHotkey.Dispose(); } catch { }
+                _globalHotkey = null;
+            }
+            if (_miniHud != null)
+            {
+                try { _miniHud.Close(); } catch { }
+                _miniHud = null;
+            }
             DisposeWatchers();
             if (_fsDebounceTimer != null) _fsDebounceTimer.Stop();
             if (_livePulseTimer != null) _livePulseTimer.Stop();
             if (_cloudAutoTimer != null) _cloudAutoTimer.Stop();
             if (_cloudDebounceTimer != null) _cloudDebounceTimer.Stop();
+            DisposeSystemTray();
+        }
+
+        public void RestoreAndActivateFromTray()
+        {
+            try
+            {
+                if (!IsVisible)
+                    Show();
+                if (WindowState == WindowState.Minimized)
+                    WindowState = WindowState.Normal;
+                Activate();
+                Topmost = true;
+                Topmost = false;
+                Focus();
+            }
+            catch { }
+        }
+
+        private void InitializeSystemTray()
+        {
+            try
+            {
+                _trayMenu = new WinForms.ContextMenuStrip();
+
+                WinForms.ToolStripMenuItem openItem = new WinForms.ToolStripMenuItem("打开 知微 · TokLens 主界面");
+                openItem.Font = new Drawing.Font(openItem.Font, Drawing.FontStyle.Bold);
+                openItem.Click += delegate(object s, EventArgs e)
+                {
+                    Dispatcher.BeginInvoke(new Action(RestoreAndActivateFromTray));
+                };
+                _trayMenu.Items.Add(openItem);
+
+                _trayTodaySummaryItem = new WinForms.ToolStripMenuItem("今日实时: 计算中...");
+                _trayTodaySummaryItem.Enabled = false;
+                _trayMenu.Items.Add(_trayTodaySummaryItem);
+
+                _trayMenu.Items.Add(new WinForms.ToolStripSeparator());
+
+                WinForms.ToolStripMenuItem syncRefreshItem = new WinForms.ToolStripMenuItem("立即扫描并同步多端数据");
+                syncRefreshItem.Click += delegate(object s, EventArgs e)
+                {
+                    Dispatcher.BeginInvoke(new Action(delegate()
+                    {
+                        RunSilentScanAsync(_homeDir, true, true);
+                    }));
+                };
+                _trayMenu.Items.Add(syncRefreshItem);
+
+                _trayHudToggleItem = new WinForms.ToolStripMenuItem("显示 / 隐藏桌面悬浮胶囊 (Ctrl+M)");
+                _trayHudToggleItem.Click += delegate(object s, EventArgs e)
+                {
+                    Dispatcher.BeginInvoke(new Action(delegate()
+                    {
+                        ToggleMiniHudWindow();
+                    }));
+                };
+                _trayMenu.Items.Add(_trayHudToggleItem);
+
+                WinForms.ToolStripMenuItem guideItem = new WinForms.ToolStripMenuItem("快捷键与 GitHub 令牌原理解析 (F1)");
+                guideItem.Click += delegate(object s, EventArgs e)
+                {
+                    Dispatcher.BeginInvoke(new Action(delegate()
+                    {
+                        RestoreAndActivateFromTray();
+                        OpenShortcutAndGuideDialog(1);
+                    }));
+                };
+                _trayMenu.Items.Add(guideItem);
+
+                _trayMinimizeToggleItem = new WinForms.ToolStripMenuItem("关闭窗口时最小化到系统托盘");
+                _trayMinimizeToggleItem.Checked = _syncCfg != null && _syncCfg.MinimizeToTray;
+                _trayMinimizeToggleItem.Click += delegate(object s, EventArgs e)
+                {
+                    Dispatcher.BeginInvoke(new Action(delegate()
+                    {
+                        if (_syncCfg == null) return;
+                        _syncCfg.MinimizeToTray = !_syncCfg.MinimizeToTray;
+                        _trayMinimizeToggleItem.Checked = _syncCfg.MinimizeToTray;
+                        SyncService.SaveConfig(_syncCfg);
+                        if (_settingsView != null) _settingsView.ReloadFromConfig();
+                        ShowToastSafe(
+                            _syncCfg.MinimizeToTray ? "已开启关闭最小化至托盘" : "已关闭最小化至托盘",
+                            _syncCfg.MinimizeToTray ? "点击右上角关闭按钮时将后台常驻系统托盘" : "点击右上角关闭按钮将直接退出程序",
+                            "info");
+                    }));
+                };
+                _trayMenu.Items.Add(_trayMinimizeToggleItem);
+
+                _trayMenu.Items.Add(new WinForms.ToolStripSeparator());
+
+                WinForms.ToolStripMenuItem exitItem = new WinForms.ToolStripMenuItem("彻底退出 TokLens");
+                exitItem.Click += delegate(object s, EventArgs e)
+                {
+                    Dispatcher.BeginInvoke(new Action(delegate()
+                    {
+                        _explicitExitRequested = true;
+                        Close();
+                    }));
+                };
+                _trayMenu.Items.Add(exitItem);
+
+                _trayIcon = new WinForms.NotifyIcon();
+                _trayIcon.Icon = _nativeExeIcon ?? Drawing.SystemIcons.Application;
+                _trayIcon.ContextMenuStrip = _trayMenu;
+                _trayIcon.Text = TruncateTrayText(AppConstants.ProductTitle + " · 实时监控中");
+                _trayIcon.Visible = true;
+                _trayIcon.DoubleClick += delegate(object s, EventArgs e)
+                {
+                    Dispatcher.BeginInvoke(new Action(RestoreAndActivateFromTray));
+                };
+            }
+            catch { }
+        }
+
+        private static string TruncateTrayText(string raw)
+        {
+            if (string.IsNullOrEmpty(raw)) return "TokLens v2.2";
+            // .NET Framework 4.x NotifyIcon.Text 严格要求长度 < 64，截断保护在 60 字符以内
+            if (raw.Length <= 60) return raw;
+            return raw.Substring(0, 59) + "…";
+        }
+
+        private void UpdateSystemTrayStats(double todayUsd, long todayTokens)
+        {
+            _latestTodayUsd = todayUsd;
+            _latestTodayTokens = todayTokens;
+            if (_trayIcon == null) return;
+            try
+            {
+                string money = FormatterUtil.FormatMoney(todayUsd, _isCny, _usdToCny);
+                string tok = FormatterUtil.FormatTokens(todayTokens);
+                string tip = string.Format(CultureInfo.InvariantCulture, "知微 TokLens · 今日 {0} ({1})", money, tok);
+                _trayIcon.Text = TruncateTrayText(tip);
+
+                if (_trayTodaySummaryItem != null)
+                {
+                    _trayTodaySummaryItem.Text = string.Format(CultureInfo.InvariantCulture, "今日花费: {0}  |  Token: {1}", money, tok);
+                }
+                if (_trayMinimizeToggleItem != null && _syncCfg != null)
+                {
+                    _trayMinimizeToggleItem.Checked = _syncCfg.MinimizeToTray;
+                }
+            }
+            catch { }
+        }
+
+        private void DisposeSystemTray()
+        {
+            if (_trayIcon != null)
+            {
+                try
+                {
+                    _trayIcon.Visible = false;
+                    _trayIcon.Dispose();
+                }
+                catch { }
+                _trayIcon = null;
+            }
+            if (_trayMenu != null)
+            {
+                try { _trayMenu.Dispose(); } catch { }
+                _trayMenu = null;
+            }
+            if (_nativeExeIcon != null)
+            {
+                try { _nativeExeIcon.Dispose(); } catch { }
+                _nativeExeIcon = null;
+            }
+        }
+
+        private void TryLoadExeIcon()
+        {
+            try
+            {
+                string exePath = Process.GetCurrentProcess().MainModule.FileName;
+                Drawing.Icon ico = Drawing.Icon.ExtractAssociatedIcon(exePath);
+                if (ico != null)
+                {
+                    _nativeExeIcon = ico;
+                    Icon = Imaging.CreateBitmapSourceFromHIcon(
+                        ico.Handle,
+                        Int32Rect.Empty,
+                        BitmapSizeOptions.FromEmptyOptions());
+                }
+            }
+            catch { }
+        }
+
+        private static bool IsSameDirectoryPath(string a, string b)
+        {
+            if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b))
+                return string.Equals(a ?? "", b ?? "", StringComparison.OrdinalIgnoreCase);
+            try
+            {
+                string na = Path.GetFullPath(a.Trim()).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                string nb = Path.GetFullPath(b.Trim()).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                return string.Equals(na, nb, StringComparison.OrdinalIgnoreCase);
+            }
+            catch
+            {
+                return string.Equals(a.Trim(), b.Trim(), StringComparison.OrdinalIgnoreCase);
+            }
+        }
+
+        private static bool IsRelevantUsageFilePath(string fullPath)
+        {
+            if (string.IsNullOrEmpty(fullPath)) return false;
+            string lower = fullPath.ToLowerInvariant();
+            if (lower.EndsWith(".jsonl", StringComparison.Ordinal) ||
+                lower.EndsWith(".json", StringComparison.Ordinal) ||
+                lower.EndsWith(".sqlite", StringComparison.Ordinal) ||
+                lower.EndsWith(".sqlite3", StringComparison.Ordinal) ||
+                lower.EndsWith(".db", StringComparison.Ordinal) ||
+                lower.EndsWith(".vscdb", StringComparison.Ordinal) ||
+                lower.EndsWith("-wal", StringComparison.Ordinal) ||
+                lower.EndsWith(".log", StringComparison.Ordinal) ||
+                lower.EndsWith(".md", StringComparison.Ordinal))
+            {
+                return true;
+            }
+            return false;
         }
 
         private void SetupRealtimeWatchersAndTimers()
@@ -384,24 +997,27 @@ namespace TokLens
                 RunSilentScanAsync(_homeDir, false, false);
             };
 
-            // Lightweight 4-second live pulse so active SQLite WAL / unbuffered streams update TPS & tokens dynamically
             _livePulseTimer = new DispatcherTimer();
             _livePulseTimer.Interval = TimeSpan.FromSeconds(4);
             _livePulseTimer.Tick += delegate(object s, EventArgs args)
             {
+                _watcherTickCounter++;
+                if (_watcherTickCounter % 8 == 0)
+                {
+                    EnsureCandidateWatchersAttached(_homeDir);
+                }
                 if (!_isScanning)
                     RunSilentScanAsync(_homeDir, false, false);
             };
             _livePulseTimer.Start();
 
-            // Cloud sync debounce (35s after local usage changes) + periodic 5-minute pull/push
             _cloudDebounceTimer = new DispatcherTimer();
             _cloudDebounceTimer.Interval = TimeSpan.FromSeconds(35);
             _cloudDebounceTimer.Tick += delegate(object s, EventArgs args)
             {
                 _cloudDebounceTimer.Stop();
                 if (_syncCfg != null && _syncCfg.AutoSync && _syncCfg.IsConfigured)
-                    StartBackgroundCloudSync();
+                    StartBackgroundCloudSync(false);
             };
 
             _cloudAutoTimer = new DispatcherTimer();
@@ -409,55 +1025,145 @@ namespace TokLens
             _cloudAutoTimer.Tick += delegate(object s, EventArgs args)
             {
                 if (_syncCfg != null && _syncCfg.AutoSync && _syncCfg.IsConfigured)
-                    StartBackgroundCloudSync();
+                    StartBackgroundCloudSync(false);
             };
             _cloudAutoTimer.Start();
 
             RebuildDirectoryWatchers(_homeDir);
         }
 
+        private List<string> BuildWatchCandidateDirectories(string targetHome)
+        {
+            List<string> candidates = new List<string>(24);
+            if (!string.IsNullOrWhiteSpace(targetHome))
+            {
+                string[] homeRelDirs = new string[]
+                {
+                    ".claude",
+                    ".codex",
+                    ".gemini",
+                    ".zcode",
+                    ".kimi-code",
+                    ".workbuddy",
+                    ".openclaw",
+                    ".qwen",
+                    ".aider",
+                    ".continue",
+                    ".opencode",
+                    ".factory",
+                    ".amp",
+                    ".cline",
+                    ".roo"
+                };
+                for (int i = 0; i < homeRelDirs.Length; i++)
+                {
+                    try { candidates.Add(Path.Combine(targetHome, homeRelDirs[i])); } catch { }
+                }
+
+                string roaming = Path.Combine(targetHome, "AppData", "Roaming");
+                string[] ideRelDirs = new string[]
+                {
+                    @"Code\User\globalStorage",
+                    @"Code - Insiders\User\globalStorage",
+                    @"Cursor\User\globalStorage",
+                    @"Windsurf\User\globalStorage",
+                    @"Trae\User\globalStorage",
+                    @"VSCodium\User\globalStorage"
+                };
+                for (int i = 0; i < ideRelDirs.Length; i++)
+                {
+                    try { candidates.Add(Path.Combine(roaming, ideRelDirs[i])); } catch { }
+                }
+            }
+            return candidates;
+        }
+
         private void RebuildDirectoryWatchers(string targetHome)
         {
             DisposeWatchers();
-            string[] relDirs = new string[]
-            {
-                ".claude",
-                ".codex",
-                ".gemini",
-                ".zcode",
-                ".kimi-code",
-                ".workbuddy",
-                ".openclaw",
-                ".qwen"
-            };
+            EnsureCandidateWatchersAttached(targetHome);
+        }
 
-            for (int i = 0; i < relDirs.Length; i++)
+        private void EnsureCandidateWatchersAttached(string targetHome)
+        {
+            List<string> candidates = BuildWatchCandidateDirectories(targetHome);
+            for (int i = 0; i < candidates.Count; i++)
             {
-                string dir = System.IO.Path.Combine(targetHome, relDirs[i]);
+                string dir = candidates[i];
+                if (string.IsNullOrEmpty(dir) || _watchedDirPaths.Contains(dir))
+                    continue;
+
                 try
                 {
                     if (!Directory.Exists(dir)) continue;
+
                     FileSystemWatcher fsw = new FileSystemWatcher(dir);
                     fsw.IncludeSubdirectories = true;
+                    fsw.InternalBufferSize = 65536;
                     fsw.NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName;
+
                     FileSystemEventHandler onFsChange = delegate(object s, FileSystemEventArgs ev)
+                    {
+                        if (ev == null || !IsRelevantUsageFilePath(ev.FullPath))
+                            return;
+                        TriggerWatcherDebounceOnUi();
+                    };
+
+                    RenamedEventHandler onFsRenamed = delegate(object s, RenamedEventArgs ev)
+                    {
+                        if (ev == null || (!IsRelevantUsageFilePath(ev.FullPath) && !IsRelevantUsageFilePath(ev.OldFullPath)))
+                            return;
+                        TriggerWatcherDebounceOnUi();
+                    };
+
+                    string capturedDir = dir;
+                    ErrorEventHandler onFsError = delegate(object s, ErrorEventArgs errEv)
                     {
                         Dispatcher.BeginInvoke(new Action(delegate()
                         {
-                            if (_fsDebounceTimer != null)
+                            try
                             {
-                                _fsDebounceTimer.Stop();
-                                _fsDebounceTimer.Start();
+                                _watchedDirPaths.Remove(capturedDir);
+                                FileSystemWatcher broken = s as FileSystemWatcher;
+                                if (broken != null)
+                                {
+                                    _watchers.Remove(broken);
+                                    try { broken.EnableRaisingEvents = false; broken.Dispose(); } catch { }
+                                }
+                                EnsureCandidateWatchersAttached(_homeDir);
+                                RunSilentScanAsync(_homeDir, false, false);
                             }
+                            catch { }
                         }));
                     };
+
                     fsw.Changed += onFsChange;
                     fsw.Created += onFsChange;
+                    fsw.Renamed += onFsRenamed;
+                    fsw.Error += onFsError;
                     fsw.EnableRaisingEvents = true;
+
                     _watchers.Add(fsw);
+                    _watchedDirPaths.Add(dir);
                 }
                 catch { }
             }
+        }
+
+        private void TriggerWatcherDebounceOnUi()
+        {
+            try
+            {
+                Dispatcher.BeginInvoke(new Action(delegate()
+                {
+                    if (_fsDebounceTimer != null)
+                    {
+                        _fsDebounceTimer.Stop();
+                        _fsDebounceTimer.Start();
+                    }
+                }));
+            }
+            catch { }
         }
 
         private void DisposeWatchers()
@@ -472,6 +1178,281 @@ namespace TokLens
                 catch { }
             }
             _watchers.Clear();
+            _watchedDirPaths.Clear();
+        }
+
+        private void RunSilentScanAsync(string targetHome, bool forceUiRefresh, bool triggerCloudSyncIfEnabled)
+        {
+            if (_isScanning)
+            {
+                _pendingRescan = true;
+                _pendingForceUi = _pendingForceUi || forceUiRefresh;
+                _pendingTriggerCloud = _pendingTriggerCloud || triggerCloudSyncIfEnabled;
+                return;
+            }
+
+            _isScanning = true;
+            if (_sidebarRefreshBtn != null && forceUiRefresh)
+                _sidebarRefreshBtn.IsEnabled = false;
+
+            bool scanWsl = _syncCfg != null && _syncCfg.ScanLocalWsl;
+            SyncConfig cfgSnapshot = _syncCfg != null ? _syncCfg.Clone() : SyncService.LoadConfig();
+
+            Task.Run(delegate()
+            {
+                try
+                {
+                    TokenScanner scanner = new TokenScanner(targetHome, scanWsl);
+                    ScanResult res = scanner.Run();
+                    NodeSnapshot localSnap = SyncService.BuildLocalSnapshot(res, cfgSnapshot);
+                    Program.ApplyNodeAliasToSnapshot(localSnap, cfgSnapshot);
+
+                    Dispatcher.BeginInvoke(new Action(delegate()
+                    {
+                        bool staleHome = !IsSameDirectoryPath(targetHome, _homeDir);
+                        _isScanning = false;
+                        if (_sidebarRefreshBtn != null)
+                            _sidebarRefreshBtn.IsEnabled = true;
+
+                        if (!staleHome)
+                        {
+                            long topTs = (res.RecentRequests != null && res.RecentRequests.Count > 0)
+                                ? res.RecentRequests[0].TimestampMs
+                                : 0L;
+                            bool hasChanges = forceUiRefresh ||
+                                              _scanResult == null ||
+                                              res.ChangedFilesCount > 0 ||
+                                              topTs != _lastTopRequestTs;
+
+                            bool gotNewTopRequest = _lastTopRequestTs > 0L && topTs > _lastTopRequestTs;
+                            _scanResult = res;
+                            _localNode = localSnap;
+                            _lastTopRequestTs = topTs;
+                            UpdatePriceUiState(false);
+
+                            if (gotNewTopRequest)
+                            {
+                                if (_livePaused)
+                                    _pausedBufferedCount++;
+                                if (_activeView != ViewLiveStream)
+                                {
+                                    _hasUnreadLivePulse = true;
+                                    if (_navLiveNewDot != null)
+                                        _navLiveNewDot.Visibility = Visibility.Visible;
+                                }
+                            }
+
+                            if (hasChanges)
+                            {
+                                RefreshDashboardView();
+                                if (_settingsView != null)
+                                    _settingsView.RefreshDynamicStats();
+
+                                if (res.ChangedFilesCount > 0 && _cloudDebounceTimer != null)
+                                {
+                                    _cloudDebounceTimer.Stop();
+                                    _cloudDebounceTimer.Start();
+                                }
+                            }
+                            else
+                            {
+                                UpdateTopSubContextText();
+                            }
+
+                            if (triggerCloudSyncIfEnabled && _syncCfg != null && _syncCfg.AutoSync && _syncCfg.IsConfigured)
+                            {
+                                StartBackgroundCloudSync(false);
+                            }
+                        }
+
+                        if (_pendingRescan)
+                        {
+                            bool nextForce = _pendingForceUi;
+                            bool nextCloud = _pendingTriggerCloud;
+                            _pendingRescan = false;
+                            _pendingForceUi = false;
+                            _pendingTriggerCloud = false;
+                            RunSilentScanAsync(_homeDir, nextForce, nextCloud);
+                        }
+                    }));
+                }
+                catch
+                {
+                    Dispatcher.BeginInvoke(new Action(delegate()
+                    {
+                        _isScanning = false;
+                        if (_sidebarRefreshBtn != null)
+                            _sidebarRefreshBtn.IsEnabled = true;
+
+                        if (_pendingRescan)
+                        {
+                            bool nextForce = _pendingForceUi;
+                            bool nextCloud = _pendingTriggerCloud;
+                            _pendingRescan = false;
+                            _pendingForceUi = false;
+                            _pendingTriggerCloud = false;
+                            RunSilentScanAsync(_homeDir, nextForce, nextCloud);
+                        }
+                    }));
+                }
+            });
+        }
+
+        private void StartBackgroundCloudSync(bool manualTrigger)
+        {
+            if (_cloudSyncRunning || _localNode == null || _syncCfg == null || !_syncCfg.IsConfigured)
+                return;
+
+            _cloudSyncRunning = true;
+            UpdateCloudStatusUi();
+
+            SyncConfig cfgCopy = _syncCfg.Clone();
+            NodeSnapshot localCopy = _localNode.Clone();
+            string homeSnapshot = _homeDir;
+
+            Task.Run(delegate()
+            {
+                SyncOutcome outcome = SyncService.SyncNow(cfgCopy, localCopy, false);
+                if (outcome != null && outcome.RemoteNodes != null)
+                {
+                    try
+                    {
+                        PricingEngine pe = new PricingEngine(homeSnapshot);
+                        for (int i = 0; i < outcome.RemoteNodes.Count; i++)
+                        {
+                            if (outcome.RemoteNodes[i] != null)
+                                pe.RecalculateRemoteSnapshot(outcome.RemoteNodes[i]);
+                        }
+                    }
+                    catch { }
+                }
+
+                Dispatcher.BeginInvoke(new Action(delegate()
+                {
+                    _cloudSyncRunning = false;
+                    _cloudHasAttempted = true;
+                    _cloudLastOk = outcome != null && outcome.Success;
+                    _lastSyncStatus = outcome != null ? (outcome.Message ?? "") : "同步未返回状态";
+
+                    if (outcome != null && outcome.RemoteNodes != null)
+                    {
+                        for (int i = 0; i < outcome.RemoteNodes.Count; i++)
+                        {
+                            Program.ApplyNodeAliasToSnapshot(outcome.RemoteNodes[i], _syncCfg);
+                        }
+                        _remoteNodes = outcome.RemoteNodes;
+                    }
+
+                    UpdateCloudStatusUi();
+                    RefreshDashboardView();
+                    if (_settingsView != null)
+                        _settingsView.RefreshDynamicStats();
+
+                    if (manualTrigger)
+                    {
+                        if (_cloudLastOk)
+                            ShowToastSafe("多端云同步完成", _lastSyncStatus, "success");
+                        else
+                            ShowToastSafe("云端同步遇到问题", _lastSyncStatus, "warning");
+                    }
+                }));
+            });
+        }
+
+        private void StartCloudPricingSyncAsync(bool forceRefresh)
+        {
+            if (_priceIsSyncing) return;
+            _priceIsSyncing = true;
+            UpdatePriceUiState(true);
+
+            Task.Run(delegate()
+            {
+                PricingSyncInfo info = PricingEngine.SyncCloudPricing(forceRefresh);
+                Dispatcher.BeginInvoke(new Action(delegate()
+                {
+                    _priceIsSyncing = false;
+                    if (info != null)
+                    {
+                        _priceSyncSource = info.Source;
+                        _priceSyncTime = info.UpdatedAt;
+                    }
+                    UpdatePriceUiState(false);
+
+                    // 使用最新价格库重算远端缓存快照与本机账单
+                    if (_remoteNodes != null && _remoteNodes.Count > 0)
+                    {
+                        try
+                        {
+                            PricingEngine pe = new PricingEngine(_homeDir);
+                            for (int i = 0; i < _remoteNodes.Count; i++)
+                            {
+                                if (_remoteNodes[i] != null)
+                                    pe.RecalculateRemoteSnapshot(_remoteNodes[i]);
+                            }
+                        }
+                        catch { }
+                    }
+
+                    if ((info != null && info.CloudModelCount > 0) || forceRefresh)
+                    {
+                        RunSilentScanAsync(_homeDir, true, false);
+                        if (forceRefresh)
+                        {
+                            int modelTotal = Math.Max(info != null ? info.CloudModelCount : 0, _scanResult != null ? _scanResult.PricingModelCount : 0);
+                            ShowToastSafe(
+                                "云端价格库已刷新",
+                                string.Format(CultureInfo.InvariantCulture, "来源: {0}（已覆盖 {1:N0}+ 模型单价）", _priceSyncSource, modelTotal),
+                                "success");
+                        }
+                    }
+                }));
+            });
+        }
+
+        private void StartExchangeRateSyncAsync(bool forceRefresh)
+        {
+            if (_fxIsSyncing) return;
+            _fxIsSyncing = true;
+            UpdateFxUiState(_fxIsLive, true);
+
+            Task.Run(delegate()
+            {
+                ExchangeRateInfo fx = ExchangeRateService.FetchLatestUsdToCny(forceRefresh);
+                Dispatcher.BeginInvoke(new Action(delegate()
+                {
+                    _fxIsSyncing = false;
+                    ApplyFetchedRate(fx);
+                    if (forceRefresh)
+                    {
+                        ShowToastSafe(
+                            "USD/CNY 汇率已更新",
+                            string.Format(CultureInfo.InvariantCulture, "当前汇率: {0:0.####}（来源: {1}）", fx.Rate, fx.Source),
+                            fx.IsLive ? "success" : "info");
+                    }
+                }));
+            });
+        }
+
+        private void ApplyFetchedRate(ExchangeRateInfo fx)
+        {
+            _usdToCny = fx.Rate;
+            _fxSource = fx.Source;
+            _fxUpdatedAt = fx.UpdatedAt;
+            _fxIsLive = fx.IsLive;
+            _suppressRateEvent = true;
+            try
+            {
+                if (_rateInput != null)
+                    _rateInput.Text = _usdToCny.ToString("0.####", CultureInfo.InvariantCulture);
+            }
+            finally
+            {
+                _suppressRateEvent = false;
+            }
+            UpdateFxUiState(fx.IsLive, false);
+            RefreshDashboardView();
+            if (_settingsView != null)
+                _settingsView.RefreshDynamicStats();
         }
 
         internal void RunHeadlessUiSelfTest()
@@ -484,7 +1465,8 @@ namespace TokLens
             homePc.MachineId = "win-home-pc";
             homePc.MachineName = "家里电脑";
             homePc.MachineType = "windows";
-            homePc.SyncedAt = "2026-11-13 15:10:00";
+            homePc.OsInfo = "Windows 11 Pro 24H2";
+            homePc.SyncedAt = DateTime.Now.AddMinutes(-12).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
             homePc.IsLocal = false;
             RecordBucket hb = new RecordBucket();
             hb.MachineId = homePc.MachineId;
@@ -507,7 +1489,8 @@ namespace TokLens
             linuxVps.MachineId = "vps-hk-01";
             linuxVps.MachineName = "香港 VPS-1";
             linuxVps.MachineType = "vps";
-            linuxVps.SyncedAt = "2026-11-13 15:15:00";
+            linuxVps.OsInfo = "Ubuntu 24.04 LTS x86_64";
+            linuxVps.SyncedAt = DateTime.Now.AddHours(-30).ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
             linuxVps.IsLocal = false;
             RecordBucket vb = new RecordBucket();
             vb.MachineId = linuxVps.MachineId;
@@ -523,1859 +1506,3867 @@ namespace TokLens
             vb.Output = 92000;
             vb.CostUsd = 0.2072;
             vb.BaselineUsd = 0.8114;
-            vb.RateLabel = "$0.27 / $0.42";
+            vb.RateLabel = "$0.28 / $0.42";
             linuxVps.Records.Add(vb);
+
+            PricingEngine pe = new PricingEngine(_homeDir);
+            pe.RecalculateRemoteSnapshot(homePc);
+            pe.RecalculateRemoteSnapshot(linuxVps);
 
             _remoteNodes = new List<NodeSnapshot> { homePc, linuxVps };
 
             UIElement root = (UIElement)Content;
-            root.Measure(new Size(1280, 840));
-            root.Arrange(new Rect(0, 0, 1280, 840));
+            root.Measure(new Size(1320, 860));
+            root.Arrange(new Rect(0, 0, 1320, 860));
 
-            ApplyFetchedRate(new ExchangeRateInfo(6.6851, "ExchangeRate-API", "15:20", true));
+            ApplyFetchedRate(new ExchangeRateInfo(7.1852, "ExchangeRate-API", "15:20", true));
             RefreshDashboardView();
             root.UpdateLayout();
 
-            double h0 = _headerBarBorder.ActualHeight;
-            double d0 = _deviceStripBorder.ActualHeight;
+            double baseTopH = _topContextBarBorder.ActualHeight;
+            double baseSideW = _sidebarBorder.ActualWidth;
 
-            // Click single VPS pill, switch tabs (live -> models -> machines -> daily -> methodology), verify 0.0px layout jump!
-            _selectedMachineId = "vps-hk-01";
-            _leftRankByMachine = true;
-            _activeTab = 2;
-            _rangeDays = 7;
-            RefreshDashboardView();
-            UpdateTabVisibility();
-            root.UpdateLayout();
-
-            double h1 = _headerBarBorder.ActualHeight;
-            double d1 = _deviceStripBorder.ActualHeight;
-            if (Math.Abs(h1 - h0) > 0.05 || Math.Abs(d1 - d0) > 0.05)
+            // 遍历全部 11 大全高旗舰视图，断言顶栏 48px 与侧栏 200px 实现 0.0px 零跳动
+            for (int v = 0; v < TotalViewCount; v++)
             {
-                throw new InvalidOperationException(string.Format(
-                    CultureInfo.InvariantCulture,
-                    "Layout jump detected! Header: {0} -> {1}, DeviceStrip: {2} -> {3}",
-                    h0, h1, d0, d1));
-            }
-
-            // Switch to Local PC pill and Live Request Stream tab
-            _selectedMachineId = _localNode.MachineId;
-            _activeTab = 0;
-            RefreshDashboardView();
-            UpdateTabVisibility();
-            root.UpdateLayout();
-
-            double h2 = _headerBarBorder.ActualHeight;
-            double d2 = _deviceStripBorder.ActualHeight;
-            if (Math.Abs(h2 - h0) > 0.05 || Math.Abs(d2 - d0) > 0.05)
-                throw new InvalidOperationException("Layout jump detected on local device switch!");
-
-            // Test SyncWindow 2-tab layout
-            SyncWindow sw = new SyncWindow(null, _syncCfg, _scanResult, null, 1);
-            UIElement swContent = (UIElement)sw.Content;
-            swContent.Measure(new Size(620, 520));
-            swContent.Arrange(new Rect(0, 0, 620, 520));
-            swContent.UpdateLayout();
-
-            // Test Light & Dark theme toggle stability
-            _selectedMachineId = null;
-            _leftRankByMachine = false;
-            _rangeDays = 0;
-            OnToggleThemeClick(this, new RoutedEventArgs());
-            root.UpdateLayout();
-            OnToggleThemeClick(this, new RoutedEventArgs());
-            root.UpdateLayout();
-
-            double h3 = _headerBarBorder.ActualHeight;
-            double d3 = _deviceStripBorder.ActualHeight;
-            if (Math.Abs(h3 - h0) > 0.05 || Math.Abs(d3 - d0) > 0.05)
-                throw new InvalidOperationException("Layout jump detected after theme toggle!");
-        }
-
-        private void TryLoadExeIcon()
-        {
-            try
-            {
-                string exePath = Process.GetCurrentProcess().MainModule.FileName;
-                using (Drawing.Icon ico = Drawing.Icon.ExtractAssociatedIcon(exePath))
+                SwitchActiveView(v);
+                if (v == ViewDevices)
                 {
-                    if (ico != null)
-                    {
-                        Icon = Imaging.CreateBitmapSourceFromHIcon(
-                            ico.Handle,
-                            Int32Rect.Empty,
-                            BitmapSizeOptions.FromEmptyOptions());
-                    }
+                    _selectedMachineId = "vps-hk-01";
+                    _rangeDays = 7;
+                }
+                else if (v == ViewOverview)
+                {
+                    _selectedDate = _scanResult.ReferenceDate;
+                }
+                RefreshDashboardView();
+                root.UpdateLayout();
+
+                double curTopH = _topContextBarBorder.ActualHeight;
+                double curSideW = _sidebarBorder.ActualWidth;
+                if (Math.Abs(curTopH - baseTopH) > 0.05 || Math.Abs(curSideW - baseSideW) > 0.05)
+                {
+                    throw new InvalidOperationException(string.Format(
+                        CultureInfo.InvariantCulture,
+                        "Layout jump detected on view {0}! TopBar: {1} -> {2}, Sidebar: {3} -> {4}",
+                        v, baseTopH, curTopH, baseSideW, curSideW));
                 }
             }
-            catch { }
-        }
 
-        private static SolidColorBrush BrushHex(string hex)
-        {
-            Color c = (Color)ColorConverter.ConvertFromString(hex);
-            SolidColorBrush b = new SolidColorBrush(c);
-            b.Freeze();
-            return b;
-        }
+            // 验证全局 Ctrl+K 命令面板开关与单笔请求账单透视抽屉无头渲染稳定性
+            OpenCommandPalette();
+            root.UpdateLayout();
+            if (_commandPalette != null && _commandPalette.IsOpen)
+                _commandPalette.Close();
+            root.UpdateLayout();
 
-        private void ApplyThemeResources()
-        {
-            if (_isDark)
+            SwitchActiveView(ViewLiveStream);
+            if (_liveGrid != null && _liveGrid.Items.Count > 0)
             {
-                Resources["BgWindow"] = BrushHex("#0B0F19");
-                Resources["BgCard"] = BrushHex("#111827");
-                Resources["BgSurface"] = BrushHex("#0F172A");
-                Resources["BgElevated"] = BrushHex("#1E293B");
-                Resources["BgHover"] = BrushHex("#263449");
-                Resources["BgRowAlt"] = BrushHex("#131C2E");
-                Resources["BgSelected"] = BrushHex("#172B44");
-                Resources["BorderCard"] = BrushHex("#1F2937");
-                Resources["BorderStrong"] = BrushHex("#334155");
-                Resources["FgPrimary"] = BrushHex("#F8FAFC");
-                Resources["FgSecondary"] = BrushHex("#94A3B8");
-                Resources["FgMuted"] = BrushHex("#64748B");
-                Resources["AccentBlue"] = BrushHex("#38BDF8");
-                Resources["AccentIndigo"] = BrushHex("#818CF8");
-                Resources["AccentEmerald"] = BrushHex("#10B981");
-                Resources["AccentAmber"] = BrushHex("#F59E0B");
-                Resources["WarnBg"] = BrushHex("#2C1B12");
-                Resources["WarnBorder"] = BrushHex("#9A3412");
-                Resources["WarnFg"] = BrushHex("#FDBA74");
+                LiveRequestRowView firstLive = _liveGrid.Items[0] as LiveRequestRowView;
+                if (firstLive != null)
+                    OpenRequestInspectorFor(firstLive);
             }
-            else
+            root.UpdateLayout();
+            CloseRequestInspector();
+            root.UpdateLayout();
+
+            // 测试侧边栏折叠 (58px) 与展开 (200px) 稳定性
+            ToggleSidebarCollapsed();
+            root.UpdateLayout();
+            if (Math.Abs(_sidebarBorder.ActualWidth - SidebarCollapsedWidth) > 0.05 ||
+                Math.Abs(_topContextBarBorder.ActualHeight - baseTopH) > 0.05)
             {
-                Resources["BgWindow"] = BrushHex("#F1F5F9");
-                Resources["BgCard"] = BrushHex("#FFFFFF");
-                Resources["BgSurface"] = BrushHex("#F8FAFC");
-                Resources["BgElevated"] = BrushHex("#E2E8F0");
-                Resources["BgHover"] = BrushHex("#CBD5E1");
-                Resources["BgRowAlt"] = BrushHex("#F8FAFC");
-                Resources["BgSelected"] = BrushHex("#DBEAFE");
-                Resources["BorderCard"] = BrushHex("#E2E8F0");
-                Resources["BorderStrong"] = BrushHex("#CBD5E1");
-                Resources["FgPrimary"] = BrushHex("#0F172A");
-                Resources["FgSecondary"] = BrushHex("#475569");
-                Resources["FgMuted"] = BrushHex("#64748B");
-                Resources["AccentBlue"] = BrushHex("#0284C7");
-                Resources["AccentIndigo"] = BrushHex("#4F46E5");
-                Resources["AccentEmerald"] = BrushHex("#059669");
-                Resources["AccentAmber"] = BrushHex("#D97706");
-                Resources["WarnBg"] = BrushHex("#FFF7ED");
-                Resources["WarnBorder"] = BrushHex("#FDBA74");
-                Resources["WarnFg"] = BrushHex("#9A3412");
+                throw new InvalidOperationException("Sidebar collapse geometry mismatch!");
+            }
+            ToggleSidebarCollapsed();
+            root.UpdateLayout();
+            if (Math.Abs(_sidebarBorder.ActualWidth - baseSideW) > 0.05)
+            {
+                throw new InvalidOperationException("Sidebar expand geometry mismatch!");
+            }
+
+            // 测试深浅色主题往返切换与告警徽章弹出态下的 0.0px 稳定性
+            _selectedMachineId = null;
+            _selectedDate = null;
+            _rangeDays = 0;
+            _syncCfg.DailyBudgetUsd = 0.01;
+            SwitchActiveView(ViewOverview);
+            ToggleThemeFromUi();
+            root.UpdateLayout();
+            ToggleThemeFromUi();
+            root.UpdateLayout();
+
+            if (Math.Abs(_topContextBarBorder.ActualHeight - baseTopH) > 0.05 ||
+                Math.Abs(_sidebarBorder.ActualWidth - baseSideW) > 0.05)
+            {
+                throw new InvalidOperationException("Layout jump detected after theme toggle & budget alert badge!");
+            }
+
+            // 验证独立 SyncWindow 无头兼容测量
+            SyncWindow sw = new SyncWindow(null, _syncCfg.Clone(), _scanResult, null, 1);
+            UIElement swContent = sw.Content as UIElement;
+            if (swContent != null)
+            {
+                swContent.Measure(new Size(680, 560));
+                swContent.Arrange(new Rect(0, 0, 680, 560));
+                swContent.UpdateLayout();
             }
         }
 
-        // -------------------- Strict Zero-Jump Fixed-Viewport Layout (NO Outer ScrollViewer, NO Modal Overlay) --------------------
-        private UIElement BuildLayout()
+        // =================================================================================================
+        // 1. 无边框一体化窗口外壳 + 左侧紧凑导航栏 (200px / 58px) + 右侧 48px 上下文顶栏
+        // =================================================================================================
+        private UIElement BuildRootShellLayout()
         {
-            Grid mainRows = new Grid();
-            mainRows.RowDefinitions.Add(new RowDefinition { Height = new GridLength(52) });  // Row 0: Locked Header Bar
-            mainRows.RowDefinitions.Add(new RowDefinition { Height = new GridLength(40) });  // Row 1: Locked Device Rail
-            mainRows.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });     // Row 2: Optional Warning Banner
-            mainRows.RowDefinitions.Add(new RowDefinition { Height = new GridLength(96) });  // Row 3: 4 KPI Cards
-            mainRows.RowDefinitions.Add(new RowDefinition { Height = new GridLength(226) }); // Row 4: Middle Insights
-            mainRows.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // Row 5: Active Table Card
-            mainRows.RowDefinitions.Add(new RowDefinition { Height = new GridLength(28) });  // Row 6: Live Status Bar
+            _toastManager = new ToastManager();
 
-            _headerBarBorder = BuildHeaderBar();
-            Grid.SetRow(_headerBarBorder, 0);
-            mainRows.Children.Add(_headerBarBorder);
+            Grid outerLayer = new Grid();
+            outerLayer.SetResourceReference(Panel.BackgroundProperty, "BgWindow");
 
-            _deviceStripBorder = BuildDeviceFilterStrip();
-            Grid.SetRow(_deviceStripBorder, 1);
-            mainRows.Children.Add(_deviceStripBorder);
+            _rootShellBorder = new Border();
+            _rootShellBorder.BorderThickness = new Thickness(1);
+            _rootShellBorder.SetResourceReference(Border.BackgroundProperty, "BgWindow");
+            _rootShellBorder.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
 
-            _warningBanner = BuildWarningBanner();
-            Grid.SetRow(_warningBanner, 2);
-            mainRows.Children.Add(_warningBanner);
+            Grid shellCols = new Grid();
+            _sidebarColDef = new ColumnDefinition { Width = new GridLength(SidebarExpandedWidth) };
+            shellCols.ColumnDefinitions.Add(_sidebarColDef);
+            shellCols.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
-            UIElement kpiRow = BuildKpiCards();
-            Grid.SetRow(kpiRow, 3);
-            mainRows.Children.Add(kpiRow);
+            UIElement sidebar = BuildSidebar();
+            Grid.SetColumn(sidebar, 0);
+            shellCols.Children.Add(sidebar);
 
-            UIElement midRow = BuildMiddleSection();
-            Grid.SetRow(midRow, 4);
-            mainRows.Children.Add(midRow);
+            Grid rightArea = new Grid();
+            rightArea.RowDefinitions.Add(new RowDefinition { Height = new GridLength(TopBarLockedHeight) });
+            rightArea.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-            UIElement botRow = BuildBottomSection();
-            Grid.SetRow(botRow, 5);
-            mainRows.Children.Add(botRow);
+            UIElement topContextBar = BuildTopContextBar();
+            Grid.SetRow(topContextBar, 0);
+            rightArea.Children.Add(topContextBar);
 
-            UIElement statusRow = BuildStatusBar();
-            Grid.SetRow(statusRow, 6);
-            mainRows.Children.Add(statusRow);
+            _workspaceHostGrid = new Grid();
+            _workspaceHostGrid.SetResourceReference(Panel.BackgroundProperty, "BgWindow");
+            _viewPages = new UIElement[TotalViewCount];
+            _viewPages[ViewOverview] = BuildOverviewView();
+            _viewPages[ViewLiveStream] = BuildLiveStreamView();
+            _viewPages[ViewModels] = BuildModelsView();
+            _projectView = new ProjectAttributionView(_homeDir, ShowToastSafe);
+            _viewPages[ViewProjects] = _projectView;
+            _insightsView = new InsightsView();
+            _insightsView.BindSubscriptionConfig(_syncCfg, delegate(SyncConfig updatedCfg)
+            {
+                SyncService.SaveConfig(updatedCfg);
+                if (_settingsView != null) _settingsView.ReloadFromConfig();
+            });
+            _viewPages[ViewInsights] = _insightsView;
+            _whatIfView = new WhatIfSimulatorView();
+            _viewPages[ViewWhatIf] = _whatIfView;
+            _bloatView = new SessionBloatAnalyzerView();
+            _viewPages[ViewBloat] = _bloatView;
+            _viewPages[ViewDevices] = BuildDevicesView();
+            _viewPages[ViewDailyExport] = BuildDailyExportView();
+            _doctorView = new DiagnosticsDoctorView(_homeDir, ShowToastSafe);
+            _viewPages[ViewDoctor] = _doctorView;
+            _viewPages[ViewSettings] = BuildSettingsView();
 
-            return mainRows;
+            for (int i = 0; i < _viewPages.Length; i++)
+            {
+                if (_viewPages[i] != null)
+                {
+                    _viewPages[i].Visibility = (i == _activeView) ? Visibility.Visible : Visibility.Collapsed;
+                    _workspaceHostGrid.Children.Add(_viewPages[i]);
+                }
+            }
+
+            Grid.SetRow(_workspaceHostGrid, 1);
+            rightArea.Children.Add(_workspaceHostGrid);
+
+            Grid.SetColumn(rightArea, 1);
+            shellCols.Children.Add(rightArea);
+
+            _rootShellBorder.Child = shellCols;
+            outerLayer.Children.Add(_rootShellBorder);
+
+            _commandPalette = new CommandPaletteOverlay();
+            Panel.SetZIndex(_commandPalette, 950);
+            outerLayer.Children.Add(_commandPalette);
+
+            UIElement toastHost = _toastManager.HostElement;
+            Panel.SetZIndex(toastHost, 999);
+            outerLayer.Children.Add(toastHost);
+
+            return outerLayer;
         }
 
-        private Border BuildHeaderBar()
+        private UIElement BuildSidebar()
         {
-            Border bar = new Border();
-            bar.Height = 52;
-            bar.Padding = new Thickness(18, 0, 18, 0);
-            bar.BorderThickness = new Thickness(0, 0, 0, 1);
-            bar.SetResourceReference(Border.BackgroundProperty, "BgCard");
-            bar.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
+            _sidebarBorder = new Border();
+            _sidebarBorder.Width = SidebarExpandedWidth;
+            _sidebarBorder.BorderThickness = new Thickness(0, 0, 1, 0);
+            _sidebarBorder.SetResourceReference(Border.BackgroundProperty, "BgSidebar");
+            _sidebarBorder.SetResourceReference(Border.BorderBrushProperty, "BorderSubtle");
 
             Grid g = new Grid();
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(TopBarLockedHeight) }); // Row 0: Brand Header
+            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // Row 1: 6 Nav Items
+            g.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });                      // Row 2: Data Foundation Micro-Panel
+            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(42.0) });                 // Row 3: Utility Footer
 
-            // Col 0: Static Brand Identity (Never changes width!)
-            StackPanel brand = new StackPanel();
-            brand.Orientation = Orientation.Horizontal;
-            brand.VerticalAlignment = VerticalAlignment.Center;
+            // Row 0: 顶部品牌栏（克制靛蓝单色几何棱镜透镜 + 知微 TokLens + v2.2 + 实时监听脉冲绿点）
+            Border brandHeader = new Border();
+            brandHeader.Height = TopBarLockedHeight;
+            brandHeader.BorderThickness = new Thickness(0, 0, 0, 1);
+            brandHeader.Padding = new Thickness(13, 0, 10, 0);
+            brandHeader.SetResourceReference(Border.BorderBrushProperty, "BorderSubtle");
 
-            Border logoBadge = new Border();
-            logoBadge.Width = 30;
-            logoBadge.Height = 30;
-            logoBadge.CornerRadius = new CornerRadius(8);
-            logoBadge.Margin = new Thickness(0, 0, 10, 0);
-            LinearGradientBrush lg = new LinearGradientBrush(
-                (Color)ColorConverter.ConvertFromString("#0EA5E9"),
-                (Color)ColorConverter.ConvertFromString("#6366F1"),
-                45.0);
-            lg.Freeze();
-            logoBadge.Background = lg;
+            DockPanel brandDock = new DockPanel();
+            brandDock.VerticalAlignment = VerticalAlignment.Center;
 
-            TextBlock logoChar = new TextBlock();
-            logoChar.Text = "微";
-            logoChar.Foreground = Brushes.White;
-            logoChar.FontWeight = FontWeights.Bold;
-            logoChar.FontSize = 14.5;
-            logoChar.HorizontalAlignment = HorizontalAlignment.Center;
-            logoChar.VerticalAlignment = VerticalAlignment.Center;
-            logoBadge.Child = logoChar;
-            brand.Children.Add(logoBadge);
+            // 单色靛蓝几何棱镜/透镜标志（告别廉价霓虹渐变）
+            Border logoMark = new Border();
+            logoMark.Width = 28;
+            logoMark.Height = 28;
+            logoMark.CornerRadius = new CornerRadius(7);
+            logoMark.BorderThickness = new Thickness(1);
+            logoMark.VerticalAlignment = VerticalAlignment.Center;
+            logoMark.SetResourceReference(Border.BackgroundProperty, "AccentSubtleBg");
+            logoMark.SetResourceReference(Border.BorderBrushProperty, "AccentSubtleBorder");
 
-            TextBlock mainTitle = new TextBlock();
-            mainTitle.Text = "知微 · TokLens";
-            mainTitle.FontSize = 15.5;
-            mainTitle.FontWeight = FontWeights.Bold;
-            mainTitle.VerticalAlignment = VerticalAlignment.Center;
-            mainTitle.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
-            brand.Children.Add(mainTitle);
+            Shapes.Path prismPath = new Shapes.Path();
+            prismPath.Data = Geometry.Parse("M 8,2 L 14.2,8 L 8,14 L 1.8,8 Z M 8,4.8 L 11.2,8 L 8,11.2 L 4.8,8 Z");
+            prismPath.Width = 15;
+            prismPath.Height = 15;
+            prismPath.Stretch = Stretch.Uniform;
+            prismPath.StrokeThickness = 1.45;
+            prismPath.StrokeLineJoin = PenLineJoin.Round;
+            prismPath.HorizontalAlignment = HorizontalAlignment.Center;
+            prismPath.VerticalAlignment = VerticalAlignment.Center;
+            prismPath.SetResourceReference(Shapes.Shape.StrokeProperty, "AccentText");
+            logoMark.Child = prismPath;
+            DockPanel.SetDock(logoMark, Dock.Left);
+            brandDock.Children.Add(logoMark);
 
-            Border verTag = new Border();
-            verTag.CornerRadius = new CornerRadius(4);
-            verTag.Padding = new Thickness(6, 1, 6, 1);
-            verTag.Margin = new Thickness(8, 1, 0, 0);
-            verTag.VerticalAlignment = VerticalAlignment.Center;
-            verTag.SetResourceReference(Border.BackgroundProperty, "BgElevated");
-            TextBlock verTxt = new TextBlock();
-            verTxt.Text = "v2.1";
-            verTxt.FontSize = 11;
-            verTxt.FontWeight = FontWeights.SemiBold;
-            verTxt.SetResourceReference(TextBlock.ForegroundProperty, "AccentBlue");
-            verTag.Child = verTxt;
-            brand.Children.Add(verTag);
+            // 右侧可点击防清理归档与实时监听脉冲绿点
+            _sidebarBrandHitBox = new Border();
+            _sidebarBrandHitBox.Background = Brushes.Transparent;
+            _sidebarBrandHitBox.Padding = new Thickness(5, 5, 5, 5);
+            _sidebarBrandHitBox.CornerRadius = new CornerRadius(5);
+            _sidebarBrandHitBox.Cursor = Cursors.Hand;
+            _sidebarBrandHitBox.VerticalAlignment = VerticalAlignment.Center;
+            _sidebarBrandHitBox.ToolTip = "实时监听与双层防清理归档已启用（点击查看详情）";
+            WindowChrome.SetIsHitTestVisibleInChrome(_sidebarBrandHitBox, true);
 
-            Grid.SetColumn(brand, 0);
-            g.Children.Add(brand);
+            _sidebarPulseDot = new Shapes.Ellipse();
+            _sidebarPulseDot.Width = 7;
+            _sidebarPulseDot.Height = 7;
+            _sidebarPulseDot.SetResourceReference(Shapes.Shape.FillProperty, "SemanticSuccess");
+            _sidebarBrandHitBox.Child = _sidebarPulseDot;
+            _sidebarBrandHitBox.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+            {
+                OpenArchiveStatusPopover(_sidebarBrandHitBox);
+            };
+            DockPanel.SetDock(_sidebarBrandHitBox, Dock.Right);
+            brandDock.Children.Add(_sidebarBrandHitBox);
 
-            // Col 1: Centered Segmented Time Filter
-            string[] rLabels = new string[] { "全部", "30天", "7天", "3天", "今日" };
+            _brandTextPanel = new StackPanel();
+            _brandTextPanel.Orientation = Orientation.Horizontal;
+            _brandTextPanel.VerticalAlignment = VerticalAlignment.Center;
+            _brandTextPanel.Margin = new Thickness(9, 0, 4, 0);
+
+            TextBlock titleTb = new TextBlock();
+            titleTb.Text = "知微 TokLens";
+            titleTb.FontSize = 13.2;
+            titleTb.FontWeight = FontWeights.SemiBold;
+            titleTb.VerticalAlignment = VerticalAlignment.Center;
+            titleTb.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            _brandTextPanel.Children.Add(titleTb);
+
+            Border verBadge = new Border();
+            verBadge.CornerRadius = new CornerRadius(4);
+            verBadge.Padding = new Thickness(4.5, 1, 4.5, 1);
+            verBadge.Margin = new Thickness(6, 0, 0, 0);
+            verBadge.VerticalAlignment = VerticalAlignment.Center;
+            verBadge.SetResourceReference(Border.BackgroundProperty, "BgElevated");
+            verBadge.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
+            verBadge.BorderThickness = new Thickness(1);
+
+            TextBlock verTb = new TextBlock();
+            verTb.Text = AppConstants.VersionTag;
+            verTb.FontFamily = DesignSystem.FontMono;
+            verTb.FontSize = 9.8;
+            verTb.FontWeight = FontWeights.Medium;
+            verTb.SetResourceReference(TextBlock.ForegroundProperty, "AccentText");
+            verBadge.Child = verTb;
+            _brandTextPanel.Children.Add(verBadge);
+
+            brandDock.Children.Add(_brandTextPanel);
+            brandHeader.Child = brandDock;
+            Grid.SetRow(brandHeader, 0);
+            g.Children.Add(brandHeader);
+
+            // Row 1: 11 大旗舰分组导航菜单（包裹于零横滑 ScrollViewer，恒定 FontWeight.Medium 零宽度跳动）
+            ScrollViewer navScroll = new ScrollViewer();
+            navScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            navScroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
+            navScroll.PanningMode = PanningMode.VerticalOnly;
+
+            StackPanel navStack = new StackPanel();
+            navStack.Margin = new Thickness(8, 7, 8, 6);
+
+            string[] navIcons = new string[]
+            {
+                UiIcons.Overview,
+                UiIcons.Activity,
+                UiIcons.Models,
+                UiIcons.Folder,
+                UiIcons.Sparkles,
+                UiIcons.Swap,
+                UiIcons.Layers,
+                UiIcons.Devices,
+                UiIcons.Calendar,
+                UiIcons.Doctor,
+                UiIcons.Settings
+            };
+            string[] navLabels = new string[]
+            {
+                "概览看板",
+                "实时请求流",
+                "模型与工具",
+                "项目归因",
+                "智算洞察",
+                "平替模拟器",
+                "会话显微镜",
+                "设备与集群",
+                "每日流水与导出",
+                "环境体检医生",
+                "同步与设置"
+            };
+            string[] navShortcuts = new string[]
+            {
+                "概览看板 (Ctrl+1)",
+                "实时请求流与单笔账单透视 (Ctrl+2)",
+                "模型与工具账单 · 单价工作台 (Ctrl+3)",
+                "项目与工作区归因雷达 (Ctrl+4)",
+                "智算洞察 · 订阅回本与热力图 (Ctrl+5)",
+                "模型平替成本模拟器 What-If (Ctrl+6)",
+                "上下文膨胀显微镜与会话透视 (Ctrl+7)",
+                "设备与 Linux/macOS 集群 (Ctrl+8)",
+                "每日流水与多格式战报导出 (Ctrl+9)",
+                "AI 环境体检医生与数据源探针 (Ctrl+0)",
+                "多端云同步、配对码与系统设置 (Ctrl+,)"
+            };
+
+            _navItemBorders = new Border[TotalViewCount];
+            _navActiveBars = new Border[TotalViewCount];
+            _navTitleLabels = new TextBlock[TotalViewCount];
+
+            for (int i = 0; i < TotalViewCount; i++)
+            {
+                int capturedIdx = i;
+                bool isSettingsNav = (i == ViewSettings);
+
+                Border itemBd = new Border();
+                itemBd.Height = isSettingsNav ? 41.0 : 31.0;
+                itemBd.CornerRadius = new CornerRadius(6);
+                itemBd.Margin = new Thickness(0, 0, 0, 2);
+                itemBd.Background = Brushes.Transparent;
+                itemBd.Cursor = Cursors.Hand;
+                itemBd.ToolTip = navShortcuts[i];
+
+                Grid itemGrid = new Grid();
+                itemGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(3) });
+                itemGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(36) });
+                itemGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+                itemGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+                Border activeBar = new Border();
+                activeBar.Width = 3;
+                activeBar.Height = 15;
+                activeBar.CornerRadius = new CornerRadius(1.5);
+                activeBar.VerticalAlignment = VerticalAlignment.Center;
+                activeBar.SetResourceReference(Border.BackgroundProperty, "AccentPrimary");
+                activeBar.Visibility = Visibility.Hidden;
+                Grid.SetColumn(activeBar, 0);
+                itemGrid.Children.Add(activeBar);
+
+                Shapes.Path iconEl = UiIcons.CreateIcon(navIcons[i], 14.5, null);
+                iconEl.HorizontalAlignment = HorizontalAlignment.Center;
+                iconEl.VerticalAlignment = VerticalAlignment.Center;
+                Grid.SetColumn(iconEl, 1);
+                itemGrid.Children.Add(iconEl);
+
+                TextBlock titleLbl = new TextBlock();
+                titleLbl.Text = navLabels[i];
+                titleLbl.FontSize = 12.2;
+                titleLbl.FontWeight = FontWeights.Medium;
+                titleLbl.VerticalAlignment = VerticalAlignment.Center;
+                titleLbl.TextTrimming = TextTrimming.CharacterEllipsis;
+
+                if (isSettingsNav)
+                {
+                    StackPanel twoLine = new StackPanel();
+                    twoLine.VerticalAlignment = VerticalAlignment.Center;
+                    twoLine.Children.Add(titleLbl);
+
+                    _navSyncSubText = new TextBlock();
+                    _navSyncSubText.Text = "点击配置云同步";
+                    _navSyncSubText.FontSize = 10.2;
+                    _navSyncSubText.Margin = new Thickness(0, 1, 6, 0);
+                    _navSyncSubText.TextTrimming = TextTrimming.CharacterEllipsis;
+                    _navSyncSubText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+                    twoLine.Children.Add(_navSyncSubText);
+
+                    Grid.SetColumn(twoLine, 2);
+                    itemGrid.Children.Add(twoLine);
+                }
+                else
+                {
+                    Grid.SetColumn(titleLbl, 2);
+                    itemGrid.Children.Add(titleLbl);
+                }
+
+                if (i == ViewLiveStream)
+                {
+                    _navLiveNewDot = new Shapes.Ellipse();
+                    _navLiveNewDot.Width = 6;
+                    _navLiveNewDot.Height = 6;
+                    _navLiveNewDot.Margin = new Thickness(4, 0, 10, 0);
+                    _navLiveNewDot.VerticalAlignment = VerticalAlignment.Center;
+                    _navLiveNewDot.Visibility = Visibility.Collapsed;
+                    _navLiveNewDot.SetResourceReference(Shapes.Shape.FillProperty, "SemanticSuccess");
+                    Grid.SetColumn(_navLiveNewDot, 3);
+                    itemGrid.Children.Add(_navLiveNewDot);
+                }
+                else if (i == ViewDevices)
+                {
+                    _navDeviceCountBadge = new Border();
+                    _navDeviceCountBadge.CornerRadius = new CornerRadius(8);
+                    _navDeviceCountBadge.Padding = new Thickness(6, 1, 6, 1);
+                    _navDeviceCountBadge.Margin = new Thickness(4, 0, 8, 0);
+                    _navDeviceCountBadge.VerticalAlignment = VerticalAlignment.Center;
+                    _navDeviceCountBadge.SetResourceReference(Border.BackgroundProperty, "BgElevated");
+                    _navDeviceCountBadge.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
+                    _navDeviceCountBadge.BorderThickness = new Thickness(1);
+
+                    _navDeviceCountText = new TextBlock();
+                    _navDeviceCountText.Text = "1";
+                    _navDeviceCountText.FontFamily = DesignSystem.FontMono;
+                    _navDeviceCountText.FontSize = 10.2;
+                    _navDeviceCountText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+                    _navDeviceCountBadge.Child = _navDeviceCountText;
+
+                    Grid.SetColumn(_navDeviceCountBadge, 3);
+                    itemGrid.Children.Add(_navDeviceCountBadge);
+                }
+
+                itemBd.Child = itemGrid;
+
+                itemBd.MouseEnter += delegate(object s, MouseEventArgs e)
+                {
+                    if (_activeView != capturedIdx)
+                        itemBd.SetResourceReference(Border.BackgroundProperty, "BgHover");
+                };
+                itemBd.MouseLeave += delegate(object s, MouseEventArgs e)
+                {
+                    if (_activeView != capturedIdx)
+                        itemBd.Background = Brushes.Transparent;
+                };
+                itemBd.MouseLeftButtonDown += delegate(object s, MouseButtonEventArgs e)
+                {
+                    SwitchActiveView(capturedIdx);
+                };
+
+                _navItemBorders[i] = itemBd;
+                _navActiveBars[i] = activeBar;
+                _navTitleLabels[i] = titleLbl;
+                navStack.Children.Add(itemBd);
+
+                if (i == ViewModels || i == ViewBloat || i == ViewDoctor)
+                {
+                    Border sep = new Border();
+                    sep.Height = 1;
+                    sep.Margin = new Thickness(6, 4, 6, 4);
+                    sep.SetResourceReference(Border.BackgroundProperty, "BorderSubtle");
+                    navStack.Children.Add(sep);
+                }
+            }
+
+            navScroll.Content = navStack;
+            Grid.SetRow(navScroll, 1);
+            g.Children.Add(navScroll);
+
+            // Row 2: 底部常驻「数据基座微面板」（价格库模型数 + 强刷、汇率 USD/CNY + 强刷）
+            _sidebarDataPanel = new Border();
+            _sidebarDataPanel.Margin = new Thickness(10, 4, 10, 8);
+            _sidebarDataPanel.Padding = new Thickness(10, 7, 8, 7);
+            _sidebarDataPanel.CornerRadius = new CornerRadius(8);
+            _sidebarDataPanel.BorderThickness = new Thickness(1);
+            _sidebarDataPanel.SetResourceReference(Border.BackgroundProperty, "BgSurface");
+            _sidebarDataPanel.SetResourceReference(Border.BorderBrushProperty, "BorderSubtle");
+
+            StackPanel dataSp = new StackPanel();
+
+            // 行 1：模型价格库
+            DockPanel priceRow = new DockPanel();
+            priceRow.Margin = new Thickness(0, 0, 0, 5);
+
+            _sidebarPriceRefreshBtn = ModernControlsFactory.CreateIconGhostButton(UiIcons.Refresh, "立即从三源云端同步最新模型单价库");
+            _sidebarPriceRefreshBtn.Width = 22;
+            _sidebarPriceRefreshBtn.Height = 22;
+            _sidebarPriceRefreshBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                StartCloudPricingSyncAsync(true);
+            };
+            DockPanel.SetDock(_sidebarPriceRefreshBtn, Dock.Right);
+            priceRow.Children.Add(_sidebarPriceRefreshBtn);
+
+            _sidebarPriceText = new TextBlock();
+            _sidebarPriceText.Text = "价格库加载中";
+            _sidebarPriceText.FontSize = 11;
+            _sidebarPriceText.Cursor = Cursors.Hand;
+            _sidebarPriceText.VerticalAlignment = VerticalAlignment.Center;
+            _sidebarPriceText.TextTrimming = TextTrimming.CharacterEllipsis;
+            _sidebarPriceText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            ModernControlsFactory.EnableTabularNumbers(_sidebarPriceText, false);
+            _sidebarPriceText.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+            {
+                OpenPricingStudioDialog(null);
+            };
+            priceRow.Children.Add(_sidebarPriceText);
+            dataSp.Children.Add(priceRow);
+
+            // 行 2：实时汇率 USD/CNY
+            DockPanel fxRow = new DockPanel();
+
+            _sidebarFxRefreshBtn = ModernControlsFactory.CreateIconGhostButton(UiIcons.Refresh, "立即拉取最新 USD/CNY 实时汇率");
+            _sidebarFxRefreshBtn.Width = 22;
+            _sidebarFxRefreshBtn.Height = 22;
+            _sidebarFxRefreshBtn.Margin = new Thickness(3, 0, 0, 0);
+            _sidebarFxRefreshBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                StartExchangeRateSyncAsync(true);
+            };
+            DockPanel.SetDock(_sidebarFxRefreshBtn, Dock.Right);
+            fxRow.Children.Add(_sidebarFxRefreshBtn);
+
+            _rateInput = ModernControlsFactory.CreateTextInput(_usdToCny.ToString("0.####", CultureInfo.InvariantCulture), 22.0);
+            _rateInput.Width = 56;
+            _rateInput.FontSize = 11;
+            _rateInput.FontFamily = DesignSystem.FontMono;
+            _rateInput.Padding = new Thickness(5, 0, 5, 0);
+            _rateInput.HorizontalContentAlignment = HorizontalAlignment.Right;
+            _rateInput.ToolTip = "手动调整 USD/CNY 折算汇率，或点击右侧按钮同步实时汇率";
+            _rateInput.TextChanged += delegate(object s, TextChangedEventArgs e)
+            {
+                if (_suppressRateEvent) return;
+                double nr;
+                if (double.TryParse(_rateInput.Text.Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out nr) && nr > 0.1 && nr < 200.0)
+                {
+                    _usdToCny = nr;
+                    _fxSource = "手动输入";
+                    UpdateFxUiState(false, false);
+                    RefreshDashboardView();
+                }
+            };
+            DockPanel.SetDock(_rateInput, Dock.Right);
+            fxRow.Children.Add(_rateInput);
+
+            StackPanel fxLabelSp = new StackPanel();
+            fxLabelSp.Orientation = Orientation.Horizontal;
+            fxLabelSp.VerticalAlignment = VerticalAlignment.Center;
+
+            _sidebarFxDot = new Shapes.Ellipse();
+            _sidebarFxDot.Width = 6;
+            _sidebarFxDot.Height = 6;
+            _sidebarFxDot.Margin = new Thickness(0, 0, 5, 0);
+            _sidebarFxDot.VerticalAlignment = VerticalAlignment.Center;
+            _sidebarFxDot.SetResourceReference(Shapes.Shape.FillProperty, "SemanticSuccess");
+            fxLabelSp.Children.Add(_sidebarFxDot);
+
+            TextBlock fxLabel = new TextBlock();
+            fxLabel.Text = "汇率";
+            fxLabel.FontSize = 11;
+            fxLabel.VerticalAlignment = VerticalAlignment.Center;
+            fxLabel.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            fxLabelSp.Children.Add(fxLabel);
+
+            fxRow.Children.Add(fxLabelSp);
+            dataSp.Children.Add(fxRow);
+
+            _sidebarDataPanel.Child = dataSp;
+            Grid.SetRow(_sidebarDataPanel, 2);
+            g.Children.Add(_sidebarDataPanel);
+
+            // Row 3: 底部工具条（深浅主题切换、立即扫描刷新、折叠侧边栏）
+            Border footerBar = new Border();
+            footerBar.BorderThickness = new Thickness(0, 1, 0, 0);
+            footerBar.Padding = new Thickness(10, 0, 10, 0);
+            footerBar.SetResourceReference(Border.BorderBrushProperty, "BorderSubtle");
+
+            DockPanel utilDock = new DockPanel();
+            utilDock.VerticalAlignment = VerticalAlignment.Center;
+
+            _sidebarCollapseBtn = ModernControlsFactory.CreateIconGhostButton(UiIcons.SidebarToggle, "折叠 / 展开左侧导航栏");
+            _sidebarCollapseBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                ToggleSidebarCollapsed();
+            };
+            DockPanel.SetDock(_sidebarCollapseBtn, Dock.Right);
+            utilDock.Children.Add(_sidebarCollapseBtn);
+
+            StackPanel leftUtils = new StackPanel();
+            leftUtils.Orientation = Orientation.Horizontal;
+            leftUtils.VerticalAlignment = VerticalAlignment.Center;
+
+            _themeToggleBtn = ModernControlsFactory.CreateIconGhostButton(_isDark ? UiIcons.Sun : UiIcons.Moon, _isDark ? "切换至浅色主题 (Paper Zinc)" : "切换至深色主题 (Obsidian Zinc)");
+            _themeToggleIcon = _themeToggleBtn.Content as Shapes.Path;
+            _themeToggleBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                ToggleThemeFromUi();
+            };
+            leftUtils.Children.Add(_themeToggleBtn);
+
+            _sidebarRefreshBtn = ModernControlsFactory.CreateIconGhostButton(UiIcons.Refresh, "立即增量扫描本地日志并刷新多端看板 (F5)");
+            _sidebarRefreshBtn.Margin = new Thickness(3, 0, 0, 0);
+            _sidebarRefreshBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                RunSilentScanAsync(_homeDir, true, true);
+                StartExchangeRateSyncAsync(false);
+            };
+            leftUtils.Children.Add(_sidebarRefreshBtn);
+
+            _sidebarHudBtn = ModernControlsFactory.CreateIconGhostButton(UiIcons.Capsule, "显示 / 隐藏桌面置顶微胶囊悬浮窗 (Ctrl+M)");
+            _sidebarHudBtn.Margin = new Thickness(3, 0, 0, 0);
+            _sidebarHudBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                ToggleMiniHudWindow();
+            };
+            leftUtils.Children.Add(_sidebarHudBtn);
+
+            _sidebarHelpBtn = ModernControlsFactory.CreateIconGhostButton(UiIcons.Help, "快捷键速查与跨设备 GitHub 令牌原理解析 (F1)");
+            _sidebarHelpBtn.Margin = new Thickness(3, 0, 0, 0);
+            _sidebarHelpBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                OpenShortcutAndGuideDialog(0);
+            };
+            leftUtils.Children.Add(_sidebarHelpBtn);
+
+            utilDock.Children.Add(leftUtils);
+            footerBar.Child = utilDock;
+            Grid.SetRow(footerBar, 3);
+            g.Children.Add(footerBar);
+
+            _sidebarBorder.Child = g;
+            return _sidebarBorder;
+        }
+
+        private void ToggleSidebarCollapsed()
+        {
+            _sidebarCollapsed = !_sidebarCollapsed;
+            double targetW = _sidebarCollapsed ? SidebarCollapsedWidth : SidebarExpandedWidth;
+            _sidebarColDef.Width = new GridLength(targetW);
+            _sidebarBorder.Width = targetW;
+
+            Visibility expandedVis = _sidebarCollapsed ? Visibility.Collapsed : Visibility.Visible;
+            if (_brandTextPanel != null) _brandTextPanel.Visibility = expandedVis;
+            if (_sidebarBrandHitBox != null) _sidebarBrandHitBox.Visibility = expandedVis;
+            if (_sidebarDataPanel != null) _sidebarDataPanel.Visibility = expandedVis;
+            if (_sidebarRefreshBtn != null) _sidebarRefreshBtn.Visibility = expandedVis;
+            if (_sidebarHudBtn != null) _sidebarHudBtn.Visibility = expandedVis;
+            if (_sidebarHelpBtn != null) _sidebarHelpBtn.Visibility = expandedVis;
+            if (_themeToggleBtn != null) _themeToggleBtn.Visibility = expandedVis;
+            if (_navDeviceCountBadge != null) _navDeviceCountBadge.Visibility = expandedVis;
+            if (_navSyncSubText != null) _navSyncSubText.Visibility = expandedVis;
+
+            if (_navTitleLabels != null)
+            {
+                for (int i = 0; i < _navTitleLabels.Length; i++)
+                {
+                    if (_navTitleLabels[i] != null)
+                        _navTitleLabels[i].Visibility = expandedVis;
+                }
+            }
+        }
+
+        private UIElement BuildTopContextBar()
+        {
+            _topContextBarBorder = new Border();
+            _topContextBarBorder.Height = TopBarLockedHeight;
+            _topContextBarBorder.MinHeight = TopBarLockedHeight;
+            _topContextBarBorder.MaxHeight = TopBarLockedHeight;
+            _topContextBarBorder.BorderThickness = new Thickness(0, 0, 0, 1);
+            _topContextBarBorder.Padding = new Thickness(16, 0, 0, 0);
+            _topContextBarBorder.SetResourceReference(Border.BackgroundProperty, "BgTitleBar");
+            _topContextBarBorder.SetResourceReference(Border.BorderBrushProperty, "BorderSubtle");
+
+            DockPanel topDock = new DockPanel();
+            topDock.LastChildFill = true;
+
+            // 最右侧：窗口控制按钮（最小化 / 最大化 / 关闭）
+            StackPanel captionBtns = ModernWindowChrome.CreateCaptionButtons(this, true, out _maxCaptionBtn, out _maxCaptionPath);
+            captionBtns.Margin = new Thickness(8, 0, 0, 0);
+            DockPanel.SetDock(captionBtns, Dock.Right);
+            topDock.Children.Add(captionBtns);
+
+            // 右侧第二组：全局筛选条（视图 0~4 显示）与设置页快捷动作（视图 5 显示）
+            Grid rightControlsHost = new Grid();
+            rightControlsHost.VerticalAlignment = VerticalAlignment.Center;
+            WindowChrome.SetIsHitTestVisibleInChrome(rightControlsHost, true);
+
+            _globalFilterGroup = new StackPanel();
+            _globalFilterGroup.Orientation = Orientation.Horizontal;
+            _globalFilterGroup.VerticalAlignment = VerticalAlignment.Center;
+
+            // 0) 全局命令面板快捷入口胶囊 [Ctrl+K]
+            Button cmdBtn = ModernControlsFactory.CreateButton("", "secondary");
+            cmdBtn.Height = 28;
+            cmdBtn.Padding = new Thickness(8, 0, 8, 0);
+            cmdBtn.Margin = new Thickness(0, 0, 8, 0);
+            cmdBtn.ToolTip = "唤起全局命令面板：秒跳 11 大视图、切换主题币种、导出战报或打开指南 (Ctrl+K)";
+            StackPanel cmdSp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            Shapes.Path cmdIc = UiIcons.CreateIcon(UiIcons.Search, 12.0, "FgMuted");
+            cmdIc.Margin = new Thickness(0, 0, 5, 0);
+            cmdSp.Children.Add(cmdIc);
+            TextBlock cmdKey = new TextBlock
+            {
+                Text = "Ctrl+K",
+                FontFamily = DesignSystem.FontMono,
+                FontSize = 10.8,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            cmdKey.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            cmdSp.Children.Add(cmdKey);
+            cmdBtn.Content = cmdSp;
+            cmdBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                OpenCommandPalette();
+            };
+            WindowChrome.SetIsHitTestVisibleInChrome(cmdBtn, true);
+            _globalFilterGroup.Children.Add(cmdBtn);
+
+            // 1) 设备范围选择器胶囊 [全部设备 (N) ▾]
+            _deviceSelectorBtn = ModernControlsFactory.CreateButton("", "secondary");
+            _deviceSelectorBtn.Height = 28;
+            _deviceSelectorBtn.Padding = new Thickness(9, 0, 8, 0);
+            _deviceSelectorBtn.Margin = new Thickness(0, 0, 8, 0);
+            _deviceSelectorBtn.ToolTip = "切换查看全部设备或单台电脑 / Linux VPS，管理设备备注与离线缓存";
+
+            StackPanel devBtnSp = new StackPanel();
+            devBtnSp.Orientation = Orientation.Horizontal;
+            devBtnSp.VerticalAlignment = VerticalAlignment.Center;
+
+            _deviceSelectorDot = new Shapes.Ellipse();
+            _deviceSelectorDot.Width = 6;
+            _deviceSelectorDot.Height = 6;
+            _deviceSelectorDot.Margin = new Thickness(0, 0, 6, 0);
+            _deviceSelectorDot.VerticalAlignment = VerticalAlignment.Center;
+            _deviceSelectorDot.SetResourceReference(Shapes.Shape.FillProperty, "SemanticSuccess");
+            devBtnSp.Children.Add(_deviceSelectorDot);
+
+            _deviceSelectorText = new TextBlock();
+            _deviceSelectorText.Text = "全部设备 (1)";
+            _deviceSelectorText.FontSize = 12;
+            _deviceSelectorText.FontWeight = FontWeights.Medium;
+            _deviceSelectorText.MaxWidth = 148;
+            _deviceSelectorText.TextTrimming = TextTrimming.CharacterEllipsis;
+            _deviceSelectorText.VerticalAlignment = VerticalAlignment.Center;
+            ModernControlsFactory.EnableTabularNumbers(_deviceSelectorText, false);
+            devBtnSp.Children.Add(_deviceSelectorText);
+
+            Shapes.Path devChev = UiIcons.CreateIcon(UiIcons.ChevronDown, 12.0, "FgMuted");
+            devChev.Margin = new Thickness(5, 1, 0, 0);
+            devChev.VerticalAlignment = VerticalAlignment.Center;
+            devBtnSp.Children.Add(devChev);
+
+            _deviceSelectorBtn.Content = devBtnSp;
+            _deviceSelectorBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                OpenDeviceSelectorPopover(_deviceSelectorBtn);
+            };
+            WindowChrome.SetIsHitTestVisibleInChrome(_deviceSelectorBtn, true);
+            _globalFilterGroup.Children.Add(_deviceSelectorBtn);
+
+            // 2) 时间范围分段器 [今日 | 3天 | 7天 | 30天 | 全部 | 近 __ 天]
+            Border rangeContainer = ModernControlsFactory.CreateSegmentedContainer();
+            rangeContainer.Margin = new Thickness(0, 0, 8, 0);
+            WindowChrome.SetIsHitTestVisibleInChrome(rangeContainer, true);
+            StackPanel rangeSp = (StackPanel)rangeContainer.Child;
+
+            string[] rLabels = new string[] { "今日", "3天", "7天", "30天", "全部" };
             _rangeBtns = new Button[rLabels.Length];
-            Border rangeBox = CreateSegContainer();
-            rangeBox.HorizontalAlignment = HorizontalAlignment.Center;
-            rangeBox.VerticalAlignment = VerticalAlignment.Center;
-            StackPanel rangeSp = (StackPanel)rangeBox.Child;
             for (int i = 0; i < rLabels.Length; i++)
             {
                 int idx = i;
-                Button b = CreateSegButton(rLabels[i]);
-                b.Click += delegate(object s, RoutedEventArgs e)
+                Button rb = ModernControlsFactory.CreateSegmentedItem(rLabels[i]);
+                rb.Padding = new Thickness(8, 0, 8, 0);
+                rb.Click += delegate(object s, RoutedEventArgs e)
                 {
                     _rangeDays = PresetRangeDays[idx];
+                    _selectedDate = null;
                     _suppressCustomDaysEvent = true;
-                    try { if (_customDaysInput != null) _customDaysInput.Text = ""; }
-                    finally { _suppressCustomDaysEvent = false; }
-                    UpdateSegVisuals(_rangeBtns, idx);
+                    try
+                    {
+                        if (_customDaysInput != null)
+                            _customDaysInput.Text = "";
+                    }
+                    finally
+                    {
+                        _suppressCustomDaysEvent = false;
+                    }
+                    ModernControlsFactory.UpdateSegmentedGroup(_rangeBtns, idx);
                     RefreshDashboardView();
                 };
-                _rangeBtns[i] = b;
-                rangeSp.Children.Add(b);
+                _rangeBtns[i] = rb;
+                rangeSp.Children.Add(rb);
             }
-            UpdateSegVisuals(_rangeBtns, 0);
+            ModernControlsFactory.UpdateSegmentedGroup(_rangeBtns, 0);
 
-            Border sep = new Border { Width = 1, Height = 14, Margin = new Thickness(5, 0, 6, 0), VerticalAlignment = VerticalAlignment.Center };
-            sep.SetResourceReference(Border.BackgroundProperty, "BorderStrong");
-            rangeSp.Children.Add(sep);
+            Border rangeSep = new Border();
+            rangeSep.Width = 1;
+            rangeSep.Height = 13;
+            rangeSep.Margin = new Thickness(4, 0, 5, 0);
+            rangeSep.VerticalAlignment = VerticalAlignment.Center;
+            rangeSep.SetResourceReference(Border.BackgroundProperty, "BorderStrong");
+            rangeSp.Children.Add(rangeSep);
 
-            TextBlock nearLbl = new TextBlock { Text = "近", FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 3, 0) };
-            nearLbl.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            TextBlock nearLbl = new TextBlock();
+            nearLbl.Text = "近";
+            nearLbl.FontSize = 11;
+            nearLbl.Margin = new Thickness(0, 0, 3, 0);
+            nearLbl.VerticalAlignment = VerticalAlignment.Center;
+            nearLbl.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             rangeSp.Children.Add(nearLbl);
 
-            _customDaysInput = MakeHeaderMiniInput("", 32);
-            _customDaysInput.ToolTip = "输入任意天数 N（如 14 或 90），查看过去 N 天总消耗";
+            _customDaysInput = ModernControlsFactory.CreateTextInput("", 20.0);
+            _customDaysInput.Width = 34;
+            _customDaysInput.FontSize = 11;
+            _customDaysInput.FontFamily = DesignSystem.FontMono;
+            _customDaysInput.Padding = new Thickness(3, 0, 3, 0);
+            _customDaysInput.HorizontalContentAlignment = HorizontalAlignment.Center;
+            _customDaysInput.ToolTip = "输入天数 N（1~3650）查看最近 N 天消耗；清空自动恢复「今日」";
             _customDaysInput.TextChanged += delegate(object s, TextChangedEventArgs e)
             {
                 if (_suppressCustomDaysEvent) return;
+                string txt = (_customDaysInput.Text ?? "").Trim();
+                if (string.IsNullOrEmpty(txt))
+                {
+                    // 清空自定义天数时平滑回退至「今日」
+                    _rangeDays = 1;
+                    _selectedDate = null;
+                    ModernControlsFactory.UpdateSegmentedGroup(_rangeBtns, 0);
+                    RefreshDashboardView();
+                    return;
+                }
+
                 int customD;
-                if (int.TryParse(_customDaysInput.Text.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out customD) && customD > 0 && customD <= 3650)
+                if (int.TryParse(txt, NumberStyles.Integer, CultureInfo.InvariantCulture, out customD) &&
+                    customD > 0 && customD <= 3650)
                 {
                     _rangeDays = customD;
-                    UpdateSegVisuals(_rangeBtns, -1);
+                    _selectedDate = null;
+                    // 若用户输入了预设天数（1/3/7/30），自动联动高亮对应分段项
+                    ModernControlsFactory.UpdateSegmentedGroup(_rangeBtns, FindPresetRangeIndex(customD));
                     RefreshDashboardView();
                 }
             };
             rangeSp.Children.Add(_customDaysInput);
 
-            TextBlock dayLbl = new TextBlock { Text = "天", FontSize = 11.5, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(3, 0, 5, 0) };
-            dayLbl.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-            rangeSp.Children.Add(dayLbl);
+            TextBlock dayUnitLbl = new TextBlock();
+            dayUnitLbl.Text = "天";
+            dayUnitLbl.FontSize = 11;
+            dayUnitLbl.Margin = new Thickness(3, 0, 5, 0);
+            dayUnitLbl.VerticalAlignment = VerticalAlignment.Center;
+            dayUnitLbl.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            rangeSp.Children.Add(dayUnitLbl);
 
-            Grid.SetColumn(rangeBox, 1);
-            g.Children.Add(rangeBox);
+            _globalFilterGroup.Children.Add(rangeContainer);
 
-            // Col 2: Clean Right Controls (Unified Currency/FX Pill + Cloud Sync + Fixed ↻ + Fixed ⋯ Menu)
-            StackPanel rightSp = new StackPanel();
-            rightSp.Orientation = Orientation.Horizontal;
-            rightSp.VerticalAlignment = VerticalAlignment.Center;
+            // 3) 币种分段胶囊 [¥ | $]
+            Border curContainer = ModernControlsFactory.CreateSegmentedContainer();
+            curContainer.Margin = new Thickness(0, 0, 8, 0);
+            WindowChrome.SetIsHitTestVisibleInChrome(curContainer, true);
+            StackPanel curSp = (StackPanel)curContainer.Child;
 
-            // 1. Unified Currency + FX Pill
-            Border fxPill = CreateSegContainer();
-            fxPill.Margin = new Thickness(0, 0, 8, 0);
-            StackPanel fxInner = (StackPanel)fxPill.Child;
-
-            string[] cLabels = new string[] { "¥", "$" };
             _currencyBtns = new Button[2];
+            string[] curSyms = new string[] { "¥", "$" };
             for (int i = 0; i < 2; i++)
             {
                 int idx = i;
-                Button cb = CreateSegButton(cLabels[i]);
-                cb.Padding = new Thickness(8, 3, 8, 3);
+                Button cb = ModernControlsFactory.CreateSegmentedItem(curSyms[i]);
+                cb.Padding = new Thickness(8, 0, 8, 0);
+                cb.FontFamily = DesignSystem.FontMono;
                 cb.Click += delegate(object s, RoutedEventArgs e)
                 {
-                    _isCny = (idx == 0);
-                    UpdateSegVisuals(_currencyBtns, idx);
+                    bool preferCny = (idx == 0);
+                    if (_isCny == preferCny) return;
+                    _isCny = preferCny;
+                    if (_syncCfg != null)
+                    {
+                        _syncCfg.PreferCny = _isCny;
+                        SyncService.SaveConfig(_syncCfg);
+                    }
+                    ModernControlsFactory.UpdateSegmentedGroup(_currencyBtns, _isCny ? 0 : 1);
                     RefreshDashboardView();
+                    if (_settingsView != null)
+                        _settingsView.ReloadFromConfig();
                 };
                 _currencyBtns[i] = cb;
-                fxInner.Children.Add(cb);
+                curSp.Children.Add(cb);
             }
-            UpdateSegVisuals(_currencyBtns, 0);
+            ModernControlsFactory.UpdateSegmentedGroup(_currencyBtns, _isCny ? 0 : 1);
+            _globalFilterGroup.Children.Add(curContainer);
 
-            Border fxSep = new Border { Width = 1, Height = 14, Margin = new Thickness(4, 0, 5, 0), VerticalAlignment = VerticalAlignment.Center };
-            fxSep.SetResourceReference(Border.BackgroundProperty, "BorderStrong");
-            fxInner.Children.Add(fxSep);
+            // 4) 导出按钮 [导出 ▾]
+            _exportMenuBtn = ModernControlsFactory.CreateButton("", "secondary");
+            _exportMenuBtn.Height = 28;
+            _exportMenuBtn.Padding = new Thickness(9, 0, 8, 0);
+            _exportMenuBtn.ToolTip = "导出交互式 HTML 网页看板、多端 CSV 对账单或脱敏 JSON 快照";
 
-            _rateInput = MakeHeaderMiniInput(_usdToCny.ToString("0.00##", CultureInfo.InvariantCulture), 48);
-            _rateInput.TextChanged += delegate(object s, TextChangedEventArgs e)
+            StackPanel expSp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            Shapes.Path expIcon = UiIcons.CreateIcon(UiIcons.Download, 13.5, null);
+            expIcon.Margin = new Thickness(0, 0, 5, 0);
+            expSp.Children.Add(expIcon);
+            expSp.Children.Add(new TextBlock { Text = "导出", FontSize = 12, FontWeight = FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center });
+            Shapes.Path expChev = UiIcons.CreateIcon(UiIcons.ChevronDown, 11.5, "FgMuted");
+            expChev.Margin = new Thickness(4, 1, 0, 0);
+            expSp.Children.Add(expChev);
+
+            _exportMenuBtn.Content = expSp;
+            _exportMenuBtn.Click += delegate(object s, RoutedEventArgs e)
             {
-                if (_suppressRateEvent) return;
-                double parsed;
-                if (double.TryParse(_rateInput.Text.Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out parsed) && parsed > 0.1 && parsed < 100.0)
+                OpenExportMenuPopover(_exportMenuBtn);
+            };
+            WindowChrome.SetIsHitTestVisibleInChrome(_exportMenuBtn, true);
+            _globalFilterGroup.Children.Add(_exportMenuBtn);
+
+            rightControlsHost.Children.Add(_globalFilterGroup);
+
+            // 视图 10（同步与设置）专用快捷动作条：时光机备份 / 开机自启 / 复制配对码 / 粘贴配对码 / 立即同步
+            _settingsHeaderActions = new StackPanel();
+            _settingsHeaderActions.Orientation = Orientation.Horizontal;
+            _settingsHeaderActions.VerticalAlignment = VerticalAlignment.Center;
+            _settingsHeaderActions.Visibility = Visibility.Collapsed;
+
+            Button backupQuickBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.History, "时光机备份", "secondary");
+            backupQuickBtn.Height = 28;
+            backupQuickBtn.Margin = new Thickness(0, 0, 6, 0);
+            backupQuickBtn.ToolTip = "管理本地 .toklens.gz 时光机历史快照、一键创建归档或高水位无损恢复";
+            backupQuickBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                OpenTimeMachineBackupPopover(backupQuickBtn);
+            };
+            WindowChrome.SetIsHitTestVisibleInChrome(backupQuickBtn, true);
+            _settingsHeaderActions.Children.Add(backupQuickBtn);
+
+            _autoStartToggleBtn = ModernControlsFactory.CreateButton("开机自启: 关", "secondary");
+            _autoStartToggleBtn.Height = 28;
+            _autoStartToggleBtn.Margin = new Thickness(0, 0, 6, 0);
+            _autoStartToggleBtn.ToolTip = "切换当前用户登录 Windows 时静默最小化驻留自启（零管理员权限要求）";
+            _autoStartToggleBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                ToggleAutoStartFromUi();
+            };
+            WindowChrome.SetIsHitTestVisibleInChrome(_autoStartToggleBtn, true);
+            _settingsHeaderActions.Children.Add(_autoStartToggleBtn);
+
+            Button quickCopyPairBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Copy, "复制配对码", "secondary");
+            quickCopyPairBtn.Height = 28;
+            quickCopyPairBtn.Margin = new Thickness(0, 0, 6, 0);
+            quickCopyPairBtn.ToolTip = "复制加密多端同步配对码，供其他电脑或 Linux VPS 一键接入";
+            quickCopyPairBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                if (_settingsView != null)
+                    _settingsView.TriggerQuickPairCopy();
+            };
+            WindowChrome.SetIsHitTestVisibleInChrome(quickCopyPairBtn, true);
+            _settingsHeaderActions.Children.Add(quickCopyPairBtn);
+
+            Button quickPastePairBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Key, "粘贴配对码", "secondary");
+            quickPastePairBtn.Height = 28;
+            quickPastePairBtn.Margin = new Thickness(0, 0, 6, 0);
+            quickPastePairBtn.ToolTip = "从剪贴板导入另一台电脑复制的同步配对码（保留本机名称）";
+            quickPastePairBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                if (_settingsView != null)
+                    _settingsView.TriggerQuickPairPaste();
+            };
+            WindowChrome.SetIsHitTestVisibleInChrome(quickPastePairBtn, true);
+            _settingsHeaderActions.Children.Add(quickPastePairBtn);
+
+            Button quickSyncNowBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Cloud, "立即同步", "primary");
+            quickSyncNowBtn.Height = 28;
+            quickSyncNowBtn.ToolTip = "保存当前设置并立即与云端同步";
+            quickSyncNowBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                if (_settingsView != null)
+                    _settingsView.TriggerSaveAndSyncNow();
+            };
+            WindowChrome.SetIsHitTestVisibleInChrome(quickSyncNowBtn, true);
+            _settingsHeaderActions.Children.Add(quickSyncNowBtn);
+
+            rightControlsHost.Children.Add(_settingsHeaderActions);
+
+            DockPanel.SetDock(rightControlsHost, Dock.Right);
+            topDock.Children.Add(rightControlsHost);
+
+            // 左侧：视图主标题 + 动态上下文副文案 + 无跳动内联 22px 告警胶囊（彻底取代旧版跳动 38px 的 WarningBanner！）
+            StackPanel leftTitleStack = new StackPanel();
+            leftTitleStack.Orientation = Orientation.Horizontal;
+            leftTitleStack.VerticalAlignment = VerticalAlignment.Center;
+            leftTitleStack.Margin = new Thickness(0, 0, 12, 0);
+
+            _viewTitleText = new TextBlock();
+            _viewTitleText.Text = ViewTitles[0];
+            _viewTitleText.FontSize = 15;
+            _viewTitleText.FontWeight = FontWeights.SemiBold;
+            _viewTitleText.VerticalAlignment = VerticalAlignment.Center;
+            _viewTitleText.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            leftTitleStack.Children.Add(_viewTitleText);
+
+            _viewSubContextText = new TextBlock();
+            _viewSubContextText.Text = "正在初始化本地增量游标引擎...";
+            _viewSubContextText.FontSize = 11.5;
+            _viewSubContextText.Margin = new Thickness(10, 1, 0, 0);
+            _viewSubContextText.MaxWidth = 280;
+            _viewSubContextText.TextTrimming = TextTrimming.CharacterEllipsis;
+            _viewSubContextText.VerticalAlignment = VerticalAlignment.Center;
+            _viewSubContextText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            ModernControlsFactory.EnableTabularNumbers(_viewSubContextText, false);
+            leftTitleStack.Children.Add(_viewSubContextText);
+
+            _inlineAlertBadge = new Border();
+            _inlineAlertBadge.Height = 22;
+            _inlineAlertBadge.CornerRadius = new CornerRadius(11);
+            _inlineAlertBadge.BorderThickness = new Thickness(1);
+            _inlineAlertBadge.Padding = new Thickness(8, 0, 8, 0);
+            _inlineAlertBadge.Margin = new Thickness(10, 0, 0, 0);
+            _inlineAlertBadge.VerticalAlignment = VerticalAlignment.Center;
+            _inlineAlertBadge.Cursor = Cursors.Hand;
+            _inlineAlertBadge.Visibility = Visibility.Collapsed;
+            _inlineAlertBadge.SetResourceReference(Border.BackgroundProperty, "SemanticWarningBg");
+            _inlineAlertBadge.SetResourceReference(Border.BorderBrushProperty, "SemanticWarningBorder");
+            WindowChrome.SetIsHitTestVisibleInChrome(_inlineAlertBadge, true);
+
+            StackPanel alertSp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            Shapes.Path alertIcon = UiIcons.CreateIcon(UiIcons.Alert, 12.0, "SemanticWarning");
+            alertIcon.Margin = new Thickness(0, 0, 4, 0);
+            alertSp.Children.Add(alertIcon);
+
+            _inlineAlertText = new TextBlock();
+            _inlineAlertText.Text = "告警";
+            _inlineAlertText.FontSize = 11;
+            _inlineAlertText.FontWeight = FontWeights.Medium;
+            _inlineAlertText.VerticalAlignment = VerticalAlignment.Center;
+            _inlineAlertText.SetResourceReference(TextBlock.ForegroundProperty, "SemanticWarning");
+            ModernControlsFactory.EnableTabularNumbers(_inlineAlertText, false);
+            alertSp.Children.Add(_inlineAlertText);
+
+            _inlineAlertBadge.Child = alertSp;
+            _inlineAlertBadge.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+            {
+                OpenInlineAlertPopover(_inlineAlertBadge);
+            };
+            leftTitleStack.Children.Add(_inlineAlertBadge);
+
+            topDock.Children.Add(leftTitleStack);
+            _topContextBarBorder.Child = topDock;
+            return _topContextBarBorder;
+        }
+
+        // -------------------- 四个现代无阻塞 Popover 浮层（零 MessageBox！） --------------------
+        private void OpenArchiveStatusPopover(UIElement target)
+        {
+            StackPanel sp = new StackPanel();
+            sp.Width = 340;
+
+            StackPanel hdr = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
+            Shapes.Path shIcon = UiIcons.CreateIcon(UiIcons.Shield, 15.0, "SemanticSuccess");
+            shIcon.Margin = new Thickness(0, 0, 6, 0);
+            hdr.Children.Add(shIcon);
+            TextBlock hdrTxt = new TextBlock
+            {
+                Text = "双层防清理高水位归档保护已启用",
+                FontSize = 13,
+                FontWeight = FontWeights.SemiBold,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            hdrTxt.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            hdr.Children.Add(hdrTxt);
+            sp.Children.Add(hdr);
+
+            string dbPath = LocalUsageStore.DbFilePath;
+            int activeFiles = _scanResult != null ? _scanResult.TotalFilesTracked : 0;
+            int archivedFiles = _scanResult != null ? _scanResult.ArchivedFilesCount : 0;
+
+            TextBlock body = new TextBlock();
+            body.FontSize = 11.8;
+            body.LineHeight = 18;
+            body.TextWrapping = TextWrapping.Wrap;
+            body.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            body.Text = string.Format(
+                CultureInfo.InvariantCulture,
+                "1. 本机 SQLite 增量高水位库\n   • 路径：{0}\n   • 实时监听活跃目录：{1} 个  |  跟踪文件：{2:N0} 个\n   • 已保护被清理历史文件：{3:N0} 个\n\n2. 多端 Gist / WebDAV 高水位合并\n   • 即使清空工具对话缓存或重装系统，历史已入库账单均永久保留不归零。",
+                string.IsNullOrEmpty(dbPath) ? "%APPDATA%\\TokLens\\toklens.db" : dbPath,
+                _watchers.Count,
+                activeFiles,
+                archivedFiles);
+            sp.Children.Add(body);
+
+            Popup pop = ModernControlsFactory.CreateModernPopover(target, sp);
+
+            StackPanel btnRow = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
+            Button openFolderBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Folder, "打开归档目录", "secondary");
+            openFolderBtn.Height = 26;
+            openFolderBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                pop.IsOpen = false;
+                OpenInExplorerSelect(string.IsNullOrEmpty(dbPath) ? SyncService.ConfigFilePath : dbPath);
+            };
+            btnRow.Children.Add(openFolderBtn);
+            sp.Children.Add(btnRow);
+
+            pop.IsOpen = true;
+        }
+
+        private void OpenInlineAlertPopover(UIElement target)
+        {
+            StackPanel sp = new StackPanel();
+            sp.Width = 360;
+
+            TextBlock title = new TextBlock
+            {
+                Text = "预算提醒与目录扫描诊断",
+                FontSize = 13,
+                FontWeight = FontWeights.SemiBold,
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+            title.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            sp.Children.Add(title);
+
+            Popup pop = null;
+
+            if (_syncCfg != null && _syncCfg.DailyBudgetUsd > 0.0 && _latestTodayUsd >= _syncCfg.DailyBudgetUsd)
+            {
+                Border budgetBox = new Border
                 {
-                    _usdToCny = parsed;
-                    UpdateFxBadgeUi(false, true);
-                    RefreshDashboardView();
+                    CornerRadius = new CornerRadius(6),
+                    BorderThickness = new Thickness(1),
+                    Padding = new Thickness(10, 8, 10, 8),
+                    Margin = new Thickness(0, 0, 0, 8)
+                };
+                budgetBox.SetResourceReference(Border.BackgroundProperty, "SemanticWarningBg");
+                budgetBox.SetResourceReference(Border.BorderBrushProperty, "SemanticWarningBorder");
+
+                TextBlock bt = new TextBlock
+                {
+                    FontSize = 11.8,
+                    TextWrapping = TextWrapping.Wrap,
+                    Text = string.Format(
+                        CultureInfo.InvariantCulture,
+                        "今日实时花费 {0} 已超出设定的每日预算阈值 {1}（{2:F0}%）。",
+                        FormatterUtil.FormatMoney(_latestTodayUsd, _isCny, _usdToCny),
+                        FormatterUtil.FormatMoney(_syncCfg.DailyBudgetUsd, _isCny, _usdToCny),
+                        (_latestTodayUsd * 100.0) / Math.Max(0.0001, _syncCfg.DailyBudgetUsd))
+                };
+                bt.SetResourceReference(TextBlock.ForegroundProperty, "SemanticWarning");
+                budgetBox.Child = bt;
+                sp.Children.Add(budgetBox);
+            }
+
+            if (_scanResult != null && _scanResult.Warnings != null && _scanResult.Warnings.Count > 0)
+            {
+                ScrollViewer sv = new ScrollViewer { MaxHeight = 180, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+                StackPanel warnList = new StackPanel();
+                for (int i = 0; i < _scanResult.Warnings.Count; i++)
+                {
+                    TextBlock wt = new TextBlock
+                    {
+                        Text = "• " + _scanResult.Warnings[i],
+                        FontSize = 11.5,
+                        TextWrapping = TextWrapping.Wrap,
+                        Margin = new Thickness(0, 0, 0, 4)
+                    };
+                    wt.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+                    warnList.Children.Add(wt);
                 }
-            };
-            fxInner.Children.Add(_rateInput);
+                sv.Content = warnList;
+                sp.Children.Add(sv);
+            }
 
-            _fxStatusBtnBorder = new Border();
-            _fxStatusBtnBorder.CornerRadius = new CornerRadius(4);
-            _fxStatusBtnBorder.Padding = new Thickness(5, 2, 5, 2);
-            _fxStatusBtnBorder.Margin = new Thickness(4, 0, 2, 0);
-            _fxStatusBtnBorder.VerticalAlignment = VerticalAlignment.Center;
-            _fxStatusBtnBorder.Cursor = Cursors.Hand;
-            _fxStatusBtnBorder.SetResourceReference(Border.BackgroundProperty, "BgElevated");
-            _fxStatusBtnText = new TextBlock { Text = "实时", FontSize = 10.5, FontWeight = FontWeights.Medium };
-            _fxStatusBtnText.SetResourceReference(TextBlock.ForegroundProperty, "AccentEmerald");
-            _fxStatusBtnBorder.Child = _fxStatusBtnText;
-            _fxStatusBtnBorder.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+            StackPanel actions = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 8, 0, 0) };
+            Button cfgBudgetBtn = ModernControlsFactory.CreateButton("前往设置调整预算", "secondary");
+            cfgBudgetBtn.Height = 26;
+            cfgBudgetBtn.Click += delegate(object s, RoutedEventArgs e)
             {
-                StartExchangeRateSyncAsync(true);
+                if (pop != null) pop.IsOpen = false;
+                SwitchActiveView(ViewSettings);
             };
-            fxInner.Children.Add(_fxStatusBtnBorder);
-            rightSp.Children.Add(fxPill);
+            actions.Children.Add(cfgBudgetBtn);
+            sp.Children.Add(actions);
 
-            // 2. Primary Multi-Device Sync Button
-            _syncBtn = CreateActionButton("多端同步", true);
-            _syncBtn.Height = 30;
-            _syncBtn.Margin = new Thickness(0, 0, 6, 0);
-            _syncBtn.ToolTip = "配置多台 Windows 电脑与 Linux VPS 自动云同步";
-            _syncBtn.Click += delegate(object s, RoutedEventArgs e) { OpenSyncDialog(0); };
-            rightSp.Children.Add(_syncBtn);
-
-            // 3. Fixed-Width Silent Refresh Button (Never shifts width!)
-            _refreshBtn = CreateActionButton("↻", false);
-            _refreshBtn.Width = 32;
-            _refreshBtn.Height = 30;
-            _refreshBtn.Padding = new Thickness(0);
-            _refreshBtn.FontSize = 14;
-            _refreshBtn.Margin = new Thickness(0, 0, 6, 0);
-            _refreshBtn.ToolTip = "立即执行后台增量刷新（无弹窗遮挡）";
-            _refreshBtn.Click += delegate(object s, RoutedEventArgs e)
-            {
-                RunSilentScanAsync(_homeDir, true, true);
-                if (_syncCfg != null && _syncCfg.IsConfigured && !_syncCfg.AutoSync)
-                    StartBackgroundCloudSync();
-                StartExchangeRateSyncAsync(false);
-                StartCloudPricingSyncAsync(false);
-            };
-            rightSp.Children.Add(_refreshBtn);
-
-            // 4. Fixed-Width More Menu Button (⋯)
-            _moreBtn = CreateActionButton("⋯", false);
-            _moreBtn.Width = 32;
-            _moreBtn.Height = 30;
-            _moreBtn.Padding = new Thickness(0);
-            _moreBtn.FontSize = 14;
-            _moreBtn.ToolTip = "导出报告、目录切换、价格库更新、防清理归档状态与外观主题";
-            ContextMenu moreMenu = BuildMoreContextMenu();
-            _moreBtn.ContextMenu = moreMenu;
-            _moreBtn.Click += delegate(object s, RoutedEventArgs e)
-            {
-                moreMenu.PlacementTarget = _moreBtn;
-                moreMenu.Placement = PlacementMode.Bottom;
-                moreMenu.IsOpen = true;
-            };
-            rightSp.Children.Add(_moreBtn);
-
-            Grid.SetColumn(rightSp, 2);
-            g.Children.Add(rightSp);
-
-            bar.Child = g;
-            return bar;
+            pop = ModernControlsFactory.CreateModernPopover(target, sp);
+            pop.IsOpen = true;
         }
 
-        private TextBox MakeHeaderMiniInput(string text, double width)
+        private void OpenDeviceSelectorPopover(UIElement target)
         {
-            TextBox tb = new TextBox();
-            tb.Text = text;
-            tb.Width = width;
-            tb.Height = 22;
-            tb.FontSize = 11.5;
-            tb.TextAlignment = TextAlignment.Center;
-            tb.VerticalContentAlignment = VerticalAlignment.Center;
-            tb.VerticalAlignment = VerticalAlignment.Center;
-            tb.SetResourceReference(TextBox.ForegroundProperty, "FgPrimary");
-            tb.SetResourceReference(TextBox.CaretBrushProperty, "FgPrimary");
+            StackPanel rootSp = new StackPanel();
+            rootSp.Width = 336;
 
-            ControlTemplate tpl = new ControlTemplate(typeof(TextBox));
-            FrameworkElementFactory bd = new FrameworkElementFactory(typeof(Border), "MiniBd");
-            bd.SetValue(Border.CornerRadiusProperty, new CornerRadius(4));
-            bd.SetValue(Border.BorderThicknessProperty, new Thickness(1));
-            bd.SetValue(Border.BackgroundProperty, new DynamicResourceExtension("BgCard"));
-            bd.SetValue(Border.BorderBrushProperty, new DynamicResourceExtension("BorderStrong"));
-            FrameworkElementFactory sv = new FrameworkElementFactory(typeof(ScrollViewer), "PART_ContentHost");
-            sv.SetValue(ScrollViewer.MarginProperty, new Thickness(2, 0, 2, 0));
-            sv.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
-            bd.AppendChild(sv);
-            tpl.VisualTree = bd;
+            Popup pop = null;
 
-            Trigger focusTrig = new Trigger { Property = UIElement.IsKeyboardFocusWithinProperty, Value = true };
-            focusTrig.Setters.Add(new Setter(Border.BorderBrushProperty, new DynamicResourceExtension("AccentBlue"), "MiniBd"));
-            tpl.Triggers.Add(focusTrig);
-            tb.Template = tpl;
-            return tb;
+            TextBlock hdr = new TextBlock
+            {
+                Text = "选择设备账单视角",
+                FontSize = 11.5,
+                FontWeight = FontWeights.SemiBold,
+                Margin = new Thickness(6, 2, 6, 6)
+            };
+            hdr.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            rootSp.Children.Add(hdr);
+
+            // 全部设备汇总行
+            double allUsd = 0.0;
+            for (int i = 0; i < _latestMachineViews.Count; i++)
+                allUsd += _latestMachineViews[i].CostUsd;
+
+            Border allItem = BuildPopoverDeviceItem(
+                null,
+                string.Format(CultureInfo.InvariantCulture, "全部设备汇总 ({0} 台)", Math.Max(1, _latestMachineViews.Count)),
+                "跨端全量合并",
+                FormatterUtil.FormatMoney(allUsd, _isCny, _usdToCny),
+                true,
+                true,
+                _selectedMachineId == null,
+                delegate()
+                {
+                    if (pop != null) pop.IsOpen = false;
+                    _selectedMachineId = null;
+                    RefreshDashboardView();
+                },
+                null,
+                null);
+            rootSp.Children.Add(allItem);
+
+            Border sep1 = new Border { Height = 1, Margin = new Thickness(4, 5, 4, 5) };
+            sep1.SetResourceReference(Border.BackgroundProperty, "BorderSubtle");
+            rootSp.Children.Add(sep1);
+
+            ScrollViewer listSv = new ScrollViewer();
+            listSv.MaxHeight = 260;
+            listSv.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+
+            StackPanel nodeStack = new StackPanel();
+            for (int i = 0; i < _latestMachineViews.Count; i++)
+            {
+                MachineRowView mv = _latestMachineViews[i];
+                bool isSel = _selectedMachineId != null && string.Equals(_selectedMachineId, mv.MachineId, StringComparison.OrdinalIgnoreCase);
+
+                Action onSelect = delegate()
+                {
+                    if (pop != null) pop.IsOpen = false;
+                    _selectedMachineId = mv.MachineId;
+                    RefreshDashboardView();
+                };
+
+                Action onAlias = delegate()
+                {
+                    if (pop != null) pop.IsOpen = false;
+                    OpenDeviceAliasPopover(target, mv);
+                };
+
+                Action onRemove = null;
+                if (!mv.IsLocal)
+                {
+                    onRemove = delegate()
+                    {
+                        if (pop != null) pop.IsOpen = false;
+                        RemoveOfflineRemoteNodeCache(mv);
+                    };
+                }
+
+                Border rowBd = BuildPopoverDeviceItem(
+                    mv.MachineId,
+                    mv.MachineName,
+                    mv.IsLocal ? "本机实时" : mv.StatusText,
+                    mv.FormattedMoney,
+                    mv.IsOnline,
+                    mv.IsLocal,
+                    isSel,
+                    onSelect,
+                    onAlias,
+                    onRemove);
+                nodeStack.Children.Add(rowBd);
+            }
+            listSv.Content = nodeStack;
+            rootSp.Children.Add(listSv);
+
+            Border sep2 = new Border { Height = 1, Margin = new Thickness(4, 6, 4, 6) };
+            sep2.SetResourceReference(Border.BackgroundProperty, "BorderSubtle");
+            rootSp.Children.Add(sep2);
+
+            Button addDevBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Plus, "接入新电脑 / Linux VPS", "ghost");
+            addDevBtn.HorizontalAlignment = HorizontalAlignment.Stretch;
+            addDevBtn.Height = 30;
+            addDevBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                if (pop != null) pop.IsOpen = false;
+                SwitchActiveView(ViewSettings);
+                if (_settingsView != null)
+                    _settingsView.ScrollToSection(1);
+            };
+            rootSp.Children.Add(addDevBtn);
+
+            pop = ModernControlsFactory.CreateModernPopover(target, rootSp);
+            pop.IsOpen = true;
         }
 
-        private ContextMenu BuildMoreContextMenu()
+        private Border BuildPopoverDeviceItem(
+            string machineId,
+            string title,
+            string subBadge,
+            string moneyText,
+            bool isOnline,
+            bool isLocal,
+            bool isSelected,
+            Action onSelect,
+            Action onEditAlias,
+            Action onRemoveCache)
         {
-            ContextMenu cm = new ContextMenu();
+            Border bd = new Border();
+            bd.CornerRadius = new CornerRadius(6);
+            bd.Padding = new Thickness(8, 6, 8, 6);
+            bd.Margin = new Thickness(0, 0, 0, 2);
+            bd.Cursor = Cursors.Hand;
+            if (isSelected)
+                bd.SetResourceReference(Border.BackgroundProperty, "BgSelected");
+            else
+                bd.Background = Brushes.Transparent;
 
-            MenuItem mHtml = new MenuItem { Header = "导出交互式网页报告 (HTML)" };
-            mHtml.Click += OnOpenWebReportClick;
-            cm.Items.Add(mHtml);
-
-            MenuItem mCsv = new MenuItem { Header = "导出多端账单明细表格 (CSV)" };
-            mCsv.Click += OnExportCsvClick;
-            cm.Items.Add(mCsv);
-
-            cm.Items.Add(new Separator());
-
-            MenuItem mCloudNow = new MenuItem { Header = "立即同步多端云端账单 (Gist / WebDAV)" };
-            mCloudNow.Click += delegate(object s, RoutedEventArgs e)
+            bd.MouseEnter += delegate(object s, MouseEventArgs e)
             {
-                if (_syncCfg != null && _syncCfg.IsConfigured)
-                    StartBackgroundCloudSync();
-                else
-                    OpenSyncDialog(0);
+                if (!isSelected) bd.SetResourceReference(Border.BackgroundProperty, "BgHover");
             };
-            cm.Items.Add(mCloudNow);
-
-            MenuItem mPrice = new MenuItem { Header = "立即强制刷新云端模型价格库 (models.dev + LiteLLM + OpenRouter)" };
-            mPrice.Click += delegate(object s, RoutedEventArgs e) { StartCloudPricingSyncAsync(true); };
-            cm.Items.Add(mPrice);
-
-            MenuItem mFx = new MenuItem { Header = "立即刷新在线美元实时汇率 (USD/CNY)" };
-            mFx.Click += delegate(object s, RoutedEventArgs e) { StartExchangeRateSyncAsync(true); };
-            cm.Items.Add(mFx);
-
-            MenuItem mDir = new MenuItem { Header = "切换扫描的用户主目录..." };
-            mDir.Click += OnChooseDirectoryClick;
-            cm.Items.Add(mDir);
-
-            cm.Items.Add(new Separator());
-
-            _themeMenuItem = new MenuItem { Header = "切换为浅色主题" };
-            _themeMenuItem.Click += OnToggleThemeClick;
-            cm.Items.Add(_themeMenuItem);
-
-            MenuItem mArchive = new MenuItem { Header = "查看防清理归档保护状态" };
-            mArchive.Click += OnShowArchiveProtectionStatusClick;
-            cm.Items.Add(mArchive);
-
-            MenuItem mAbout = new MenuItem { Header = "查看统计口径与架构说明" };
-            mAbout.Click += delegate(object s, RoutedEventArgs e)
+            bd.MouseLeave += delegate(object s, MouseEventArgs e)
             {
-                _activeTab = 4;
-                UpdateSegVisuals(_tabBtns, -1);
-                UpdateTabVisibility();
+                if (!isSelected) bd.Background = Brushes.Transparent;
             };
-            cm.Items.Add(mAbout);
-
-            return cm;
-        }
-
-        private Border BuildDeviceFilterStrip()
-        {
-            Border strip = new Border();
-            strip.Height = 40;
-            strip.Padding = new Thickness(18, 0, 18, 0);
-            strip.BorderThickness = new Thickness(0, 0, 0, 1);
-            strip.SetResourceReference(Border.BackgroundProperty, "BgSurface");
-            strip.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
 
             DockPanel dock = new DockPanel();
 
-            // Right-docked static Add Device / VPS action link
-            Border addBtn = new Border();
-            addBtn.CornerRadius = new CornerRadius(6);
-            addBtn.Padding = new Thickness(10, 4, 10, 4);
-            addBtn.Margin = new Thickness(10, 0, 0, 0);
-            addBtn.BorderThickness = new Thickness(1);
-            addBtn.VerticalAlignment = VerticalAlignment.Center;
-            addBtn.Cursor = Cursors.Hand;
-            addBtn.SetResourceReference(Border.BackgroundProperty, "BgCard");
-            addBtn.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
-            addBtn.ToolTip = "打开多端接入向导：生成配对码或复制 Linux VPS 一键部署命令";
-
-            TextBlock addTxt = new TextBlock();
-            addTxt.Text = "+ 接入电脑 / Linux VPS";
-            addTxt.FontSize = 11.5;
-            addTxt.FontWeight = FontWeights.Medium;
-            addTxt.SetResourceReference(TextBlock.ForegroundProperty, "AccentBlue");
-            addBtn.Child = addTxt;
-            addBtn.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { OpenSyncDialog(1); };
-            addBtn.MouseEnter += delegate(object s, MouseEventArgs e) { addBtn.SetResourceReference(Border.BorderBrushProperty, "AccentBlue"); };
-            addBtn.MouseLeave += delegate(object s, MouseEventArgs e) { addBtn.SetResourceReference(Border.BorderBrushProperty, "BorderCard"); };
-
-            DockPanel.SetDock(addBtn, Dock.Right);
-            dock.Children.Add(addBtn);
-
-            // Single-row horizontal ScrollViewer (Never wraps to 2nd row -> 0.0px vertical jump!)
-            _deviceScroll = new ScrollViewer();
-            _deviceScroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Hidden;
-            _deviceScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Disabled;
-            _deviceScroll.VerticalAlignment = VerticalAlignment.Center;
-            _deviceScroll.PreviewMouseWheel += delegate(object s, MouseWheelEventArgs e)
+            StackPanel rightSp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            TextBlock moneyTb = new TextBlock
             {
-                if (_deviceScroll.ScrollableWidth > 0)
+                Text = moneyText,
+                FontFamily = DesignSystem.FontMono,
+                FontSize = 11.5,
+                FontWeight = FontWeights.SemiBold,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(6, 0, 4, 0)
+            };
+            moneyTb.SetResourceReference(TextBlock.ForegroundProperty, isSelected ? "AccentText" : "FgPrimary");
+            rightSp.Children.Add(moneyTb);
+
+            if (onEditAlias != null)
+            {
+                Button aliasBtn = ModernControlsFactory.CreateButton("备注", "ghost");
+                aliasBtn.Height = 22;
+                aliasBtn.FontSize = 10.5;
+                aliasBtn.Padding = new Thickness(5, 0, 5, 0);
+                aliasBtn.ToolTip = "设置该设备在本机的备注显示名";
+                aliasBtn.Click += delegate(object s, RoutedEventArgs e)
                 {
-                    _deviceScroll.ScrollToHorizontalOffset(_deviceScroll.HorizontalOffset - e.Delta * 0.5);
                     e.Handled = true;
+                    onEditAlias();
+                };
+                rightSp.Children.Add(aliasBtn);
+            }
+
+            if (onRemoveCache != null && !isLocal)
+            {
+                Button delBtn = ModernControlsFactory.CreateIconGhostButton(UiIcons.Trash, "从本地移除该远端设备的缓存快照");
+                delBtn.Width = 22;
+                delBtn.Height = 22;
+                delBtn.Click += delegate(object s, RoutedEventArgs e)
+                {
+                    e.Handled = true;
+                    onRemoveCache();
+                };
+                rightSp.Children.Add(delBtn);
+            }
+
+            DockPanel.SetDock(rightSp, Dock.Right);
+            dock.Children.Add(rightSp);
+
+            StackPanel leftSp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            Shapes.Ellipse dot = new Shapes.Ellipse { Width = 6, Height = 6, Margin = new Thickness(0, 0, 7, 0), VerticalAlignment = VerticalAlignment.Center };
+            dot.SetResourceReference(Shapes.Shape.FillProperty, isOnline ? "SemanticSuccess" : "SemanticWarning");
+            leftSp.Children.Add(dot);
+
+            StackPanel textCol = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            TextBlock nameTb = new TextBlock
+            {
+                Text = title,
+                FontSize = 12,
+                FontWeight = FontWeights.Medium,
+                MaxWidth = 145,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+            nameTb.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            textCol.Children.Add(nameTb);
+
+            TextBlock subTb = new TextBlock
+            {
+                Text = subBadge,
+                FontSize = 10.2
+            };
+            subTb.SetResourceReference(TextBlock.ForegroundProperty, isOnline ? "FgMuted" : "SemanticWarning");
+            textCol.Children.Add(subTb);
+
+            leftSp.Children.Add(textCol);
+            dock.Children.Add(leftSp);
+
+            bd.Child = dock;
+            bd.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+            {
+                if (onSelect != null) onSelect();
+            };
+            return bd;
+        }
+
+        private void OpenDeviceAliasPopover(UIElement anchor, MachineRowView targetMachine)
+        {
+            if (targetMachine == null || string.IsNullOrEmpty(targetMachine.MachineId))
+                return;
+
+            StackPanel sp = new StackPanel { Width = 280 };
+            Popup pop = null;
+
+            TextBlock hdr = new TextBlock
+            {
+                Text = "设置设备备注名称",
+                FontSize = 13,
+                FontWeight = FontWeights.SemiBold,
+                Margin = new Thickness(0, 0, 0, 4)
+            };
+            hdr.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            sp.Children.Add(hdr);
+
+            TextBlock sub = new TextBlock
+            {
+                Text = "节点 ID: " + targetMachine.MachineId + "（留空保存可恢复原始主机名）",
+                FontSize = 11,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+            sub.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            sp.Children.Add(sub);
+
+            string existingAlias = "";
+            if (_syncCfg != null && _syncCfg.NodeAliases != null)
+                _syncCfg.NodeAliases.TryGetValue(targetMachine.MachineId, out existingAlias);
+
+            TextBox input = ModernControlsFactory.CreateTextInput(existingAlias ?? targetMachine.MachineName, 30.0);
+            sp.Children.Add(input);
+
+            StackPanel btnRow = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, Margin = new Thickness(0, 10, 0, 0) };
+            Button cancelBtn = ModernControlsFactory.CreateButton("取消", "ghost");
+            cancelBtn.Height = 28;
+            cancelBtn.Margin = new Thickness(0, 0, 6, 0);
+            cancelBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                if (pop != null) pop.IsOpen = false;
+            };
+            btnRow.Children.Add(cancelBtn);
+
+            Button saveBtn = ModernControlsFactory.CreateButton("保存备注", "primary");
+            saveBtn.Height = 28;
+            saveBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                if (pop != null) pop.IsOpen = false;
+                SaveMachineAlias(targetMachine.MachineId, input.Text);
+            };
+            btnRow.Children.Add(saveBtn);
+            sp.Children.Add(btnRow);
+
+            pop = ModernControlsFactory.CreateModernPopover(anchor, sp);
+            pop.IsOpen = true;
+            input.Focus();
+            input.SelectAll();
+        }
+
+        private void SaveMachineAlias(string machineId, string rawAlias)
+        {
+            if (_syncCfg == null || string.IsNullOrEmpty(machineId)) return;
+            if (_syncCfg.NodeAliases == null)
+                _syncCfg.NodeAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            string trimmed = (rawAlias ?? "").Trim();
+            if (string.IsNullOrEmpty(trimmed))
+                _syncCfg.NodeAliases.Remove(machineId);
+            else
+                _syncCfg.NodeAliases[machineId] = trimmed;
+
+            SyncService.SaveConfig(_syncCfg);
+
+            // 重新加载快照原始名称并应用新别名
+            if (_scanResult != null)
+            {
+                _localNode = SyncService.BuildLocalSnapshot(_scanResult, _syncCfg);
+                Program.ApplyNodeAliasToSnapshot(_localNode, _syncCfg);
+            }
+            _remoteNodes = LoadAndRecalculateRemoteNodes(_syncCfg.MachineId, _homeDir, _syncCfg);
+            RefreshDashboardView();
+            ShowToastSafe("设备备注已更新", string.IsNullOrEmpty(trimmed) ? "已恢复原始设备名称" : ("显示名称已设为: " + trimmed), "success");
+        }
+
+        private void RemoveOfflineRemoteNodeCache(MachineRowView mv)
+        {
+            if (mv == null || mv.IsLocal || string.IsNullOrEmpty(mv.MachineId))
+                return;
+
+            SyncService.RemoveCachedNode(mv.MachineId);
+            if (_remoteNodes != null)
+            {
+                for (int i = _remoteNodes.Count - 1; i >= 0; i--)
+                {
+                    if (_remoteNodes[i] != null && string.Equals(_remoteNodes[i].MachineId, mv.MachineId, StringComparison.OrdinalIgnoreCase))
+                        _remoteNodes.RemoveAt(i);
                 }
+            }
+            if (_selectedMachineId != null && string.Equals(_selectedMachineId, mv.MachineId, StringComparison.OrdinalIgnoreCase))
+                _selectedMachineId = null;
+
+            RefreshDashboardView();
+            ShowToastSafe("已移除本地节点缓存", "设备 " + mv.MachineName + " 的本地缓存快照已清理", "info");
+        }
+
+        private void OpenExportMenuPopover(UIElement target)
+        {
+            StackPanel sp = new StackPanel { Width = 310 };
+            Popup pop = null;
+
+            sp.Children.Add(MakePopoverActionRow(
+                UiIcons.ExternalLink,
+                "导出并打开交互式网页看板 (.html)",
+                "独立单文件离线网页，支持深浅主题与实时汇率 (Ctrl+E)",
+                delegate()
+                {
+                    if (pop != null) pop.IsOpen = false;
+                    ExportAndOpenHtmlReport();
+                }));
+
+            sp.Children.Add(MakePopoverActionRow(
+                UiIcons.Sparkles,
+                "导出 FinOps 深度财务战报 (.md)",
+                "原生 GitHub GFM 表格与 ASCII 微型趋势图，适配周报归档",
+                delegate()
+                {
+                    if (pop != null) pop.IsOpen = false;
+                    ExportMarkdownWithDialog();
+                }));
+
+            sp.Children.Add(MakePopoverActionRow(
+                UiIcons.Download,
+                "导出多设备财务对账明细 (.csv)",
+                "UTF-8 BOM 编码，Excel 直开零乱码 (Ctrl+S)",
+                delegate()
+                {
+                    if (pop != null) pop.IsOpen = false;
+                    ExportCsvWithDialog();
+                }));
+
+            sp.Children.Add(MakePopoverActionRow(
+                UiIcons.Layers,
+                "导出极客算力分享海报 (.svg)",
+                "840×460 矢量高清 Bento 战报海报，零隐私路径泄露",
+                delegate()
+                {
+                    if (pop != null) pop.IsOpen = false;
+                    ExportSvgPosterWithDialog();
+                }));
+
+            sp.Children.Add(MakePopoverActionRow(
+                UiIcons.Models,
+                "导出 GitHub README 算力徽章 (.svg)",
+                "Shields.io 扁平风格个人主页徽章，展示缓存省钱成效",
+                delegate()
+                {
+                    if (pop != null) pop.IsOpen = false;
+                    ExportReadmeBadgeWithDialog();
+                }));
+
+            sp.Children.Add(MakePopoverActionRow(
+                UiIcons.Copy,
+                "复制纯文本极客战报卡 (剪贴板)",
+                "一键粘贴至飞书、企业微信、Slack 或技术社区",
+                delegate()
+                {
+                    if (pop != null) pop.IsOpen = false;
+                    CopyPlainShareCardToClipboard();
+                }));
+
+            sp.Children.Add(MakePopoverActionRow(
+                UiIcons.Shield,
+                "导出脱敏账单汇总快照 (.json)",
+                "仅含聚合 Token 与等效账单，零提示词正文",
+                delegate()
+                {
+                    if (pop != null) pop.IsOpen = false;
+                    ExportJsonWithDialog();
+                }));
+
+            pop = ModernControlsFactory.CreateModernPopover(target, sp);
+            pop.IsOpen = true;
+        }
+
+        private Border MakePopoverActionRow(string iconData, string title, string subtitle, Action onClick)
+        {
+            Border bd = new Border();
+            bd.CornerRadius = new CornerRadius(6);
+            bd.Padding = new Thickness(9, 7, 9, 7);
+            bd.Margin = new Thickness(0, 0, 0, 2);
+            bd.Background = Brushes.Transparent;
+            bd.Cursor = Cursors.Hand;
+
+            bd.MouseEnter += delegate(object s, MouseEventArgs e)
+            {
+                bd.SetResourceReference(Border.BackgroundProperty, "BgHover");
+            };
+            bd.MouseLeave += delegate(object s, MouseEventArgs e)
+            {
+                bd.Background = Brushes.Transparent;
             };
 
-            _devicePillsStack = new StackPanel();
-            _devicePillsStack.Orientation = Orientation.Horizontal;
-            _devicePillsStack.VerticalAlignment = VerticalAlignment.Center;
-            _deviceScroll.Content = _devicePillsStack;
+            StackPanel row = new StackPanel { Orientation = Orientation.Horizontal };
+            Shapes.Path icon = UiIcons.CreateIcon(iconData, 14.5, "AccentText");
+            icon.VerticalAlignment = VerticalAlignment.Top;
+            icon.Margin = new Thickness(0, 2, 9, 0);
+            row.Children.Add(icon);
 
-            dock.Children.Add(_deviceScroll);
-            strip.Child = dock;
-            return strip;
+            StackPanel col = new StackPanel();
+            TextBlock t1 = new TextBlock { Text = title, FontSize = 12, FontWeight = FontWeights.Medium };
+            t1.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            col.Children.Add(t1);
+
+            TextBlock t2 = new TextBlock { Text = subtitle, FontSize = 10.8, Margin = new Thickness(0, 1, 0, 0) };
+            t2.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            col.Children.Add(t2);
+
+            row.Children.Add(col);
+            bd.Child = row;
+
+            bd.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+            {
+                if (onClick != null) onClick();
+            };
+            return bd;
         }
 
-        private Border BuildWarningBanner()
-        {
-            Border b = new Border();
-            b.Visibility = Visibility.Collapsed;
-            b.Margin = new Thickness(18, 8, 18, 0);
-            b.Padding = new Thickness(12, 6, 12, 6);
-            b.CornerRadius = new CornerRadius(7);
-            b.BorderThickness = new Thickness(1);
-            b.SetResourceReference(Border.BackgroundProperty, "WarnBg");
-            b.SetResourceReference(Border.BorderBrushProperty, "WarnBorder");
+        // =================================================================================================
+        // 2. 六大独立全高视图构建（同格挂载于 _workspaceHostGrid，Visibility 零开销切换）
+        // =================================================================================================
 
-            _warningText = new TextBlock();
-            _warningText.FontSize = 11.5;
-            _warningText.TextTrimming = TextTrimming.CharacterEllipsis;
-            _warningText.SetResourceReference(TextBlock.ForegroundProperty, "WarnFg");
-            b.Child = _warningText;
-            return b;
-        }
-
-        private UIElement BuildKpiCards()
+        // -------------------- 视图 0：概览看板 --------------------
+        private UIElement BuildOverviewView()
         {
             Grid g = new Grid();
-            g.Margin = new Thickness(18, 10, 18, 0);
-            for (int i = 0; i < 4; i++)
-                g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            g.Margin = new Thickness(16, 12, 16, 14);
+            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(102.0) }); // Row 0: 4 Bento KPI Cards
+            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(234.0) }); // Row 1: Bento Ranking + Smooth Trend Chart
+            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // Row 2: Compact Live Stream Preview
 
-            g.Children.Add(MakeKpiCard(0, new Thickness(0, 0, 8, 0), "API 等效总花费", "AccentBlue", out _kpiCostVal, out _kpiCostSub));
-            g.Children.Add(MakeKpiCard(1, new Thickness(4, 0, 4, 0), "累计总 Token", "FgPrimary", out _kpiTokVal, out _kpiTokSub));
-            g.Children.Add(MakeKpiCard(2, new Thickness(4, 0, 4, 0), "Prompt Cache 命中率", "AccentAmber", out _kpiHitVal, out _kpiHitSub));
-            g.Children.Add(MakeKpiCard(3, new Thickness(8, 0, 0, 0), "Prompt Cache 累计省钱", "AccentEmerald", out _kpiSaveVal, out _kpiSaveSub));
+            // Row 0: 顶部 4 张 Bento KPI 卡片（大数字统一 24px SemiBold FgPrimary + 等宽数字，告别彩虹红绿灯）
+            UniformGrid kpiGrid = new UniformGrid { Columns = 4 };
 
-            return g;
-        }
+            // KPI 1: 累计等效账单 + 今日实时微胶囊 + 可选每日预算微进度条
+            _kpiCardCost = ModernControlsFactory.CreateCard(new Thickness(14, 11, 14, 10));
+            _kpiCardCost.Margin = new Thickness(0, 0, 10, 0);
+            StackPanel c1Sp = new StackPanel();
 
-        private Border MakeKpiCard(int col, Thickness margin, string label, string valBrushKey, out TextBlock valBlock, out TextBlock subBlock)
-        {
-            Border card = new Border();
-            card.Margin = margin;
-            card.Padding = new Thickness(15, 10, 15, 10);
-            card.CornerRadius = new CornerRadius(10);
-            card.BorderThickness = new Thickness(1);
-            card.SetResourceReference(Border.BackgroundProperty, "BgCard");
-            card.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
+            DockPanel c1Head = new DockPanel();
+            _kpiTodayPill = new Border
+            {
+                CornerRadius = new CornerRadius(9),
+                Padding = new Thickness(6, 1, 6, 1),
+                BorderThickness = new Thickness(1),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            _kpiTodayPill.SetResourceReference(Border.BackgroundProperty, "BgSurface");
+            _kpiTodayPill.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
+            _kpiTodayPillText = new TextBlock { Text = "今日 —", FontSize = 10.5, FontFamily = DesignSystem.FontMono };
+            _kpiTodayPillText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            _kpiTodayPill.Child = _kpiTodayPillText;
+            DockPanel.SetDock(_kpiTodayPill, Dock.Right);
+            c1Head.Children.Add(_kpiTodayPill);
 
-            StackPanel sp = new StackPanel();
-            sp.VerticalAlignment = VerticalAlignment.Center;
+            TextBlock c1Lbl = new TextBlock { Text = "累计等效账单", FontSize = 11.8, FontWeight = FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center };
+            c1Lbl.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            c1Head.Children.Add(c1Lbl);
+            c1Sp.Children.Add(c1Head);
 
-            TextBlock lbl = new TextBlock();
-            lbl.Text = label;
-            lbl.FontSize = 11.5;
-            lbl.FontWeight = FontWeights.Medium;
-            lbl.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-            sp.Children.Add(lbl);
+            _kpiCostVal = CreateKpiHeroValue("¥0.00");
+            c1Sp.Children.Add(_kpiCostVal);
 
-            valBlock = new TextBlock();
-            valBlock.Text = "—";
-            valBlock.FontSize = 23;
-            valBlock.FontWeight = FontWeights.Bold;
-            valBlock.Margin = new Thickness(0, 3, 0, 3);
-            valBlock.TextTrimming = TextTrimming.CharacterEllipsis;
-            valBlock.SetResourceReference(TextBlock.ForegroundProperty, valBrushKey);
-            sp.Children.Add(valBlock);
+            _kpiBudgetBarHost = new Border
+            {
+                Height = 4,
+                CornerRadius = new CornerRadius(2),
+                Margin = new Thickness(0, 4, 0, 3),
+                Visibility = Visibility.Collapsed
+            };
+            _kpiBudgetBarHost.SetResourceReference(Border.BackgroundProperty, "BgHoverStrong");
+            _kpiBudgetBarFill = new Border
+            {
+                Height = 4,
+                CornerRadius = new CornerRadius(2),
+                HorizontalAlignment = HorizontalAlignment.Left,
+                Width = 0
+            };
+            _kpiBudgetBarFill.SetResourceReference(Border.BackgroundProperty, "AccentPrimary");
+            _kpiBudgetBarHost.Child = _kpiBudgetBarFill;
+            c1Sp.Children.Add(_kpiBudgetBarHost);
 
-            subBlock = new TextBlock();
-            subBlock.Text = "等待数据加载…";
-            subBlock.FontSize = 11;
-            subBlock.TextTrimming = TextTrimming.CharacterEllipsis;
-            subBlock.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-            sp.Children.Add(subBlock);
+            _kpiCostSub = CreateKpiSubText("0 次模型调用 · 悬停查看月度预测");
+            c1Sp.Children.Add(_kpiCostSub);
+            _kpiCardCost.Child = c1Sp;
+            kpiGrid.Children.Add(_kpiCardCost);
 
-            card.Child = sp;
-            Grid.SetColumn(card, col);
-            return card;
-        }
-        private UIElement BuildMiddleSection()
-        {
-            Grid mid = new Grid();
-            mid.Margin = new Thickness(18, 10, 18, 0);
-            mid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.05, GridUnitType.Star) });
-            mid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(12) });
-            mid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.35, GridUnitType.Star) });
+            // KPI 2: Token 吞吐总量 + 4px 三色输入/缓存/输出构成微条
+            Border kpiCardTok = ModernControlsFactory.CreateCard(new Thickness(14, 11, 14, 10));
+            kpiCardTok.Margin = new Thickness(0, 0, 10, 0);
+            StackPanel c2Sp = new StackPanel();
 
-            // Left Card: Ranking by Tool or Device
-            Border leftCard = new Border();
-            leftCard.CornerRadius = new CornerRadius(10);
-            leftCard.BorderThickness = new Thickness(1);
-            leftCard.Padding = new Thickness(14, 10, 14, 10);
-            leftCard.SetResourceReference(Border.BackgroundProperty, "BgCard");
-            leftCard.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
+            TextBlock c2Lbl = new TextBlock { Text = "Token 吞吐总量", FontSize = 11.8, FontWeight = FontWeights.Medium };
+            c2Lbl.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            c2Sp.Children.Add(c2Lbl);
 
-            DockPanel leftDock = new DockPanel();
+            _kpiTokVal = CreateKpiHeroValue("0");
+            c2Sp.Children.Add(_kpiTokVal);
 
-            DockPanel leftHdr = new DockPanel();
-            leftHdr.Margin = new Thickness(0, 0, 0, 8);
-            DockPanel.SetDock(leftHdr, Dock.Top);
+            Border ratioStrip = new Border
+            {
+                Height = 4,
+                CornerRadius = new CornerRadius(2),
+                Margin = new Thickness(0, 4, 0, 3),
+                ClipToBounds = true
+            };
+            ratioStrip.SetResourceReference(Border.BackgroundProperty, "BgHoverStrong");
+            Grid ratioCols = new Grid();
+            _tokSegInputCol = new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) };
+            _tokSegCacheCol = new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) };
+            _tokSegOutputCol = new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) };
+            ratioCols.ColumnDefinitions.Add(_tokSegInputCol);
+            ratioCols.ColumnDefinitions.Add(_tokSegCacheCol);
+            ratioCols.ColumnDefinitions.Add(_tokSegOutputCol);
 
-            StackPanel leftSegs = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            DockPanel.SetDock(leftSegs, Dock.Left);
+            Border segIn = new Border();
+            segIn.SetResourceReference(Border.BackgroundProperty, "AccentPrimary");
+            Grid.SetColumn(segIn, 0);
+            ratioCols.Children.Add(segIn);
 
-            string[] modeLabels = new string[] { "按工具", "按设备" };
+            Border segCr = new Border();
+            segCr.SetResourceReference(Border.BackgroundProperty, "SemanticSuccess");
+            Grid.SetColumn(segCr, 1);
+            ratioCols.Children.Add(segCr);
+
+            Border segOut = new Border { Background = DesignSystem.BrushHex("#38BDF8") };
+            Grid.SetColumn(segOut, 2);
+            ratioCols.Children.Add(segOut);
+
+            ratioStrip.Child = ratioCols;
+            c2Sp.Children.Add(ratioStrip);
+
+            _kpiTokSub = CreateKpiSubText("新增 0 · 缓存读 0 · 输出 0");
+            c2Sp.Children.Add(_kpiTokSub);
+            kpiCardTok.Child = c2Sp;
+            kpiGrid.Children.Add(kpiCardTok);
+
+            // KPI 3: 上下文缓存命中率
+            Border kpiCardHit = ModernControlsFactory.CreateCard(new Thickness(14, 11, 14, 10));
+            kpiCardHit.Margin = new Thickness(0, 0, 10, 0);
+            StackPanel c3Sp = new StackPanel();
+
+            TextBlock c3Lbl = new TextBlock { Text = "上下文缓存命中率", FontSize = 11.8, FontWeight = FontWeights.Medium };
+            c3Lbl.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            c3Sp.Children.Add(c3Lbl);
+
+            _kpiHitVal = CreateKpiHeroValue("0.0%");
+            c3Sp.Children.Add(_kpiHitVal);
+
+            _kpiHitSub = CreateKpiSubText("缓存读取 0 / 总提示词 0");
+            _kpiHitSub.Margin = new Thickness(0, 6, 0, 0);
+            c3Sp.Children.Add(_kpiHitSub);
+            kpiCardHit.Child = c3Sp;
+            kpiGrid.Children.Add(kpiCardHit);
+
+            // KPI 4: 缓存累计省下费用 + 右上角 SemanticSuccess 省钱比例胶囊
+            Border kpiCardSave = ModernControlsFactory.CreateCard(new Thickness(14, 11, 14, 10));
+            StackPanel c4Sp = new StackPanel();
+
+            DockPanel c4Head = new DockPanel();
+            _kpiSavePctBadge = new Border
+            {
+                CornerRadius = new CornerRadius(9),
+                Padding = new Thickness(6, 1, 6, 1),
+                BorderThickness = new Thickness(1),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            _kpiSavePctBadge.SetResourceReference(Border.BackgroundProperty, "SemanticSuccessBg");
+            _kpiSavePctBadge.SetResourceReference(Border.BorderBrushProperty, "SemanticSuccessBorder");
+            _kpiSavePctText = new TextBlock { Text = "省 0%", FontSize = 10.5, FontWeight = FontWeights.SemiBold, FontFamily = DesignSystem.FontMono };
+            _kpiSavePctText.SetResourceReference(TextBlock.ForegroundProperty, "SemanticSuccess");
+            _kpiSavePctBadge.Child = _kpiSavePctText;
+            DockPanel.SetDock(_kpiSavePctBadge, Dock.Right);
+            c4Head.Children.Add(_kpiSavePctBadge);
+
+            TextBlock c4Lbl = new TextBlock { Text = "缓存累计省下费用", FontSize = 11.8, FontWeight = FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center };
+            c4Lbl.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            c4Head.Children.Add(c4Lbl);
+            c4Sp.Children.Add(c4Head);
+
+            _kpiSaveVal = CreateKpiHeroValue("¥0.00");
+            c4Sp.Children.Add(_kpiSaveVal);
+
+            _kpiSaveSub = CreateKpiSubText("较全价输入基准累计节省");
+            _kpiSaveSub.Margin = new Thickness(0, 6, 0, 0);
+            c4Sp.Children.Add(_kpiSaveSub);
+            kpiCardSave.Child = c4Sp;
+            kpiGrid.Children.Add(kpiCardSave);
+
+            Grid.SetRow(kpiGrid, 0);
+            g.Children.Add(kpiGrid);
+
+            // Row 1: 中部 Bento 双栏（左侧工具/设备消耗排行 + 右侧平滑面积折线 / 圆角柱状趋势图）
+            Grid midGrid = new Grid();
+            midGrid.Margin = new Thickness(0, 10, 0, 10);
+            midGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.05, GridUnitType.Star) });
+            midGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(10) });
+            midGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.55, GridUnitType.Star) });
+
+            // 左卡：工具 / 设备消耗构成排行
+            Border rankCard = ModernControlsFactory.CreateCard(new Thickness(13, 10, 13, 10));
+            Grid rankGrid = new Grid();
+            rankGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(28) });
+            rankGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+
+            DockPanel rankHead = new DockPanel();
+            Border leftModeBox = ModernControlsFactory.CreateSegmentedContainer();
+            StackPanel leftModeSp = (StackPanel)leftModeBox.Child;
             _leftModeBtns = new Button[2];
-            Border modeBox = CreateSegContainer();
-            modeBox.Margin = new Thickness(0, 0, 6, 0);
-            StackPanel modeSp = (StackPanel)modeBox.Child;
+            string[] lmNames = new string[] { "按工具", "按设备" };
             for (int i = 0; i < 2; i++)
             {
                 int idx = i;
-                Button mb = CreateSegButton(modeLabels[i]);
-                mb.Padding = new Thickness(8, 3, 8, 3);
-                mb.Click += delegate(object s, RoutedEventArgs e)
+                Button b = ModernControlsFactory.CreateSegmentedItem(lmNames[i]);
+                b.Padding = new Thickness(8, 0, 8, 0);
+                b.Click += delegate(object s, RoutedEventArgs e)
                 {
                     _leftRankByMachine = (idx == 1);
-                    UpdateSegVisuals(_leftModeBtns, idx);
+                    ModernControlsFactory.UpdateSegmentedGroup(_leftModeBtns, idx);
                     RefreshDashboardView();
                 };
-                _leftModeBtns[i] = mb;
-                modeSp.Children.Add(mb);
+                _leftModeBtns[i] = b;
+                leftModeSp.Children.Add(b);
             }
-            UpdateSegVisuals(_leftModeBtns, 0);
-            leftSegs.Children.Add(modeBox);
+            ModernControlsFactory.UpdateSegmentedGroup(_leftModeBtns, 0);
+            DockPanel.SetDock(leftModeBox, Dock.Right);
+            rankHead.Children.Add(leftModeBox);
 
-            string[] metricLabels = new string[] { "按花费", "按Token" };
-            _metricBtns = new Button[2];
-            Border metricBox = CreateSegContainer();
+            _clearFilterBtn = ModernControlsFactory.CreateButton("清除筛选 ×", "ghost");
+            _clearFilterBtn.Height = 24;
+            _clearFilterBtn.FontSize = 11;
+            _clearFilterBtn.Padding = new Thickness(7, 0, 7, 0);
+            _clearFilterBtn.Margin = new Thickness(0, 0, 6, 0);
+            _clearFilterBtn.Visibility = Visibility.Collapsed;
+            _clearFilterBtn.SetResourceReference(Control.ForegroundProperty, "AccentText");
+            _clearFilterBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                _selectedTool = null;
+                _selectedMachineId = null;
+                _selectedDate = null;
+                RefreshDashboardView();
+            };
+            DockPanel.SetDock(_clearFilterBtn, Dock.Right);
+            rankHead.Children.Add(_clearFilterBtn);
+
+            TextBlock rankTitle = new TextBlock
+            {
+                Text = "消耗构成排行",
+                FontSize = 12.8,
+                FontWeight = FontWeights.SemiBold,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            rankTitle.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            rankHead.Children.Add(rankTitle);
+
+            Grid.SetRow(rankHead, 0);
+            rankGrid.Children.Add(rankHead);
+
+            ScrollViewer rankSv = new ScrollViewer
+            {
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                Margin = new Thickness(0, 6, 0, 0)
+            };
+            _toolsStack = new StackPanel();
+            rankSv.Content = _toolsStack;
+            Grid.SetRow(rankSv, 1);
+            rankGrid.Children.Add(rankSv);
+
+            rankCard.Child = rankGrid;
+            Grid.SetColumn(rankCard, 0);
+            midGrid.Children.Add(rankCard);
+
+            // 右卡：平滑面积折线 / 圆角细柱趋势图（带十字准星虚线 + 跟随式浮层详情卡 + 点击单日钻取过滤）
+            Border chartCard = ModernControlsFactory.CreateCard(new Thickness(14, 10, 14, 10));
+            Grid chartGrid = new Grid();
+            chartGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(28) });
+            chartGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+
+            DockPanel chartHead = new DockPanel();
+
+            StackPanel chartRightTools = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+
+            Border metricBox = ModernControlsFactory.CreateSegmentedContainer();
             StackPanel metricSp = (StackPanel)metricBox.Child;
+            _metricBtns = new Button[2];
+            string[] mNames = new string[] { "金额", "Token" };
             for (int i = 0; i < 2; i++)
             {
                 int idx = i;
-                Button mb = CreateSegButton(metricLabels[i]);
-                mb.Padding = new Thickness(8, 3, 8, 3);
+                Button mb = ModernControlsFactory.CreateSegmentedItem(mNames[i]);
+                mb.Padding = new Thickness(8, 0, 8, 0);
                 mb.Click += delegate(object s, RoutedEventArgs e)
                 {
                     _rankByCost = (idx == 0);
-                    UpdateSegVisuals(_metricBtns, idx);
+                    ModernControlsFactory.UpdateSegmentedGroup(_metricBtns, idx);
                     RefreshDashboardView();
                 };
                 _metricBtns[i] = mb;
                 metricSp.Children.Add(mb);
             }
-            UpdateSegVisuals(_metricBtns, 0);
-            leftSegs.Children.Add(metricBox);
-            leftHdr.Children.Add(leftSegs);
+            ModernControlsFactory.UpdateSegmentedGroup(_metricBtns, 0);
 
-            _clearFilterBtn = CreateActionButton("清除筛选 ×", false);
-            _clearFilterBtn.FontSize = 11;
-            _clearFilterBtn.Padding = new Thickness(7, 2, 7, 2);
-            _clearFilterBtn.Visibility = Visibility.Collapsed;
-            _clearFilterBtn.VerticalAlignment = VerticalAlignment.Center;
-            _clearFilterBtn.HorizontalAlignment = HorizontalAlignment.Right;
-            _clearFilterBtn.Click += OnClearFilterClick;
-            DockPanel.SetDock(_clearFilterBtn, Dock.Right);
-            leftHdr.Children.Add(_clearFilterBtn);
-
-            leftDock.Children.Add(leftHdr);
-
-            ScrollViewer toolsSv = new ScrollViewer();
-            toolsSv.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
-            toolsSv.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
-            _toolsStack = new StackPanel();
-            _toolsStack.Margin = new Thickness(0, 0, 4, 0);
-            toolsSv.Content = _toolsStack;
-            leftDock.Children.Add(toolsSv);
-
-            leftCard.Child = leftDock;
-            Grid.SetColumn(leftCard, 0);
-            mid.Children.Add(leftCard);
-
-            // Right Card: Daily Trend Bar Chart
-            Border rightCard = new Border();
-            rightCard.CornerRadius = new CornerRadius(10);
-            rightCard.BorderThickness = new Thickness(1);
-            rightCard.Padding = new Thickness(14, 10, 14, 10);
-            rightCard.SetResourceReference(Border.BackgroundProperty, "BgCard");
-            rightCard.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
-
-            DockPanel rightDock = new DockPanel();
-            DockPanel rightHdr = new DockPanel();
-            rightHdr.Margin = new Thickness(0, 0, 0, 6);
-            DockPanel.SetDock(rightHdr, Dock.Top);
-
-            _trendTitleText = new TextBlock();
-            _trendTitleText.Text = "每日消耗趋势";
-            _trendTitleText.FontSize = 13;
-            _trendTitleText.FontWeight = FontWeights.SemiBold;
-            _trendTitleText.VerticalAlignment = VerticalAlignment.Center;
-            _trendTitleText.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
-            DockPanel.SetDock(_trendTitleText, Dock.Left);
-            rightHdr.Children.Add(_trendTitleText);
-
-            _trendHoverText = new TextBlock();
-            _trendHoverText.Text = "悬停柱状图查看单日详情";
-            _trendHoverText.FontSize = 11.5;
-            _trendHoverText.VerticalAlignment = VerticalAlignment.Center;
-            _trendHoverText.HorizontalAlignment = HorizontalAlignment.Right;
-            _trendHoverText.TextTrimming = TextTrimming.CharacterEllipsis;
-            _trendHoverText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-            DockPanel.SetDock(_trendHoverText, Dock.Right);
-            rightHdr.Children.Add(_trendHoverText);
-            rightDock.Children.Add(rightHdr);
-
-            _chartHost = new Border();
-            _chartHost.Background = Brushes.Transparent;
-            _chartCanvas = new Canvas();
-            _chartCanvas.ClipToBounds = true;
-            _chartHost.Child = _chartCanvas;
-            _chartHost.SizeChanged += delegate(object s, SizeChangedEventArgs e)
+            Border typeBox = ModernControlsFactory.CreateSegmentedContainer();
+            typeBox.Margin = new Thickness(0, 0, 6, 0);
+            StackPanel typeSp = (StackPanel)typeBox.Child;
+            _chartTypeBtns = new Button[2];
+            string[] ctNames = new string[] { "面积", "柱状" };
+            for (int i = 0; i < 2; i++)
             {
-                RenderTrendChart();
+                int idx = i;
+                Button cb = ModernControlsFactory.CreateSegmentedItem(ctNames[i]);
+                cb.Padding = new Thickness(7, 0, 7, 0);
+                cb.Click += delegate(object s, RoutedEventArgs e)
+                {
+                    _chartLineMode = (idx == 0);
+                    ModernControlsFactory.UpdateSegmentedGroup(_chartTypeBtns, idx);
+                    RedrawChart();
+                };
+                _chartTypeBtns[i] = cb;
+                typeSp.Children.Add(cb);
+            }
+            ModernControlsFactory.UpdateSegmentedGroup(_chartTypeBtns, 0);
+
+            chartRightTools.Children.Add(typeBox);
+            chartRightTools.Children.Add(metricBox);
+            DockPanel.SetDock(chartRightTools, Dock.Right);
+            chartHead.Children.Add(chartRightTools);
+
+            StackPanel chartLeftSp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            _trendTitleText = new TextBlock
+            {
+                Text = "每日消耗趋势",
+                FontSize = 12.8,
+                FontWeight = FontWeights.SemiBold,
+                VerticalAlignment = VerticalAlignment.Center
             };
-            rightDock.Children.Add(_chartHost);
+            _trendTitleText.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            chartLeftSp.Children.Add(_trendTitleText);
 
-            rightCard.Child = rightDock;
-            Grid.SetColumn(rightCard, 2);
-            mid.Children.Add(rightCard);
+            _selectedDatePill = new Border
+            {
+                CornerRadius = new CornerRadius(10),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(7, 1, 7, 1),
+                Margin = new Thickness(8, 0, 0, 0),
+                Cursor = Cursors.Hand,
+                VerticalAlignment = VerticalAlignment.Center,
+                Visibility = Visibility.Collapsed,
+                ToolTip = "点击取消单日钻取过滤 (Esc)"
+            };
+            _selectedDatePill.SetResourceReference(Border.BackgroundProperty, "AccentSubtleBg");
+            _selectedDatePill.SetResourceReference(Border.BorderBrushProperty, "AccentSubtleBorder");
+            _selectedDatePillText = new TextBlock { Text = "", FontSize = 10.8, FontFamily = DesignSystem.FontMono };
+            _selectedDatePillText.SetResourceReference(TextBlock.ForegroundProperty, "AccentText");
+            _selectedDatePill.Child = _selectedDatePillText;
+            _selectedDatePill.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+            {
+                _selectedDate = null;
+                RefreshDashboardView();
+            };
+            chartLeftSp.Children.Add(_selectedDatePill);
 
-            return mid;
+            chartHead.Children.Add(chartLeftSp);
+            Grid.SetRow(chartHead, 0);
+            chartGrid.Children.Add(chartHead);
+
+            // 趋势图画布与交互浮层
+            _chartInteractiveHost = new Grid();
+            _chartInteractiveHost.Margin = new Thickness(0, 6, 0, 0);
+            _chartInteractiveHost.Background = Brushes.Transparent;
+            _chartInteractiveHost.ClipToBounds = true;
+
+            _chartCanvas = new Canvas();
+            _chartInteractiveHost.Children.Add(_chartCanvas);
+
+            _chartOverlayCanvas = new Canvas { IsHitTestVisible = false };
+
+            _chartCrosshairLine = new Shapes.Line
+            {
+                StrokeThickness = 1.0,
+                StrokeDashArray = new DoubleCollection(new double[] { 3.0, 3.0 }),
+                Visibility = Visibility.Collapsed
+            };
+            _chartCrosshairLine.SetResourceReference(Shapes.Shape.StrokeProperty, "BorderFocus");
+            _chartOverlayCanvas.Children.Add(_chartCrosshairLine);
+
+            _chartHoverDot = new Shapes.Ellipse
+            {
+                Width = 8,
+                Height = 8,
+                StrokeThickness = 2,
+                Visibility = Visibility.Collapsed
+            };
+            _chartHoverDot.SetResourceReference(Shapes.Shape.FillProperty, "AccentPrimary");
+            _chartHoverDot.SetResourceReference(Shapes.Shape.StrokeProperty, "BgCard");
+            _chartOverlayCanvas.Children.Add(_chartHoverDot);
+
+            _chartFloatingCard = new Border
+            {
+                CornerRadius = new CornerRadius(7),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(9, 6, 9, 6),
+                Visibility = Visibility.Collapsed,
+                IsHitTestVisible = false
+            };
+            _chartFloatingCard.SetResourceReference(Border.BackgroundProperty, "BgElevated");
+            _chartFloatingCard.SetResourceReference(Border.BorderBrushProperty, "BorderStrong");
+
+            StackPanel fcSp = new StackPanel();
+            _chartFloatingDateText = new TextBlock { FontSize = 10.8, FontFamily = DesignSystem.FontMono, FontWeight = FontWeights.SemiBold };
+            _chartFloatingDateText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            fcSp.Children.Add(_chartFloatingDateText);
+
+            _chartFloatingPrimaryText = new TextBlock { FontSize = 12.2, FontFamily = DesignSystem.FontMono, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 2, 0, 1) };
+            _chartFloatingPrimaryText.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            fcSp.Children.Add(_chartFloatingPrimaryText);
+
+            _chartFloatingSubText = new TextBlock { FontSize = 10.5 };
+            _chartFloatingSubText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            fcSp.Children.Add(_chartFloatingSubText);
+
+            _chartFloatingCard.Child = fcSp;
+            _chartOverlayCanvas.Children.Add(_chartFloatingCard);
+
+            _chartInteractiveHost.Children.Add(_chartOverlayCanvas);
+            _chartInteractiveHost.SizeChanged += delegate(object s, SizeChangedEventArgs e)
+            {
+                RedrawChart();
+            };
+            _chartInteractiveHost.MouseLeave += delegate(object s, MouseEventArgs e)
+            {
+                HideChartCrosshair();
+            };
+
+            Grid.SetRow(_chartInteractiveHost, 1);
+            chartGrid.Children.Add(_chartInteractiveHost);
+
+            chartCard.Child = chartGrid;
+            Grid.SetColumn(chartCard, 2);
+            midGrid.Children.Add(chartCard);
+
+            Grid.SetRow(midGrid, 1);
+            g.Children.Add(midGrid);
+
+            // Row 2: 底部最新实时请求快览卡片 + 右上角「查看完整实时请求流 →」一键切至视图 1
+            Border recentCard = ModernControlsFactory.CreateCard(new Thickness(0));
+            Grid recentGrid = new Grid();
+            recentGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(36) });
+            recentGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+
+            Border recentHeadBd = new Border
+            {
+                BorderThickness = new Thickness(0, 0, 0, 1),
+                Padding = new Thickness(14, 0, 10, 0)
+            };
+            recentHeadBd.SetResourceReference(Border.BorderBrushProperty, "BorderSubtle");
+
+            DockPanel recentHead = new DockPanel();
+            Button jumpFullLiveBtn = ModernControlsFactory.CreateButton("查看完整实时请求流 →", "ghost");
+            jumpFullLiveBtn.Height = 26;
+            jumpFullLiveBtn.FontSize = 11.5;
+            jumpFullLiveBtn.SetResourceReference(Control.ForegroundProperty, "AccentText");
+            jumpFullLiveBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                SwitchActiveView(ViewLiveStream);
+            };
+            DockPanel.SetDock(jumpFullLiveBtn, Dock.Right);
+            recentHead.Children.Add(jumpFullLiveBtn);
+
+            StackPanel recentLeft = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            Shapes.Path actIcon = UiIcons.CreateIcon(UiIcons.Activity, 13.5, "AccentText");
+            actIcon.Margin = new Thickness(0, 0, 6, 0);
+            recentLeft.Children.Add(actIcon);
+
+            TextBlock recentTitle = new TextBlock
+            {
+                Text = "最新实时请求快览",
+                FontSize = 12.5,
+                FontWeight = FontWeights.SemiBold,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            recentTitle.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            recentLeft.Children.Add(recentTitle);
+
+            _overviewLiveTickerText = new TextBlock
+            {
+                Text = "免代理监听各工具实时单笔 Token、耗时与 TPS",
+                FontSize = 11,
+                Margin = new Thickness(12, 0, 8, 0),
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            _overviewLiveTickerText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            ModernControlsFactory.EnableTabularNumbers(_overviewLiveTickerText, false);
+            recentLeft.Children.Add(_overviewLiveTickerText);
+
+            recentHead.Children.Add(recentLeft);
+            recentHeadBd.Child = recentHead;
+            Grid.SetRow(recentHeadBd, 0);
+            recentGrid.Children.Add(recentHeadBd);
+
+            Grid recentBody = new Grid();
+            _overviewLiveGrid = CreateLiveStreamDataGrid(true);
+            recentBody.Children.Add(_overviewLiveGrid);
+
+            TextBlock dummyEmptyTitle;
+            _overviewLiveEmpty = CreateEmptyStateOverlay(
+                UiIcons.Activity,
+                "尚无单笔实时请求流记录",
+                "在任意受支持的 AI 编程工具中发起一次对话后，单条请求耗时、TPS 与花费将自动在此滚动呈现",
+                out dummyEmptyTitle);
+            recentBody.Children.Add(_overviewLiveEmpty);
+
+            Grid.SetRow(recentBody, 1);
+            recentGrid.Children.Add(recentBody);
+
+            recentCard.Child = recentGrid;
+            Grid.SetRow(recentCard, 2);
+            g.Children.Add(recentCard);
+
+            return g;
         }
 
-        private UIElement BuildBottomSection()
+        private static TextBlock CreateKpiHeroValue(string text)
         {
-            Border card = new Border();
-            card.Margin = new Thickness(18, 10, 18, 10);
-            card.CornerRadius = new CornerRadius(10);
-            card.BorderThickness = new Thickness(1);
-            card.Padding = new Thickness(14, 10, 14, 10);
-            card.SetResourceReference(Border.BackgroundProperty, "BgCard");
-            card.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
+            TextBlock tb = new TextBlock
+            {
+                Text = text,
+                FontFamily = DesignSystem.FontDisplay,
+                FontSize = 24,
+                FontWeight = FontWeights.SemiBold,
+                Margin = new Thickness(0, 5, 0, 0),
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+            tb.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            ModernControlsFactory.EnableTabularNumbers(tb, false);
+            return tb;
+        }
+
+        private static TextBlock CreateKpiSubText(string text)
+        {
+            TextBlock tb = new TextBlock
+            {
+                Text = text,
+                FontSize = 11,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+            tb.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            ModernControlsFactory.EnableTabularNumbers(tb, false);
+            return tb;
+        }
+
+        // -------------------- 视图 1：实时请求流（100% 全高视口，同屏可看 18~24 行） --------------------
+        private UIElement BuildLiveStreamView()
+        {
+            Grid g = new Grid();
+            g.Margin = new Thickness(16, 12, 16, 14);
+            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(38) });
+            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+
+            // 顶部工具栏：即时搜索框 (Ctrl+F) + 暂停/恢复刷新按钮 + 最新请求动态摘要
+            DockPanel toolbar = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
+
+            StackPanel rightBar = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+
+            _liveStreamSummaryText = new TextBlock
+            {
+                Text = "实时监听中",
+                FontSize = 11.5,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 10, 0),
+                MaxWidth = 420,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+            _liveStreamSummaryText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            ModernControlsFactory.EnableTabularNumbers(_liveStreamSummaryText, false);
+            rightBar.Children.Add(_liveStreamSummaryText);
+
+            _livePauseBtn = ModernControlsFactory.CreateButton("", "secondary");
+            _livePauseBtn.Height = 30;
+            _livePauseBtn.Padding = new Thickness(10, 0, 10, 0);
+            _livePauseBtn.ToolTip = "暂停或恢复实时请求流表格自动滚动刷新（暂停期间后台仍持续采集）";
+
+            StackPanel pauseSp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            _livePauseIcon = UiIcons.CreateIcon(UiIcons.Pause, 13.0, null);
+            _livePauseIcon.Margin = new Thickness(0, 0, 5, 0);
+            pauseSp.Children.Add(_livePauseIcon);
+
+            _livePauseBtnText = new TextBlock { Text = "暂停刷新", FontSize = 12, FontWeight = FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center };
+            ModernControlsFactory.EnableTabularNumbers(_livePauseBtnText, false);
+            pauseSp.Children.Add(_livePauseBtnText);
+            _livePauseBtn.Content = pauseSp;
+
+            _livePauseBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                _livePaused = !_livePaused;
+                if (!_livePaused)
+                {
+                    _pausedBufferedCount = 0;
+                    UpdateLivePauseButtonVisual();
+                    RefreshDashboardView();
+                }
+                else
+                {
+                    UpdateLivePauseButtonVisual();
+                }
+            };
+            rightBar.Children.Add(_livePauseBtn);
+
+            _toggleInspectorBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Layers, "单笔账单透视", "secondary");
+            _toggleInspectorBtn.Height = 30;
+            _toggleInspectorBtn.Margin = new Thickness(8, 0, 0, 0);
+            _toggleInspectorBtn.ToolTip = "展开或收起右侧单笔请求四维计费瀑布流与缓存省钱透视抽屉";
+            _toggleInspectorBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                if (_requestInspector != null && _requestInspector.Visibility == Visibility.Visible)
+                {
+                    CloseRequestInspector();
+                }
+                else
+                {
+                    LiveRequestRowView sel = _liveGrid != null ? (_liveGrid.SelectedItem as LiveRequestRowView) : null;
+                    if (sel == null && _liveGrid != null && _liveGrid.Items.Count > 0)
+                        sel = _liveGrid.Items[0] as LiveRequestRowView;
+                    OpenRequestInspectorFor(sel);
+                }
+            };
+            rightBar.Children.Add(_toggleInspectorBtn);
+
+            DockPanel.SetDock(rightBar, Dock.Right);
+            toolbar.Children.Add(rightBar);
+
+            StackPanel leftBar = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            Border searchWrap = CreateSearchInputWithIcon("过滤工具、模型名称或请求时间... (Ctrl+F)", 260, out _liveSearchInput);
+            _liveSearchInput.TextChanged += delegate(object s, TextChangedEventArgs e)
+            {
+                _liveSearchQuery = (_liveSearchInput.Text ?? "").Trim();
+                bool prevPause = _livePaused;
+                _livePaused = false;
+                RefreshDashboardView();
+                _livePaused = prevPause;
+            };
+            leftBar.Children.Add(searchWrap);
+
+            _liveClearFilterBtn = ModernControlsFactory.CreateButton("重置筛选 ×", "ghost");
+            _liveClearFilterBtn.Height = 28;
+            _liveClearFilterBtn.Margin = new Thickness(8, 0, 0, 0);
+            _liveClearFilterBtn.Visibility = Visibility.Collapsed;
+            _liveClearFilterBtn.SetResourceReference(Control.ForegroundProperty, "AccentText");
+            _liveClearFilterBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                _selectedTool = null;
+                _selectedDate = null;
+                if (_liveSearchInput != null) _liveSearchInput.Text = "";
+                _liveSearchQuery = "";
+                RefreshDashboardView();
+            };
+            leftBar.Children.Add(_liveClearFilterBtn);
+
+            toolbar.Children.Add(leftBar);
+            Grid.SetRow(toolbar, 0);
+            g.Children.Add(toolbar);
+
+            // 全高主从分栏区：左侧 DataGrid + 右侧可折叠 310px 单笔账单透视抽屉
+            Grid contentSplit = new Grid();
+            contentSplit.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            _requestInspectorGapCol = new ColumnDefinition { Width = new GridLength(0) };
+            contentSplit.ColumnDefinitions.Add(_requestInspectorGapCol);
+            contentSplit.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            Border tableCard = ModernControlsFactory.CreateCard(new Thickness(0));
+            Grid body = new Grid();
+            _liveGrid = CreateLiveStreamDataGrid(false);
+            _liveGrid.SelectionChanged += delegate(object s, SelectionChangedEventArgs e)
+            {
+                LiveRequestRowView picked = _liveGrid.SelectedItem as LiveRequestRowView;
+                if (picked != null)
+                {
+                    OpenRequestInspectorFor(picked);
+                }
+            };
+            body.Children.Add(_liveGrid);
+
+            _liveEmptyOverlay = CreateEmptyStateOverlay(
+                UiIcons.Activity,
+                "暂无匹配的实时请求记录",
+                "当前仅展示本机带精确时间戳的单笔 API/工具交互记录；单击任意行可唤起右侧四维计费瀑布流透视",
+                out _liveEmptyTitle);
+            body.Children.Add(_liveEmptyOverlay);
+
+            tableCard.Child = body;
+            Grid.SetColumn(tableCard, 0);
+            contentSplit.Children.Add(tableCard);
+
+            _requestInspector = new RequestInspectorPanel(
+                _homeDir,
+                delegate()
+                {
+                    CloseRequestInspector();
+                },
+                delegate(string modelId)
+                {
+                    if (_liveSearchInput != null)
+                        _liveSearchInput.Text = modelId ?? "";
+                });
+            _requestInspector.Visibility = Visibility.Collapsed;
+            Grid.SetColumn(_requestInspector, 2);
+            contentSplit.Children.Add(_requestInspector);
+
+            Grid.SetRow(contentSplit, 1);
+            g.Children.Add(contentSplit);
+            return g;
+        }
+
+        private void OpenRequestInspectorFor(LiveRequestRowView row)
+        {
+            if (_requestInspector == null) return;
+            _requestInspector.Visibility = Visibility.Visible;
+            if (_requestInspectorGapCol != null)
+                _requestInspectorGapCol.Width = new GridLength(10);
+            _requestInspector.Inspect(row, _isCny, _usdToCny, _isDark);
+        }
+
+        private void CloseRequestInspector()
+        {
+            if (_requestInspector == null) return;
+            _requestInspector.Visibility = Visibility.Collapsed;
+            if (_requestInspectorGapCol != null)
+                _requestInspectorGapCol.Width = new GridLength(0);
+        }
+
+        private void UpdateLivePauseButtonVisual()
+        {
+            if (_livePauseBtn == null || _livePauseBtnText == null || _livePauseIcon == null) return;
+            if (_livePaused)
+            {
+                _livePauseIcon.Data = Geometry.Parse(UiIcons.Play);
+                _livePauseBtnText.Text = _pausedBufferedCount > 0
+                    ? string.Format(CultureInfo.InvariantCulture, "恢复刷新 (+{0})", _pausedBufferedCount)
+                    : "已暂停 · 点击恢复";
+                _livePauseBtn.SetResourceReference(Control.ForegroundProperty, "SemanticWarning");
+            }
+            else
+            {
+                _livePauseIcon.Data = Geometry.Parse(UiIcons.Pause);
+                _livePauseBtnText.Text = "暂停刷新";
+                _livePauseBtn.SetResourceReference(Control.ForegroundProperty, "FgPrimary");
+            }
+        }
+
+        // -------------------- 视图 2：模型与工具账单（100% 全高） --------------------
+        private UIElement BuildModelsView()
+        {
+            Grid g = new Grid();
+            g.Margin = new Thickness(16, 12, 16, 14);
+            g.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(38) });
+            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+
+            // 顶部：Top 模型多色堆叠占比分布条卡片
+            Border distCard = ModernControlsFactory.CreateCard(new Thickness(14, 10, 14, 10));
+            distCard.Margin = new Thickness(0, 0, 0, 10);
+            StackPanel distSp = new StackPanel();
+
+            DockPanel distHead = new DockPanel();
+            _modelCountSummaryText = new TextBlock
+            {
+                Text = "0 个模型",
+                FontSize = 11.2,
+                FontFamily = DesignSystem.FontMono,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            _modelCountSummaryText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            DockPanel.SetDock(_modelCountSummaryText, Dock.Right);
+            distHead.Children.Add(_modelCountSummaryText);
+
+            TextBlock distTitle = new TextBlock
+            {
+                Text = "主力模型账单构成分布",
+                FontSize = 12.2,
+                FontWeight = FontWeights.SemiBold,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            distTitle.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            distHead.Children.Add(distTitle);
+            distSp.Children.Add(distHead);
+
+            Border barFrame = new Border
+            {
+                Height = 10,
+                CornerRadius = new CornerRadius(5),
+                Margin = new Thickness(0, 8, 0, 7),
+                ClipToBounds = true
+            };
+            barFrame.SetResourceReference(Border.BackgroundProperty, "BgHoverStrong");
+            _modelStackedBarGrid = new Grid();
+            barFrame.Child = _modelStackedBarGrid;
+            distSp.Children.Add(barFrame);
+
+            _modelLegendWrap = new WrapPanel { Orientation = Orientation.Horizontal };
+            distSp.Children.Add(_modelLegendWrap);
+
+            distCard.Child = distSp;
+            Grid.SetRow(distCard, 0);
+            g.Children.Add(distCard);
+
+            // 中部工具栏：模型/工具即时搜索过滤框 + 模型单价工作台入口
+            DockPanel toolbar = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
+            StackPanel modelRightTools = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+
+            TextBlock rateHint = new TextBlock
+            {
+                Text = "点击「单价 ($/M)」可按百万输入单价排序",
+                FontSize = 11.2,
+                Margin = new Thickness(0, 0, 10, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            rateHint.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            modelRightTools.Children.Add(rateHint);
+
+            Button studioBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Settings, "模型单价工作台", "secondary");
+            studioBtn.Height = 30;
+            studioBtn.ToolTip = "打开模型单价浏览器与私有中转自定义费率覆盖工作台 (custom_prices.json)";
+            studioBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                OpenPricingStudioDialog(null);
+            };
+            modelRightTools.Children.Add(studioBtn);
+
+            DockPanel.SetDock(modelRightTools, Dock.Right);
+            toolbar.Children.Add(modelRightTools);
+
+            Border searchWrap = CreateSearchInputWithIcon("搜索模型 ID 或所属 AI 工具... (Ctrl+F)", 260, out _modelSearchInput);
+            searchWrap.HorizontalAlignment = HorizontalAlignment.Left;
+            _modelSearchInput.TextChanged += delegate(object s, TextChangedEventArgs e)
+            {
+                _modelSearchQuery = (_modelSearchInput.Text ?? "").Trim();
+                RefreshDashboardView();
+            };
+            toolbar.Children.Add(searchWrap);
+
+            Grid.SetRow(toolbar, 1);
+            g.Children.Add(toolbar);
+
+            // 底部全高模型明细表
+            Border tableCard = ModernControlsFactory.CreateCard(new Thickness(0));
+            Grid body = new Grid();
+            _modelGrid = CreateModelDataGrid();
+            body.Children.Add(_modelGrid);
+
+            TextBlock dummy;
+            _modelEmptyOverlay = CreateEmptyStateOverlay(
+                UiIcons.Models,
+                "当前筛选范围内暂无模型账单记录",
+                "尝试调整顶部时间段、设备范围或清空模型搜索关键字",
+                out dummy);
+            body.Children.Add(_modelEmptyOverlay);
+
+            tableCard.Child = body;
+            Grid.SetRow(tableCard, 2);
+            g.Children.Add(tableCard);
+            return g;
+        }
+
+        // -------------------- 视图 3：设备与 VPS 集群（100% 全高，OrbStack 风格卡片 + 对比表） --------------------
+        private UIElement BuildDevicesView()
+        {
+            Grid g = new Grid();
+            g.Margin = new Thickness(16, 12, 16, 14);
+            g.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(30) });
+            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+
+            // 顶部：OrbStack 风格设备状态卡片横向滚动列
+            ScrollViewer cardsSv = new ScrollViewer
+            {
+                HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+            _deviceCardsStack = new StackPanel { Orientation = Orientation.Horizontal };
+            cardsSv.Content = _deviceCardsStack;
+            Grid.SetRow(cardsSv, 0);
+            g.Children.Add(cardsSv);
+
+            // 中部标题与集群摘要行
+            DockPanel bar = new DockPanel { Margin = new Thickness(2, 0, 2, 6) };
+            _deviceClusterSummaryText = new TextBlock
+            {
+                Text = "双击任意设备行即可锁定查看该节点独立账单；右键可修改本地备注名或清理废弃离线节点缓存",
+                FontSize = 11.2,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            _deviceClusterSummaryText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            DockPanel.SetDock(_deviceClusterSummaryText, Dock.Right);
+            bar.Children.Add(_deviceClusterSummaryText);
+
+            TextBlock listHdr = new TextBlock
+            {
+                Text = "多设备与 Linux VPS 节点账单对比明细",
+                FontSize = 12.8,
+                FontWeight = FontWeights.SemiBold,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            listHdr.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            bar.Children.Add(listHdr);
+            Grid.SetRow(bar, 1);
+            g.Children.Add(bar);
+
+            // 底部全高设备对比 DataGrid
+            Border tableCard = ModernControlsFactory.CreateCard(new Thickness(0));
+            _machineGrid = CreateMachineDataGrid();
+            tableCard.Child = _machineGrid;
+            Grid.SetRow(tableCard, 2);
+            g.Children.Add(tableCard);
+
+            return g;
+        }
+
+        // -------------------- 视图 4：每日流水与导出（100% 全高，含 3 张导出动作卡 + 完整按日流水含 CacheWrite） --------------------
+        private UIElement BuildDailyExportView()
+        {
+            Grid g = new Grid();
+            g.Margin = new Thickness(16, 12, 16, 14);
+            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(82) });
+            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(38) });
+            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
+
+            // 顶部：4 张快捷导出动作卡（HTML 网页看板 / FinOps Markdown 战报 / 极客 SVG 分享海报 / CSV 财务明细）
+            UniformGrid expCards = new UniformGrid { Columns = 4, Margin = new Thickness(0, 0, 0, 10) };
+
+            expCards.Children.Add(BuildExportActionCard(
+                UiIcons.ExternalLink,
+                "交互式网页看板 (.html)",
+                "独立单文件离线网页，内置深浅主题与实时汇率",
+                "生成并打开",
+                true,
+                new Thickness(0, 0, 8, 0),
+                delegate() { ExportAndOpenHtmlReport(); }));
+
+            expCards.Children.Add(BuildExportActionCard(
+                UiIcons.Sparkles,
+                "FinOps 深度战报 (.md)",
+                "GitHub GFM 表格与 ASCII 微型趋势图周报",
+                "导出 Markdown",
+                false,
+                new Thickness(0, 0, 8, 0),
+                delegate() { ExportMarkdownWithDialog(); }));
+
+            expCards.Children.Add(BuildExportActionCard(
+                UiIcons.Layers,
+                "极客算力海报 (.svg)",
+                "840×460 高清矢量 Bento 战报卡，零隐私泄露",
+                "生成海报",
+                false,
+                new Thickness(0, 0, 8, 0),
+                delegate() { ExportSvgPosterWithDialog(); }));
+
+            expCards.Children.Add(BuildExportActionCard(
+                UiIcons.Download,
+                "多端财务对账单 (.csv)",
+                "UTF-8 BOM 编码 Excel 直开，完整缓存与双币明细",
+                "导出 CSV",
+                false,
+                new Thickness(0),
+                delegate() { ExportCsvWithDialog(); }));
+
+            Grid.SetRow(expCards, 0);
+            g.Children.Add(expCards);
+
+            // 中部工具栏：月份/日期即时过滤 + 汇总微提示
+            DockPanel toolbar = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
+            _dailyFilteredSummaryText = new TextBlock
+            {
+                Text = "共 0 天记录",
+                FontSize = 11.5,
+                FontFamily = DesignSystem.FontMono,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            _dailyFilteredSummaryText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            DockPanel.SetDock(_dailyFilteredSummaryText, Dock.Right);
+            toolbar.Children.Add(_dailyFilteredSummaryText);
+
+            Border searchWrap = CreateSearchInputWithIcon("按月份或日期过滤（例如 2026-11）... (Ctrl+F)", 260, out _dailySearchInput);
+            searchWrap.HorizontalAlignment = HorizontalAlignment.Left;
+            _dailySearchInput.TextChanged += delegate(object s, TextChangedEventArgs e)
+            {
+                _dailySearchQuery = (_dailySearchInput.Text ?? "").Trim();
+                RefreshDashboardView();
+            };
+            toolbar.Children.Add(searchWrap);
+
+            Grid.SetRow(toolbar, 1);
+            g.Children.Add(toolbar);
+
+            // 底部全高按日流水 DataGrid（补齐 CacheWrite 缓存写入列！）
+            Border tableCard = ModernControlsFactory.CreateCard(new Thickness(0));
+            Grid body = new Grid();
+            _dailyGrid = CreateDailyDataGrid();
+            body.Children.Add(_dailyGrid);
+
+            TextBlock dummy;
+            _dailyEmptyOverlay = CreateEmptyStateOverlay(
+                UiIcons.Calendar,
+                "暂无符合筛选条件的每日流水记录",
+                "清空上方日期过滤词或切换时间范围即可查看完整历史日账单",
+                out dummy);
+            body.Children.Add(_dailyEmptyOverlay);
+
+            tableCard.Child = body;
+            Grid.SetRow(tableCard, 2);
+            g.Children.Add(tableCard);
+            return g;
+        }
+
+        private Border BuildExportActionCard(
+            string iconPath,
+            string title,
+            string desc,
+            string btnLabel,
+            bool primaryBtn,
+            Thickness margin,
+            Action onTrigger)
+        {
+            Border card = ModernControlsFactory.CreateCard(new Thickness(14, 10, 14, 10));
+            card.Margin = margin;
 
             DockPanel dock = new DockPanel();
 
-            DockPanel tabHdr = new DockPanel();
-            tabHdr.Margin = new Thickness(0, 0, 0, 8);
-            DockPanel.SetDock(tabHdr, Dock.Top);
-
-            string[] tLabels = new string[]
+            Button actBtn = ModernControlsFactory.CreateButton(btnLabel, primaryBtn ? "primary" : "secondary");
+            actBtn.Height = 28;
+            actBtn.VerticalAlignment = VerticalAlignment.Center;
+            actBtn.Margin = new Thickness(10, 0, 0, 0);
+            actBtn.Click += delegate(object s, RoutedEventArgs e)
             {
-                "实时请求流",
-                "模型账单明细",
-                "设备单列对比",
-                "每日账单流水"
+                if (onTrigger != null) onTrigger();
             };
-            _tabBtns = new Button[tLabels.Length];
-            Border tabBox = CreateSegContainer();
-            DockPanel.SetDock(tabBox, Dock.Left);
-            StackPanel tabSp = (StackPanel)tabBox.Child;
-            for (int i = 0; i < tLabels.Length; i++)
+            DockPanel.SetDock(actBtn, Dock.Right);
+            dock.Children.Add(actBtn);
+
+            StackPanel left = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            StackPanel titleRow = new StackPanel { Orientation = Orientation.Horizontal };
+            Shapes.Path ic = UiIcons.CreateIcon(iconPath, 14.0, "AccentText");
+            ic.Margin = new Thickness(0, 0, 6, 0);
+            titleRow.Children.Add(ic);
+
+            TextBlock t = new TextBlock { Text = title, FontSize = 12.5, FontWeight = FontWeights.SemiBold, TextTrimming = TextTrimming.CharacterEllipsis };
+            t.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            titleRow.Children.Add(t);
+            left.Children.Add(titleRow);
+
+            TextBlock d = new TextBlock
             {
-                int idx = i;
-                Button b = CreateSegButton(tLabels[i]);
-                b.Padding = new Thickness(11, 4, 11, 4);
-                b.Click += delegate(object s, RoutedEventArgs e)
-                {
-                    _activeTab = idx;
-                    UpdateSegVisuals(_tabBtns, idx);
-                    UpdateTabVisibility();
-                };
-                _tabBtns[i] = b;
-                tabSp.Children.Add(b);
-            }
-            UpdateSegVisuals(_tabBtns, 0);
-            tabHdr.Children.Add(tabBox);
-
-            StackPanel rightHintSp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Right };
-            DockPanel.SetDock(rightHintSp, Dock.Right);
-
-            TextBlock tipRight = new TextBlock();
-            tipRight.Text = "本机日志变动毫秒级自动捕获 · 点击左侧工具或顶部设备可联动过滤";
-            tipRight.FontSize = 11;
-            tipRight.VerticalAlignment = VerticalAlignment.Center;
-            tipRight.Margin = new Thickness(0, 0, 10, 0);
-            tipRight.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-            rightHintSp.Children.Add(tipRight);
-
-            _methodologyLinkBtn = CreateSegButton("口径与说明");
-            _methodologyLinkBtn.FontSize = 11.5;
-            _methodologyLinkBtn.Padding = new Thickness(8, 3, 8, 3);
-            _methodologyLinkBtn.SetResourceReference(Control.ForegroundProperty, "AccentBlue");
-            _methodologyLinkBtn.Click += delegate(object s, RoutedEventArgs e)
-            {
-                _activeTab = (_activeTab == 4) ? 0 : 4;
-                UpdateSegVisuals(_tabBtns, _activeTab == 4 ? -1 : _activeTab);
-                UpdateTabVisibility();
+                Text = desc,
+                FontSize = 11,
+                Margin = new Thickness(0, 4, 0, 0),
+                TextTrimming = TextTrimming.CharacterEllipsis
             };
-            rightHintSp.Children.Add(_methodologyLinkBtn);
-            tabHdr.Children.Add(rightHintSp);
+            d.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            left.Children.Add(d);
 
-            dock.Children.Add(tabHdr);
-
-            Grid contentArea = new Grid();
-            _liveGrid = CreateLiveRequestDataGrid();
-            _modelGrid = CreateModelDataGrid();
-            _machineGrid = CreateMachineDataGrid();
-            _dailyGrid = CreateDailyDataGrid();
-            _aboutPanel = BuildMethodologyPanel();
-
-            contentArea.Children.Add(_liveGrid);
-            contentArea.Children.Add(_modelGrid);
-            contentArea.Children.Add(_machineGrid);
-            contentArea.Children.Add(_dailyGrid);
-            contentArea.Children.Add(_aboutPanel);
-            UpdateTabVisibility();
-
-            dock.Children.Add(contentArea);
+            dock.Children.Add(left);
             card.Child = dock;
             return card;
         }
 
-        private UIElement BuildStatusBar()
+        // -------------------- 视图 5：同步与设置（直接内嵌 SyncSettingsView） --------------------
+        private UIElement BuildSettingsView()
         {
-            Border bar = new Border();
-            bar.Height = 28;
-            bar.Padding = new Thickness(18, 0, 18, 0);
-            bar.BorderThickness = new Thickness(0, 1, 0, 0);
-            bar.SetResourceReference(Border.BackgroundProperty, "BgCard");
-            bar.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
+            SyncSettingsCallbacks callbacks = new SyncSettingsCallbacks();
 
-            Grid g = new Grid();
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.15, GridUnitType.Star) });
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.25, GridUnitType.Star) });
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-            // Col 0: Scope & Scan Performance Summary
-            DockPanel leftSp = new DockPanel { VerticalAlignment = VerticalAlignment.Center };
-            _statusPulseDot = new Ellipse { Width = 7, Height = 7, Margin = new Thickness(0, 0, 7, 0), VerticalAlignment = VerticalAlignment.Center };
-            _statusPulseDot.SetResourceReference(Shape.FillProperty, "AccentEmerald");
-            DockPanel.SetDock(_statusPulseDot, Dock.Left);
-            leftSp.Children.Add(_statusPulseDot);
-
-            _statusLeftText = new TextBlock();
-            _statusLeftText.Text = "实时监听已就绪 · 正在加载本地快照…";
-            _statusLeftText.FontSize = 11;
-            _statusLeftText.VerticalAlignment = VerticalAlignment.Center;
-            _statusLeftText.TextTrimming = TextTrimming.CharacterEllipsis;
-            _statusLeftText.ToolTip = "双层防清理持久归档保护已启用\n即使定期清理本地或 VPS 日志文件，已入库的历史账单依然永久保留不归零";
-            _statusLeftText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-            leftSp.Children.Add(_statusLeftText);
-            Grid.SetColumn(leftSp, 0);
-            g.Children.Add(leftSp);
-
-            // Col 1: Live Latest-Request Ticker (Click jumps straight to 实时请求流 tab!)
-            _statusLiveTickerBorder = new Border();
-            _statusLiveTickerBorder.CornerRadius = new CornerRadius(4);
-            _statusLiveTickerBorder.Padding = new Thickness(8, 2, 8, 2);
-            _statusLiveTickerBorder.Margin = new Thickness(8, 0, 8, 0);
-            _statusLiveTickerBorder.VerticalAlignment = VerticalAlignment.Center;
-            _statusLiveTickerBorder.HorizontalAlignment = HorizontalAlignment.Left;
-            _statusLiveTickerBorder.Cursor = Cursors.Hand;
-            _statusLiveTickerBorder.SetResourceReference(Border.BackgroundProperty, "BgSurface");
-            _statusLiveTickerBorder.ToolTip = "点击切换至「实时请求流」查看每条请求的 Token、TPS 与单条金额";
-            _statusLiveTickerBorder.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+            callbacks.OnSynced = delegate(SyncOutcome outcome)
             {
-                _activeTab = 0;
-                UpdateSegVisuals(_tabBtns, 0);
-                UpdateTabVisibility();
+                if (_scanResult != null)
+                {
+                    _localNode = SyncService.BuildLocalSnapshot(_scanResult, _syncCfg);
+                    Program.ApplyNodeAliasToSnapshot(_localNode, _syncCfg);
+                }
+                if (outcome != null)
+                {
+                    _cloudHasAttempted = true;
+                    _cloudLastOk = outcome.Success;
+                    _lastSyncStatus = outcome.Message ?? "";
+                    if (outcome.RemoteNodes != null)
+                    {
+                        try
+                        {
+                            PricingEngine pe = new PricingEngine(_homeDir);
+                            for (int i = 0; i < outcome.RemoteNodes.Count; i++)
+                            {
+                                if (outcome.RemoteNodes[i] != null)
+                                {
+                                    pe.RecalculateRemoteSnapshot(outcome.RemoteNodes[i]);
+                                    Program.ApplyNodeAliasToSnapshot(outcome.RemoteNodes[i], _syncCfg);
+                                }
+                            }
+                        }
+                        catch { }
+                        _remoteNodes = outcome.RemoteNodes;
+                    }
+                }
+                else
+                {
+                    _remoteNodes = LoadAndRecalculateRemoteNodes(_syncCfg.MachineId, _homeDir, _syncCfg);
+                }
+
+                ApplyPreferencesFromConfig();
+                UpdateCloudStatusUi();
+                RefreshDashboardView();
             };
 
-            _statusLiveTickerText = new TextBlock();
-            _statusLiveTickerText.Text = "最新请求: 暂无记录";
-            _statusLiveTickerText.FontSize = 11;
-            _statusLiveTickerText.TextTrimming = TextTrimming.CharacterEllipsis;
-            _statusLiveTickerText.SetResourceReference(TextBlock.ForegroundProperty, "AccentBlue");
-            _statusLiveTickerBorder.Child = _statusLiveTickerText;
-            Grid.SetColumn(_statusLiveTickerBorder, 1);
-            g.Children.Add(_statusLiveTickerBorder);
-
-            // Col 2: Cloud Pricing Status + Multi-Device Sync Status
-            StackPanel rightSp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-
-            _statusPriceBorder = new Border { Padding = new Thickness(6, 2, 6, 2), CornerRadius = new CornerRadius(4), Cursor = Cursors.Hand };
-            _statusPriceBorder.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { StartCloudPricingSyncAsync(true); };
-            _statusPriceText = new TextBlock { Text = "价格库加载中", FontSize = 11 };
-            _statusPriceText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-            _statusPriceBorder.Child = _statusPriceText;
-            rightSp.Children.Add(_statusPriceBorder);
-
-            TextBlock dotSep = new TextBlock { Text = "·", Margin = new Thickness(4, 0, 4, 0), FontSize = 11, VerticalAlignment = VerticalAlignment.Center };
-            dotSep.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-            rightSp.Children.Add(dotSep);
-
-            _statusCloudBorder = new Border { Padding = new Thickness(6, 2, 6, 2), CornerRadius = new CornerRadius(4), Cursor = Cursors.Hand };
-            _statusCloudBorder.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e) { OpenSyncDialog(0); };
-            _statusCloudText = new TextBlock { Text = "多端同步未配置", FontSize = 11 };
-            _statusCloudText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-            _statusCloudBorder.Child = _statusCloudText;
-            rightSp.Children.Add(_statusCloudBorder);
-
-            Grid.SetColumn(rightSp, 2);
-            g.Children.Add(rightSp);
-
-            bar.Child = g;
-            return bar;
-        }
-
-        private void UpdateTabVisibility()
-        {
-            if (_liveGrid == null) return;
-            _liveGrid.Visibility = (_activeTab == 0) ? Visibility.Visible : Visibility.Collapsed;
-            _modelGrid.Visibility = (_activeTab == 1) ? Visibility.Visible : Visibility.Collapsed;
-            _machineGrid.Visibility = (_activeTab == 2) ? Visibility.Visible : Visibility.Collapsed;
-            _dailyGrid.Visibility = (_activeTab == 3) ? Visibility.Visible : Visibility.Collapsed;
-            _aboutPanel.Visibility = (_activeTab == 4) ? Visibility.Visible : Visibility.Collapsed;
-
-            if (_methodologyLinkBtn != null)
+            callbacks.OnThemeOrCurrencyChanged = delegate()
             {
-                if (_activeTab == 4)
-                    _methodologyLinkBtn.SetResourceReference(Control.BackgroundProperty, "BgElevated");
-                else
-                    _methodologyLinkBtn.Background = Brushes.Transparent;
-            }
+                ApplyPreferencesFromConfig();
+                RefreshDashboardView();
+            };
+
+            callbacks.OnHomeDirectoryChanged = delegate(string newHomeDir)
+            {
+                if (!string.IsNullOrWhiteSpace(newHomeDir) && Directory.Exists(newHomeDir))
+                {
+                    _homeDir = newHomeDir.Trim();
+                    _lastTopRequestTs = 0L;
+                    _doctorLoadedOnce = false;
+                    if (_projectView != null)
+                        _projectView.SetHomeDirectory(_homeDir);
+                    RebuildDirectoryWatchers(_homeDir);
+                    RunSilentScanAsync(_homeDir, true, false);
+                    ShowToastSafe("已切换扫描主目录", _homeDir, "info");
+                }
+            };
+
+            callbacks.OnForceRefreshPricing = delegate()
+            {
+                StartCloudPricingSyncAsync(true);
+            };
+
+            callbacks.OnForceRefreshFx = delegate()
+            {
+                StartExchangeRateSyncAsync(true);
+            };
+
+            callbacks.ShowToast = delegate(string title, string detail, string variant)
+            {
+                ShowToastSafe(title, detail, variant);
+            };
+
+            _settingsView = new SyncSettingsView(
+                this,
+                _syncCfg,
+                delegate() { return _scanResult; },
+                delegate() { return _homeDir; },
+                callbacks);
+
+            return _settingsView;
         }
 
-        private DataGrid CreateLiveRequestDataGrid()
+        // -------------------- 现代表格与通用辅助构建器 --------------------
+        private static Border CreateSearchInputWithIcon(string placeholder, double width, out TextBox textBoxOut)
         {
-            DataGrid dg = CreateBaseDataGrid();
-            dg.Columns.Add(MakeColumn(dg, "请求时间", "TimeText", "TimestampMs", new DataGridLength(116), false, false));
-            dg.Columns.Add(MakeColumn(dg, "所属工具", "Tool", "Tool", new DataGridLength(1.15, DataGridLengthUnitType.Star), false, true));
-            dg.Columns.Add(MakeColumn(dg, "模型名称", "Model", "Model", new DataGridLength(1.35, DataGridLengthUnitType.Star), false, true));
-            dg.Columns.Add(MakeColumn(dg, "新增输入", "FreshInputText", "FreshInput", new DataGridLength(86), true, false));
-            dg.Columns.Add(MakeColumn(dg, "缓存读取", "CacheReadText", "CacheRead", new DataGridLength(88), true, false));
-            dg.Columns.Add(MakeColumn(dg, "缓存写入", "CacheWriteText", "CacheWrite", new DataGridLength(82), true, false));
-            dg.Columns.Add(MakeColumn(dg, "输出 Token", "OutputText", "Output", new DataGridLength(88), true, false));
-            dg.Columns.Add(MakeColumn(dg, "总 Token", "TotalTokensText", "TotalTokens", new DataGridLength(88), true, true));
-            dg.Columns.Add(MakeColumn(dg, "耗时", "DurationText", "DurationMs", new DataGridLength(74), true, false));
-            dg.Columns.Add(MakeColumn(dg, "速率 (TPS)", "TpsText", "Tps", new DataGridLength(96), true, true));
-            dg.Columns.Add(MakeColumn(dg, "单条金额", "FormattedCost", "CostUsd", new DataGridLength(98), true, true));
+            Grid host = new Grid { Width = width, Height = 30 };
+
+            TextBox tb = ModernControlsFactory.CreateTextInput("", 30.0);
+            tb.Padding = new Thickness(28, 0, 8, 0);
+            tb.FontSize = 12;
+            host.Children.Add(tb);
+
+            Shapes.Path icon = UiIcons.CreateIcon(UiIcons.Search, 13.5, "FgMuted");
+            icon.HorizontalAlignment = HorizontalAlignment.Left;
+            icon.VerticalAlignment = VerticalAlignment.Center;
+            icon.Margin = new Thickness(9, 0, 0, 0);
+            icon.IsHitTestVisible = false;
+            host.Children.Add(icon);
+
+            TextBlock watermark = new TextBlock
+            {
+                Text = placeholder,
+                FontSize = 11.5,
+                Margin = new Thickness(29, 0, 8, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                IsHitTestVisible = false,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+            watermark.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            host.Children.Add(watermark);
+
+            TextBox capturedTb = tb;
+            tb.TextChanged += delegate(object s, TextChangedEventArgs e)
+            {
+                watermark.Visibility = string.IsNullOrEmpty(capturedTb.Text) ? Visibility.Visible : Visibility.Collapsed;
+            };
+
+            Border wrapper = new Border { Child = host };
+            textBoxOut = tb;
+            return wrapper;
+        }
+
+        private static Border CreateEmptyStateOverlay(string iconPath, string title, string subtitle, out TextBlock titleOut)
+        {
+            Border bd = new Border
+            {
+                Background = Brushes.Transparent,
+                IsHitTestVisible = false,
+                Visibility = Visibility.Collapsed
+            };
+
+            StackPanel sp = new StackPanel
+            {
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(24)
+            };
+
+            Border iconCircle = new Border
+            {
+                Width = 40,
+                Height = 40,
+                CornerRadius = new CornerRadius(20),
+                BorderThickness = new Thickness(1),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+            iconCircle.SetResourceReference(Border.BackgroundProperty, "BgSurface");
+            iconCircle.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
+            iconCircle.Child = UiIcons.CreateIcon(iconPath, 18.0, "FgMuted");
+            sp.Children.Add(iconCircle);
+
+            TextBlock t1 = new TextBlock
+            {
+                Text = title,
+                FontSize = 13,
+                FontWeight = FontWeights.SemiBold,
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            t1.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            sp.Children.Add(t1);
+
+            TextBlock t2 = new TextBlock
+            {
+                Text = subtitle,
+                FontSize = 11.5,
+                Margin = new Thickness(0, 4, 0, 0),
+                MaxWidth = 440,
+                TextWrapping = TextWrapping.Wrap,
+                TextAlignment = TextAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            t2.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            sp.Children.Add(t2);
+
+            bd.Child = sp;
+            titleOut = t1;
+            return bd;
+        }
+
+        private DataGrid CreateLiveStreamDataGrid(bool compactOverviewMode)
+        {
+            DataGrid dg = ModernDataGridFactory.CreateModernDataGrid();
+
+            if (compactOverviewMode)
+            {
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "时间", "TimeText", "TimestampMs", new DataGridLength(86), false, true, false));
+                dg.Columns.Add(ModernDataGridFactory.MakeBadgeColumn("AI 工具", "Tool", "Tool", new DataGridLength(132)));
+                DataGridColumn modelCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "模型名称", "Model", "Model", new DataGridLength(1.45, DataGridLengthUnitType.Star), false, true, true);
+                modelCol.MinWidth = 120.0;
+                dg.Columns.Add(modelCol);
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "新增输入", "FreshInputText", "FreshInput", new DataGridLength(78), true, true, false));
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存读取", "CacheReadText", "CacheRead", new DataGridLength(82), true, true, false));
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "输出 Token", "OutputText", "Output", new DataGridLength(78), true, true, false));
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "总 Token", "TotalTokensText", "TotalTokens", new DataGridLength(84), true, true, true));
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "耗时", "DurationText", "DurationMs", new DataGridLength(66), true, true, false));
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "输出速率", "TpsText", "Tps", new DataGridLength(88), true, true, false));
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "单条花费", "FormattedCost", "CostUsd", new DataGridLength(84), true, true, true));
+            }
+            else
+            {
+                // 完整实时流需兼容右侧 310px 透视抽屉同时展开，精简列头并确保数字与花费列绝不截断
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "时间", "TimeText", "TimestampMs", new DataGridLength(78), false, true, false));
+                dg.Columns.Add(ModernDataGridFactory.MakeBadgeColumn("AI 工具", "Tool", "Tool", new DataGridLength(114)));
+                DataGridColumn modelCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "模型名称", "Model", "Model", new DataGridLength(1.3, DataGridLengthUnitType.Star), false, true, true);
+                modelCol.MinWidth = 112.0;
+                dg.Columns.Add(modelCol);
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "新输入", "FreshInputText", "FreshInput", new DataGridLength(64), true, true, false));
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存读", "CacheReadText", "CacheRead", new DataGridLength(68), true, true, false));
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存写", "CacheWriteText", "CacheWrite", new DataGridLength(60), true, true, false));
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "输出", "OutputText", "Output", new DataGridLength(60), true, true, false));
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "总计", "TotalTokensText", "TotalTokens", new DataGridLength(68), true, true, true));
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "耗时", "DurationText", "DurationMs", new DataGridLength(54), true, true, false));
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "速率", "TpsText", "Tps", new DataGridLength(74), true, true, false));
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "花费", "FormattedCost", "CostUsd", new DataGridLength(76), true, true, true));
+            }
+
+            ContextMenu cm = new ContextMenu();
+            cm.Resources = Resources;
+            cm.Opened += delegate(object s, RoutedEventArgs e) { cm.Resources = Resources; };
+
+            MenuItem copyModelItem = new MenuItem { Header = "复制模型名称" };
+            copyModelItem.Click += delegate(object s, RoutedEventArgs e)
+            {
+                LiveRequestRowView row = dg.SelectedItem as LiveRequestRowView;
+                if (row != null && TrySetClipboardText(row.Model))
+                    ShowToastSafe("已复制模型名称", row.Model, "success");
+            };
+            cm.Items.Add(copyModelItem);
+
+            MenuItem copyTsvItem = new MenuItem { Header = "复制整行明细 (TSV)" };
+            copyTsvItem.Click += delegate(object s, RoutedEventArgs e)
+            {
+                LiveRequestRowView r = dg.SelectedItem as LiveRequestRowView;
+                if (r != null)
+                {
+                    string tsv = string.Join("\t", new string[]
+                    {
+                        r.TimeText ?? "", r.Tool ?? "", r.Model ?? "",
+                        r.FreshInputText ?? "", r.CacheReadText ?? "", r.OutputText ?? "",
+                        r.TotalTokensText ?? "", r.DurationText ?? "", r.TpsText ?? "", r.FormattedCost ?? ""
+                    });
+                    if (TrySetClipboardText(tsv))
+                        ShowToastSafe("已复制单条请求明细", r.Tool + " · " + r.Model, "success");
+                }
+            };
+            cm.Items.Add(copyTsvItem);
+
+            cm.Items.Add(new Separator());
+
+            MenuItem filterToolItem = new MenuItem { Header = "仅筛选该 AI 工具" };
+            filterToolItem.Click += delegate(object s, RoutedEventArgs e)
+            {
+                LiveRequestRowView r = dg.SelectedItem as LiveRequestRowView;
+                if (r != null && !string.IsNullOrEmpty(r.Tool))
+                {
+                    _selectedTool = r.Tool;
+                    RefreshDashboardView();
+                }
+            };
+            cm.Items.Add(filterToolItem);
+
+            MenuItem filterModelItem = new MenuItem { Header = "在实时流中搜索该模型" };
+            filterModelItem.Click += delegate(object s, RoutedEventArgs e)
+            {
+                LiveRequestRowView r = dg.SelectedItem as LiveRequestRowView;
+                if (r != null && !string.IsNullOrEmpty(r.Model))
+                {
+                    SwitchActiveView(ViewLiveStream);
+                    if (_liveSearchInput != null) _liveSearchInput.Text = r.Model;
+                }
+            };
+            cm.Items.Add(filterModelItem);
+
+            MenuItem inspectRowItem = new MenuItem { Header = "打开单笔账单瀑布流透视抽屉" };
+            inspectRowItem.Click += delegate(object s, RoutedEventArgs e)
+            {
+                LiveRequestRowView r = dg.SelectedItem as LiveRequestRowView;
+                if (r != null)
+                {
+                    SwitchActiveView(ViewLiveStream);
+                    OpenRequestInspectorFor(r);
+                }
+            };
+            cm.Items.Add(inspectRowItem);
+
+            dg.ContextMenu = cm;
+            if (compactOverviewMode)
+            {
+                dg.MouseDoubleClick += delegate(object s, MouseButtonEventArgs e)
+                {
+                    LiveRequestRowView r = dg.SelectedItem as LiveRequestRowView;
+                    SwitchActiveView(ViewLiveStream);
+                    if (r != null)
+                        OpenRequestInspectorFor(r);
+                };
+            }
             return dg;
         }
 
         private DataGrid CreateModelDataGrid()
         {
-            DataGrid dg = CreateBaseDataGrid();
-            dg.Columns.Add(MakeColumn(dg, "模型名称", "Model", "Model", new DataGridLength(1.6, DataGridLengthUnitType.Star), false, true));
-            dg.Columns.Add(MakeColumn(dg, "所属工具", "Tool", "Tool", new DataGridLength(1.3, DataGridLengthUnitType.Star), false, false));
-            dg.Columns.Add(MakeColumn(dg, "调用数", "Turns", "Turns", new DataGridLength(74), true, false));
-            dg.Columns.Add(MakeColumn(dg, "纯新增输入", "FreshInputText", "FreshInput", new DataGridLength(95), true, false));
-            dg.Columns.Add(MakeColumn(dg, "缓存读取", "CacheReadText", "CacheRead", new DataGridLength(95), true, false));
-            dg.Columns.Add(MakeColumn(dg, "缓存写入", "CacheWriteText", "CacheWrite", new DataGridLength(90), true, false));
-            dg.Columns.Add(MakeColumn(dg, "输出 Token", "OutputText", "Output", new DataGridLength(92), true, false));
-            dg.Columns.Add(MakeColumn(dg, "总 Token", "TotalTokensText", "TotalTokens", new DataGridLength(95), true, true));
-            dg.Columns.Add(MakeColumn(dg, "单价 ($/M)", "RateLabel", "CostUsd", new DataGridLength(105), true, false));
-            dg.Columns.Add(MakeColumn(dg, "等效花费", "FormattedCost", "CostUsd", new DataGridLength(108), true, true));
-            dg.Columns.Add(MakeColumn(dg, "占比", "ShareText", "CostUsd", new DataGridLength(72), true, false));
+            DataGrid dg = ModernDataGridFactory.CreateModernDataGrid();
+
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "模型名称", "Model", "Model", new DataGridLength(1.65, DataGridLengthUnitType.Star), false, true, true));
+            dg.Columns.Add(ModernDataGridFactory.MakeBadgeColumn("所属工具", "Tool", "Tool", new DataGridLength(138)));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "调用次数", "Turns", "Turns", new DataGridLength(80), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "纯新增输入", "FreshInputText", "FreshInput", new DataGridLength(96), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存读取", "CacheReadText", "CacheRead", new DataGridLength(96), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "输出 Token", "OutputText", "Output", new DataGridLength(92), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存命中", "CacheHitText", "CacheRead", new DataGridLength(82), true, true, false));
+            // 关键修复：单价 ($/M) 列的 SortMemberPath 严格绑定 InputPerM，彻底修正旧版错排为 CostUsd 的 Bug！
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "单价 ($/M)", "RateLabel", "InputPerM", new DataGridLength(108), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "等效账单", "FormattedCost", "CostUsd", new DataGridLength(104), true, true, true));
+            dg.Columns.Add(ModernDataGridFactory.MakeShareBarColumn("账单占比", "ShareText", "BarRatio", "BarRatio", new DataGridLength(122)));
+
+            ContextMenu cm = new ContextMenu();
+            cm.Resources = Resources;
+            cm.Opened += delegate(object s, RoutedEventArgs e) { cm.Resources = Resources; };
+
+            MenuItem copyMdl = new MenuItem { Header = "复制模型 ID" };
+            copyMdl.Click += delegate(object s, RoutedEventArgs e)
+            {
+                ModelRowView r = dg.SelectedItem as ModelRowView;
+                if (r != null && TrySetClipboardText(r.Model))
+                    ShowToastSafe("已复制模型 ID", r.Model, "success");
+            };
+            cm.Items.Add(copyMdl);
+
+            MenuItem copyRow = new MenuItem { Header = "复制整行账单明细 (TSV)" };
+            copyRow.Click += delegate(object s, RoutedEventArgs e)
+            {
+                ModelRowView r = dg.SelectedItem as ModelRowView;
+                if (r != null)
+                {
+                    string tsv = string.Join("\t", new string[]
+                    {
+                        r.Model ?? "", r.Tool ?? "", r.Turns.ToString(CultureInfo.InvariantCulture),
+                        r.FreshInputText ?? "", r.CacheReadText ?? "", r.OutputText ?? "",
+                        r.RateLabel ?? "", r.FormattedCost ?? "", r.ShareText ?? ""
+                    });
+                    if (TrySetClipboardText(tsv))
+                        ShowToastSafe("已复制模型账单行", r.Model + " · " + r.FormattedCost, "success");
+                }
+            };
+            cm.Items.Add(copyRow);
+
+            cm.Items.Add(new Separator());
+
+            MenuItem filterByTool = new MenuItem { Header = "仅看该 AI 工具" };
+            filterByTool.Click += delegate(object s, RoutedEventArgs e)
+            {
+                ModelRowView r = dg.SelectedItem as ModelRowView;
+                if (r != null && !string.IsNullOrEmpty(r.Tool))
+                {
+                    _selectedTool = r.Tool;
+                    RefreshDashboardView();
+                }
+            };
+            cm.Items.Add(filterByTool);
+
+            MenuItem jumpLive = new MenuItem { Header = "在实时请求流中筛选该模型" };
+            jumpLive.Click += delegate(object s, RoutedEventArgs e)
+            {
+                ModelRowView r = dg.SelectedItem as ModelRowView;
+                if (r != null && !string.IsNullOrEmpty(r.Model))
+                {
+                    SwitchActiveView(ViewLiveStream);
+                    if (_liveSearchInput != null) _liveSearchInput.Text = r.Model;
+                }
+            };
+            cm.Items.Add(jumpLive);
+
+            MenuItem openStudioItem = new MenuItem { Header = "在模型单价工作台中自定义覆盖费率..." };
+            openStudioItem.Click += delegate(object s, RoutedEventArgs e)
+            {
+                ModelRowView r = dg.SelectedItem as ModelRowView;
+                OpenPricingStudioDialog(r != null ? r.Model : null);
+            };
+            cm.Items.Add(openStudioItem);
+
+            dg.ContextMenu = cm;
             return dg;
         }
 
         private DataGrid CreateMachineDataGrid()
         {
-            DataGrid dg = CreateBaseDataGrid();
-            dg.Columns.Add(MakeColumn(dg, "设备名称", "MachineName", "MachineName", new DataGridLength(1.25, DataGridLengthUnitType.Star), false, true));
-            dg.Columns.Add(MakeColumn(dg, "系统类型", "TypeBadge", "TypeBadge", new DataGridLength(95), false, false));
-            dg.Columns.Add(MakeColumn(dg, "最后同步", "SyncedAt", "SyncedAt", new DataGridLength(136), false, false));
-            dg.Columns.Add(MakeColumn(dg, "已用工具", "ToolsSummary", "ToolCount", new DataGridLength(1.5, DataGridLengthUnitType.Star), false, false));
-            dg.Columns.Add(MakeColumn(dg, "调用数", "Turns", "Turns", new DataGridLength(76), true, false));
-            dg.Columns.Add(MakeColumn(dg, "新增输入", "FreshInputText", "FreshInput", new DataGridLength(90), true, false));
-            dg.Columns.Add(MakeColumn(dg, "缓存读取", "CacheReadText", "CacheRead", new DataGridLength(92), true, false));
-            dg.Columns.Add(MakeColumn(dg, "输出 Token", "OutputText", "Output", new DataGridLength(88), true, false));
-            dg.Columns.Add(MakeColumn(dg, "总 Token", "TotalTokensText", "TotalTokens", new DataGridLength(95), true, true));
-            dg.Columns.Add(MakeColumn(dg, "等效美元 ($)", "UsdText", "CostUsd", new DataGridLength(102), true, false));
-            dg.Columns.Add(MakeColumn(dg, "等效人民币 (¥)", "CnyText", "CostCny", new DataGridLength(110), true, true));
-            dg.Columns.Add(MakeColumn(dg, "全网占比", "ShareText", "CostUsd", new DataGridLength(76), true, false));
+            DataGrid dg = ModernDataGridFactory.CreateModernDataGrid();
+
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "设备名称", "MachineName", "MachineName", new DataGridLength(1.25, DataGridLengthUnitType.Star), false, false, true));
+            dg.Columns.Add(ModernDataGridFactory.MakeBadgeColumn("节点类型", "TypeBadge", "TypeBadge", new DataGridLength(106)));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "在线状态", "StatusText", "IsOnline", new DataGridLength(96), false, false, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "操作系统", "OsInfo", "OsInfo", new DataGridLength(1.15, DataGridLengthUnitType.Star), false, false, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "活跃工具", "ToolsSummary", "ToolCount", new DataGridLength(1.3, DataGridLengthUnitType.Star), false, false, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "最后同步", "SyncedAt", "SyncedAt", new DataGridLength(136), false, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "调用数", "Turns", "Turns", new DataGridLength(74), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "总 Token", "TotalTokensText", "TotalTokens", new DataGridLength(94), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "等效美元 ($)", "UsdText", "CostUsd", new DataGridLength(98), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "等效人民币 (¥)", "CnyText", "CostCny", new DataGridLength(106), true, true, true));
+            dg.Columns.Add(ModernDataGridFactory.MakeShareBarColumn("集群占比", "ShareText", "BarRatio", "BarRatio", new DataGridLength(116)));
+
             dg.MouseDoubleClick += delegate(object s, MouseButtonEventArgs e)
             {
                 MachineRowView row = dg.SelectedItem as MachineRowView;
                 if (row != null && !string.IsNullOrEmpty(row.MachineId))
                 {
-                    _selectedMachineId = string.Equals(_selectedMachineId, row.MachineId, StringComparison.OrdinalIgnoreCase) ? null : row.MachineId;
+                    _selectedMachineId = (_selectedMachineId != null && string.Equals(_selectedMachineId, row.MachineId, StringComparison.OrdinalIgnoreCase))
+                        ? null
+                        : row.MachineId;
                     RefreshDashboardView();
                 }
             };
+
+            ContextMenu cm = new ContextMenu();
+            cm.Resources = Resources;
+
+            MenuItem filterNodeItem = new MenuItem { Header = "锁定 / 取消仅看该设备" };
+            filterNodeItem.Click += delegate(object s, RoutedEventArgs e)
+            {
+                MachineRowView r = dg.SelectedItem as MachineRowView;
+                if (r != null && !string.IsNullOrEmpty(r.MachineId))
+                {
+                    _selectedMachineId = (_selectedMachineId != null && string.Equals(_selectedMachineId, r.MachineId, StringComparison.OrdinalIgnoreCase))
+                        ? null
+                        : r.MachineId;
+                    RefreshDashboardView();
+                }
+            };
+            cm.Items.Add(filterNodeItem);
+
+            MenuItem aliasItem = new MenuItem { Header = "设置设备本地备注名称..." };
+            aliasItem.Click += delegate(object s, RoutedEventArgs e)
+            {
+                MachineRowView r = dg.SelectedItem as MachineRowView;
+                if (r != null)
+                    OpenDeviceAliasPopover(_deviceSelectorBtn ?? (UIElement)dg, r);
+            };
+            cm.Items.Add(aliasItem);
+
+            MenuItem removeCacheItem = new MenuItem { Header = "移除该远端设备的本地缓存快照" };
+            removeCacheItem.Click += delegate(object s, RoutedEventArgs e)
+            {
+                MachineRowView r = dg.SelectedItem as MachineRowView;
+                if (r != null && !r.IsLocal)
+                    RemoveOfflineRemoteNodeCache(r);
+            };
+            cm.Items.Add(removeCacheItem);
+
+            cm.Opened += delegate(object s, RoutedEventArgs e)
+            {
+                cm.Resources = Resources;
+                MachineRowView r = dg.SelectedItem as MachineRowView;
+                removeCacheItem.IsEnabled = (r != null && !r.IsLocal);
+            };
+
+            dg.ContextMenu = cm;
             return dg;
         }
 
         private DataGrid CreateDailyDataGrid()
         {
-            DataGrid dg = CreateBaseDataGrid();
-            dg.Columns.Add(MakeColumn(dg, "日期", "Date", "Date", new DataGridLength(1.2, DataGridLengthUnitType.Star), false, true));
-            dg.Columns.Add(MakeColumn(dg, "调用次数", "Turns", "Turns", new DataGridLength(1.0, DataGridLengthUnitType.Star), true, false));
-            dg.Columns.Add(MakeColumn(dg, "纯新增输入", "FreshInputText", "FreshInput", new DataGridLength(1.1, DataGridLengthUnitType.Star), true, false));
-            dg.Columns.Add(MakeColumn(dg, "缓存读取", "CacheReadText", "CacheRead", new DataGridLength(1.1, DataGridLengthUnitType.Star), true, false));
-            dg.Columns.Add(MakeColumn(dg, "输出 Token", "OutputText", "Output", new DataGridLength(1.1, DataGridLengthUnitType.Star), true, false));
-            dg.Columns.Add(MakeColumn(dg, "总 Token", "TotalTokensText", "TotalTokens", new DataGridLength(1.1, DataGridLengthUnitType.Star), true, true));
-            dg.Columns.Add(MakeColumn(dg, "等效美元 ($)", "UsdText", "CostUsd", new DataGridLength(1.15, DataGridLengthUnitType.Star), true, false));
-            dg.Columns.Add(MakeColumn(dg, "等效人民币 (¥)", "CnyText", "CostCny", new DataGridLength(1.2, DataGridLengthUnitType.Star), true, true));
-            return dg;
-        }
+            DataGrid dg = ModernDataGridFactory.CreateModernDataGrid();
 
-        private DataGrid CreateBaseDataGrid()
-        {
-            DataGrid dg = new DataGrid();
-            dg.AutoGenerateColumns = false;
-            dg.IsReadOnly = true;
-            dg.CanUserAddRows = false;
-            dg.CanUserDeleteRows = false;
-            dg.CanUserReorderColumns = false;
-            dg.CanUserResizeRows = false;
-            dg.HeadersVisibility = DataGridHeadersVisibility.Column;
-            dg.GridLinesVisibility = DataGridGridLinesVisibility.Horizontal;
-            dg.SelectionMode = DataGridSelectionMode.Single;
-            dg.SelectionUnit = DataGridSelectionUnit.FullRow;
-            dg.BorderThickness = new Thickness(0);
-            dg.RowHeaderWidth = 0;
-            dg.FontSize = 12.2;
-            dg.EnableRowVirtualization = true;
-            ScrollViewer.SetCanContentScroll(dg, true);
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "日期", "Date", "Date", new DataGridLength(1.15, DataGridLengthUnitType.Star), false, true, true));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "调用次数", "Turns", "Turns", new DataGridLength(0.9, DataGridLengthUnitType.Star), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "纯新增输入", "FreshInputText", "FreshInput", new DataGridLength(1.05, DataGridLengthUnitType.Star), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存读取", "CacheReadText", "CacheRead", new DataGridLength(1.05, DataGridLengthUnitType.Star), true, true, false));
+            // 补齐 CacheWrite（缓存写入）列，消除大缓存写入与总 Token 对账差异！
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存写入", "CacheWriteText", "CacheWrite", new DataGridLength(1.0, DataGridLengthUnitType.Star), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "输出 Token", "OutputText", "Output", new DataGridLength(1.05, DataGridLengthUnitType.Star), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "总 Token", "TotalTokensText", "TotalTokens", new DataGridLength(1.1, DataGridLengthUnitType.Star), true, true, true));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "等效美元 ($)", "UsdText", "CostUsd", new DataGridLength(1.05, DataGridLengthUnitType.Star), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "等效人民币 (¥)", "CnyText", "CostCny", new DataGridLength(1.1, DataGridLengthUnitType.Star), true, true, true));
 
-            dg.SetResourceReference(DataGrid.BackgroundProperty, "BgCard");
-            dg.SetResourceReference(DataGrid.RowBackgroundProperty, "BgCard");
-            dg.SetResourceReference(DataGrid.AlternatingRowBackgroundProperty, "BgRowAlt");
-            dg.SetResourceReference(DataGrid.HorizontalGridLinesBrushProperty, "BorderCard");
-            dg.SetResourceReference(DataGrid.ForegroundProperty, "FgPrimary");
-
-            ApplyDataGridThemeStyles(dg);
-            return dg;
-        }
-
-        private void ApplyDataGridThemeStyles(DataGrid dg)
-        {
-            if (dg == null) return;
-
-            Style hdrStyle = new Style(typeof(DataGridColumnHeader));
-            hdrStyle.Setters.Add(new Setter(Control.ForegroundProperty, new DynamicResourceExtension("FgSecondary")));
-            hdrStyle.Setters.Add(new Setter(Control.FontWeightProperty, FontWeights.SemiBold));
-            hdrStyle.Setters.Add(new Setter(Control.FontSizeProperty, 11.5));
-            hdrStyle.Setters.Add(new Setter(Control.CursorProperty, Cursors.Hand));
-
-            ControlTemplate hdrTpl = new ControlTemplate(typeof(DataGridColumnHeader));
-            FrameworkElementFactory bd = new FrameworkElementFactory(typeof(Border), "HdrBd");
-            bd.SetValue(Border.BackgroundProperty, new DynamicResourceExtension("BgSurface"));
-            bd.SetValue(Border.BorderBrushProperty, new DynamicResourceExtension("BorderCard"));
-            bd.SetValue(Border.BorderThicknessProperty, new Thickness(0, 0, 0, 1));
-            bd.SetValue(Border.PaddingProperty, new Thickness(10, 7, 10, 7));
-
-            FrameworkElementFactory dock = new FrameworkElementFactory(typeof(DockPanel));
-            FrameworkElementFactory sortTxt = new FrameworkElementFactory(typeof(TextBlock), "SortArrow");
-            sortTxt.SetValue(DockPanel.DockProperty, Dock.Right);
-            sortTxt.SetValue(TextBlock.MarginProperty, new Thickness(4, 0, 0, 0));
-            sortTxt.SetValue(TextBlock.FontSizeProperty, 9.5);
-            sortTxt.SetValue(TextBlock.VerticalAlignmentProperty, VerticalAlignment.Center);
-            sortTxt.SetValue(TextBlock.ForegroundProperty, new DynamicResourceExtension("AccentBlue"));
-            dock.AppendChild(sortTxt);
-
-            FrameworkElementFactory cp = new FrameworkElementFactory(typeof(ContentPresenter));
-            cp.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
-            cp.SetValue(ContentPresenter.HorizontalAlignmentProperty, new TemplateBindingExtension(Control.HorizontalContentAlignmentProperty));
-            dock.AppendChild(cp);
-
-            bd.AppendChild(dock);
-            hdrTpl.VisualTree = bd;
-
-            Trigger hoverTrig = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
-            hoverTrig.Setters.Add(new Setter(Border.BackgroundProperty, new DynamicResourceExtension("BgElevated"), "HdrBd"));
-            hdrTpl.Triggers.Add(hoverTrig);
-
-            Trigger ascTrig = new Trigger { Property = DataGridColumnHeader.SortDirectionProperty, Value = ListSortDirection.Ascending };
-            ascTrig.Setters.Add(new Setter(TextBlock.TextProperty, "▲", "SortArrow"));
-            hdrTpl.Triggers.Add(ascTrig);
-
-            Trigger descTrig = new Trigger { Property = DataGridColumnHeader.SortDirectionProperty, Value = ListSortDirection.Descending };
-            descTrig.Setters.Add(new Setter(TextBlock.TextProperty, "▼", "SortArrow"));
-            hdrTpl.Triggers.Add(descTrig);
-
-            hdrStyle.Setters.Add(new Setter(Control.TemplateProperty, hdrTpl));
-            dg.ColumnHeaderStyle = hdrStyle;
-
-            Style cellStyle = new Style(typeof(DataGridCell));
-            cellStyle.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(0)));
-            cellStyle.Setters.Add(new Setter(Control.FocusVisualStyleProperty, null));
-            ControlTemplate cellTpl = new ControlTemplate(typeof(DataGridCell));
-            FrameworkElementFactory cbd = new FrameworkElementFactory(typeof(Border), "CellBd");
-            cbd.SetValue(Border.BackgroundProperty, Brushes.Transparent);
-            cbd.SetValue(Border.PaddingProperty, new Thickness(10, 6, 10, 6));
-            FrameworkElementFactory ccp = new FrameworkElementFactory(typeof(ContentPresenter));
-            ccp.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
-            cbd.AppendChild(ccp);
-            cellTpl.VisualTree = cbd;
-
-            Trigger selTrig = new Trigger { Property = DataGridCell.IsSelectedProperty, Value = true };
-            selTrig.Setters.Add(new Setter(Border.BackgroundProperty, new DynamicResourceExtension("BgSelected"), "CellBd"));
-            selTrig.Setters.Add(new Setter(Control.ForegroundProperty, new DynamicResourceExtension("FgPrimary")));
-            cellTpl.Triggers.Add(selTrig);
-
-            cellStyle.Setters.Add(new Setter(Control.TemplateProperty, cellTpl));
-            dg.CellStyle = cellStyle;
-        }
-
-        private DataGridTextColumn MakeColumn(DataGrid dg, string header, string bindingPath, string sortPath, DataGridLength width, bool rightAlign, bool bold)
-        {
-            DataGridTextColumn col = new DataGridTextColumn();
-            col.Header = header;
-            col.Binding = new Binding(bindingPath);
-            col.SortMemberPath = sortPath;
-            col.Width = width;
-
-            if (rightAlign)
+            dg.MouseDoubleClick += delegate(object s, MouseButtonEventArgs e)
             {
-                Style hdrRight = new Style(typeof(DataGridColumnHeader), dg.ColumnHeaderStyle);
-                hdrRight.Setters.Add(new Setter(Control.HorizontalContentAlignmentProperty, HorizontalAlignment.Right));
-                col.HeaderStyle = hdrRight;
+                DailyRowView r = dg.SelectedItem as DailyRowView;
+                if (r != null && !string.IsNullOrEmpty(r.Date))
+                {
+                    _selectedDate = (_selectedDate != null && string.Equals(_selectedDate, r.Date, StringComparison.Ordinal))
+                        ? null
+                        : r.Date;
+                    RefreshDashboardView();
+                    if (_selectedDate != null)
+                        ShowToastSafe("已锁定单日视角", "当前仅展示 " + _selectedDate + " 当日账单（按 Esc 恢复）", "info");
+                }
+            };
+
+            ContextMenu cm = new ContextMenu();
+            cm.Resources = Resources;
+            cm.Opened += delegate(object s, RoutedEventArgs e) { cm.Resources = Resources; };
+
+            MenuItem drillItem = new MenuItem { Header = "按该日期钻取过滤全站数据" };
+            drillItem.Click += delegate(object s, RoutedEventArgs e)
+            {
+                DailyRowView r = dg.SelectedItem as DailyRowView;
+                if (r != null && !string.IsNullOrEmpty(r.Date))
+                {
+                    _selectedDate = r.Date;
+                    RefreshDashboardView();
+                    SwitchActiveView(ViewOverview);
+                }
+            };
+            cm.Items.Add(drillItem);
+
+            MenuItem copyDailyRow = new MenuItem { Header = "复制当日流水明细 (TSV)" };
+            copyDailyRow.Click += delegate(object s, RoutedEventArgs e)
+            {
+                DailyRowView r = dg.SelectedItem as DailyRowView;
+                if (r != null)
+                {
+                    string tsv = string.Join("\t", new string[]
+                    {
+                        r.Date ?? "", r.Turns.ToString(CultureInfo.InvariantCulture),
+                        r.FreshInputText ?? "", r.CacheReadText ?? "", r.CacheWriteText ?? "",
+                        r.OutputText ?? "", r.TotalTokensText ?? "", r.UsdText ?? "", r.CnyText ?? ""
+                    });
+                    if (TrySetClipboardText(tsv))
+                        ShowToastSafe("已复制当日流水", r.Date + " · " + (_isCny ? r.CnyText : r.UsdText), "success");
+                }
+            };
+            cm.Items.Add(copyDailyRow);
+
+            dg.ContextMenu = cm;
+            return dg;
+        }
+
+        // =================================================================================================
+        // 3. 视图状态切换、多端聚合刷新引擎、平滑面积/柱状趋势图、导出与全局快捷键
+        // =================================================================================================
+        private void SwitchActiveView(int viewIdx)
+        {
+            if (viewIdx < 0 || viewIdx >= TotalViewCount)
+                viewIdx = ViewOverview;
+
+            _activeView = viewIdx;
+
+            if (_viewPages != null)
+            {
+                for (int i = 0; i < _viewPages.Length; i++)
+                {
+                    if (_viewPages[i] != null)
+                        _viewPages[i].Visibility = (i == _activeView) ? Visibility.Visible : Visibility.Collapsed;
+                }
             }
 
-            Style elemStyle = new Style(typeof(TextBlock));
-            elemStyle.Setters.Add(new Setter(TextBlock.VerticalAlignmentProperty, VerticalAlignment.Center));
-            elemStyle.Setters.Add(new Setter(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis));
-            if (rightAlign)
-                elemStyle.Setters.Add(new Setter(TextBlock.TextAlignmentProperty, TextAlignment.Right));
-            if (bold)
-                elemStyle.Setters.Add(new Setter(TextBlock.FontWeightProperty, FontWeights.SemiBold));
-
-            col.ElementStyle = elemStyle;
-            return col;
-        }
-
-        private FrameworkElement BuildMethodologyPanel()
-        {
-            ScrollViewer sv = new ScrollViewer();
-            sv.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
-
-            StackPanel sp = new StackPanel();
-            sp.Margin = new Thickness(4, 4, 8, 8);
-
-            sp.Children.Add(MakeInfoBlock(
-                "1. 免代理实时请求流监控（单条 Token / 耗时 / TPS / 金额）+ SQLite 增量游标引擎",
-                "• 无需架设任何本地反向代理或依赖外部软件：直接通过 FileSystemWatcher 监听 + 4 秒静默脉冲 + JSONL 字节偏移游标（Seek Cursor）实时捕获每条对话请求。\n" +
-                "• 自动从请求发起与结束时间戳精确测算单条响应耗时（Duration）与输出生成速率 TPS（tok/s），并在「实时请求流」与底部状态栏动态滚动刷新。\n" +
-                "• 所有文件游标与快照持久化在 %APPDATA%\\TokLens\\toklens.db，冷启动 0ms 秒开界面，日常增量扫描耗时低于 25ms，永不弹窗锁屏。"));
-
-            sp.Children.Add(MakeInfoBlock(
-                "2. 双层历史账单防清理持久归档（本地删日志 / 重装系统均不丢账单）",
-                "• 第一层（本地持久归档）：Windows 桌面端依托 %APPDATA%\\TokLens\\toklens.db（Linux VPS 探针依托 ~/.toklens/ledger.db）维护文件级游标快照与按日高水位账本；当 AI 工具自动轮转清理旧会话、手动删除日志文件或清空缓存目录时，被清理文件的历史累计用量自动转入持久归档，已入库账单绝不回退扣减。\n" +
-                "• 第二层（云端高水位合并保护）：每次与 GitHub 私有 Gist 或 WebDAV 同步时，自动拉取云端已有快照并按「日期 + 工具 + 模型」执行高水位合并（High-Water-Mark Merge）；即使彻底重装电脑或销毁重建 Linux VPS，已同步过的历史账单依然永久保留、永不归零。"));
-
-            sp.Children.Add(MakeInfoBlock(
-                "3. 多台 Windows 电脑 + 多台 Linux VPS 自动同步（单列对比 + 汇总统计）",
-                "• Windows 电脑运行同一个绿色单文件 TokLens.exe，配置好 GitHub 私有 Secret Gist 或 WebDAV 后，启动时、每 5 分钟及本机用量变化后自动在后台双向同步。\n" +
-                "• Linux VPS 仅需在「多端同步 -> 接入其他电脑 / Linux VPS」复制单行命令粘贴至 SSH 即可部署零依赖 Python 3 探针并注册定时上报，不含任何对话原文。"));
-
-            sp.Children.Add(MakeInfoBlock(
-                "4. 100% 独立三源云端模型价格库 + 实时美元汇率",
-                "• 彻底移除任何外部软件依赖：独立从 models.dev 官方 API、LiteLLM 开源价格注册表、OpenRouter 公开模型 API 三源聚合同步 2,000+ 模型单价（输入/输出/缓存读写），并支持 ~/.toklens/custom_prices.json 自定义覆盖。\n" +
-                "• 自动识别 .claude 日志中的 entrypoint 字段，精准区分 Claude Desktop 桌面客户端与 Claude Code 命令行，消除重复拆分。"));
-
-            sv.Content = sp;
-            return sv;
-        }
-
-        private Border MakeInfoBlock(string heading, string body)
-        {
-            Border b = new Border();
-            b.CornerRadius = new CornerRadius(8);
-            b.Padding = new Thickness(14, 10, 14, 10);
-            b.Margin = new Thickness(0, 0, 0, 8);
-            b.BorderThickness = new Thickness(1);
-            b.SetResourceReference(Border.BackgroundProperty, "BgSurface");
-            b.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
-
-            StackPanel sp = new StackPanel();
-            TextBlock h = new TextBlock();
-            h.Text = heading;
-            h.FontSize = 13;
-            h.FontWeight = FontWeights.SemiBold;
-            h.Margin = new Thickness(0, 0, 0, 4);
-            h.SetResourceReference(TextBlock.ForegroundProperty, "AccentBlue");
-            sp.Children.Add(h);
-
-            TextBlock p = new TextBlock();
-            p.Text = body;
-            p.FontSize = 12;
-            p.LineHeight = 19;
-            p.TextWrapping = TextWrapping.Wrap;
-            p.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-            sp.Children.Add(p);
-
-            b.Child = sp;
-            return b;
-        }
-
-        // -------------------- Reusable Control Builders --------------------
-        private Border CreateSegContainer()
-        {
-            Border b = new Border();
-            b.CornerRadius = new CornerRadius(7);
-            b.BorderThickness = new Thickness(1);
-            b.Padding = new Thickness(2);
-            b.VerticalAlignment = VerticalAlignment.Center;
-            b.SetResourceReference(Border.BackgroundProperty, "BgSurface");
-            b.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
-
-            StackPanel sp = new StackPanel();
-            sp.Orientation = Orientation.Horizontal;
-            b.Child = sp;
-            return b;
-        }
-
-        private Button CreateSegButton(string text)
-        {
-            Button btn = new Button();
-            btn.Content = text;
-            btn.FontSize = 11.8;
-            btn.FontWeight = FontWeights.Medium;
-            btn.Padding = new Thickness(9, 4, 9, 4);
-            btn.Cursor = Cursors.Hand;
-            btn.FocusVisualStyle = null;
-
-            ControlTemplate tpl = new ControlTemplate(typeof(Button));
-            FrameworkElementFactory bd = new FrameworkElementFactory(typeof(Border), "SegBd");
-            bd.SetValue(Border.CornerRadiusProperty, new CornerRadius(5));
-            bd.SetValue(Border.BackgroundProperty, new TemplateBindingExtension(Control.BackgroundProperty));
-            bd.SetValue(Border.PaddingProperty, new TemplateBindingExtension(Control.PaddingProperty));
-
-            FrameworkElementFactory cp = new FrameworkElementFactory(typeof(ContentPresenter));
-            cp.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
-            cp.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
-            bd.AppendChild(cp);
-            tpl.VisualTree = bd;
-            btn.Template = tpl;
-            return btn;
-        }
-
-        private void UpdateSegVisuals(Button[] group, int activeIndex)
-        {
-            if (group == null) return;
-            for (int i = 0; i < group.Length; i++)
+            if (_activeView == ViewLiveStream)
             {
-                Button b = group[i];
-                // Keep FontWeight.Medium constant to prevent horizontal pixel jitter on click!
-                b.FontWeight = FontWeights.Medium;
-                if (i == activeIndex)
+                _hasUnreadLivePulse = false;
+                if (_navLiveNewDot != null)
+                    _navLiveNewDot.Visibility = Visibility.Collapsed;
+            }
+            else if (_activeView == ViewSettings)
+            {
+                UpdateAutoStartButtonLabel();
+                if (_settingsView != null)
+                    _settingsView.RefreshDynamicStats();
+            }
+
+            if (_viewTitleText != null && _activeView >= 0 && _activeView < ViewTitles.Length)
+                _viewTitleText.Text = ViewTitles[_activeView];
+
+            if (_globalFilterGroup != null)
+                _globalFilterGroup.Visibility = (_activeView == ViewSettings) ? Visibility.Collapsed : Visibility.Visible;
+            if (_settingsHeaderActions != null)
+                _settingsHeaderActions.Visibility = (_activeView == ViewSettings) ? Visibility.Visible : Visibility.Collapsed;
+
+            UpdateNavVisuals();
+            UpdateTopSubContextText();
+            RefreshActiveSpecialistView(false);
+
+            if (_activeView == ViewOverview)
+            {
+                Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(RedrawChart));
+            }
+        }
+
+        private void UpdateNavVisuals()
+        {
+            if (_navLiveNewDot != null)
+            {
+                _navLiveNewDot.Visibility = (_hasUnreadLivePulse && _activeView != ViewLiveStream)
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+            }
+
+            if (_navItemBorders == null) return;
+            for (int i = 0; i < _navItemBorders.Length; i++)
+            {
+                Border bd = _navItemBorders[i];
+                Border bar = _navActiveBars[i];
+                if (bd == null) continue;
+
+                bool active = (i == _activeView);
+                if (active)
                 {
-                    b.SetResourceReference(Control.BackgroundProperty, "BgElevated");
-                    b.SetResourceReference(Control.ForegroundProperty, "FgPrimary");
+                    bd.SetResourceReference(Border.BackgroundProperty, "BgSelected");
+                    bd.SetResourceReference(TextElement.ForegroundProperty, "FgPrimary");
+                    if (bar != null) bar.Visibility = Visibility.Visible;
                 }
                 else
                 {
-                    b.Background = Brushes.Transparent;
-                    b.SetResourceReference(Control.ForegroundProperty, "FgSecondary");
+                    bd.Background = Brushes.Transparent;
+                    bd.SetResourceReference(TextElement.ForegroundProperty, "FgSecondary");
+                    if (bar != null) bar.Visibility = Visibility.Hidden;
                 }
             }
         }
 
-        private Button CreateActionButton(string text, bool accentHighlight)
+        private void ApplyPreferencesFromConfig()
         {
-            Button btn = new Button();
-            btn.Content = text;
-            btn.FontSize = 12;
-            btn.FontWeight = FontWeights.Medium;
-            btn.Padding = new Thickness(11, 4, 11, 4);
-            btn.Cursor = Cursors.Hand;
-            btn.FocusVisualStyle = null;
-            if (accentHighlight)
-                btn.Foreground = Brushes.White;
-            else
-                btn.SetResourceReference(Control.ForegroundProperty, "FgPrimary");
+            if (_syncCfg == null) return;
 
-            ControlTemplate tpl = new ControlTemplate(typeof(Button));
-            FrameworkElementFactory bd = new FrameworkElementFactory(typeof(Border), "BtnBd");
-            bd.SetValue(Border.CornerRadiusProperty, new CornerRadius(7));
-            bd.SetValue(Border.BorderThicknessProperty, new Thickness(1));
-            if (accentHighlight)
+            bool themeChanged = (_isDark != _syncCfg.IsDarkTheme);
+            _isDark = _syncCfg.IsDarkTheme;
+            _isCny = _syncCfg.PreferCny;
+
+            if (themeChanged)
             {
-                LinearGradientBrush lg = new LinearGradientBrush(
-                    (Color)ColorConverter.ConvertFromString("#0284C7"),
-                    (Color)ColorConverter.ConvertFromString("#4F46E5"),
-                    45.0);
-                lg.Freeze();
-                bd.SetValue(Border.BackgroundProperty, lg);
-                bd.SetValue(Border.BorderBrushProperty, BrushHex("#38BDF8"));
+                DesignSystem.ApplyTheme(this, _isDark);
+                ModernWindowChrome.SyncDwmTheme(this, _isDark);
+                if (_themeToggleIcon != null)
+                    _themeToggleIcon.Data = Geometry.Parse(_isDark ? UiIcons.Sun : UiIcons.Moon);
+                if (_themeToggleBtn != null)
+                    _themeToggleBtn.ToolTip = _isDark ? "切换至浅色主题 (Paper Zinc)" : "切换至深色主题 (Obsidian Zinc)";
+                if (_miniHud != null)
+                    _miniHud.SetTheme(_isDark);
+                if (_requestInspector != null)
+                    _requestInspector.SetTheme(_isDark);
             }
-            else
-            {
-                bd.SetValue(Border.BackgroundProperty, new DynamicResourceExtension("BgSurface"));
-                bd.SetValue(Border.BorderBrushProperty, new DynamicResourceExtension("BorderStrong"));
-            }
-            bd.SetValue(Border.PaddingProperty, new TemplateBindingExtension(Control.PaddingProperty));
 
-            FrameworkElementFactory cp = new FrameworkElementFactory(typeof(ContentPresenter));
-            cp.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
-            cp.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
-            bd.AppendChild(cp);
-            tpl.VisualTree = bd;
+            ModernControlsFactory.UpdateSegmentedGroup(_currencyBtns, _isCny ? 0 : 1);
+            ModernControlsFactory.UpdateSegmentedGroup(_rangeBtns, FindPresetRangeIndex(_rangeDays));
+            ModernControlsFactory.UpdateSegmentedGroup(_leftModeBtns, _leftRankByMachine ? 1 : 0);
+            ModernControlsFactory.UpdateSegmentedGroup(_metricBtns, _rankByCost ? 0 : 1);
+            ModernControlsFactory.UpdateSegmentedGroup(_chartTypeBtns, _chartLineMode ? 0 : 1);
+            UpdateNavVisuals();
+            UpdateCloudStatusUi();
 
-            Trigger hover = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
-            if (!accentHighlight)
-                hover.Setters.Add(new Setter(Border.BackgroundProperty, new DynamicResourceExtension("BgElevated"), "BtnBd"));
-            hover.Setters.Add(new Setter(Border.BorderBrushProperty, new DynamicResourceExtension("AccentBlue"), "BtnBd"));
-            tpl.Triggers.Add(hover);
-
-            btn.Template = tpl;
-            return btn;
-        }
-        // -------------------- Cloud Pricing, FX, Silent Incremental Scan & Auto-Sync --------------------
-        private void StartCloudPricingSyncAsync(bool forceRefresh)
-        {
-            if (_priceIsSyncing) return;
-            _priceIsSyncing = true;
-            UpdatePriceBadgeUi(true);
-
-            Task.Run(delegate()
-            {
-                PricingSyncInfo info = PricingEngine.SyncCloudPricing(forceRefresh);
-                Dispatcher.BeginInvoke(new Action(delegate()
-                {
-                    _priceIsSyncing = false;
-                    if (info != null && info.CloudModelCount > 0)
-                    {
-                        _priceSyncSource = info.Source;
-                        _priceSyncTime = info.UpdatedAt;
-                        RepriceLocalRecordsWithUpdatedEngine();
-                    }
-                    UpdatePriceBadgeUi(false);
-                    if (_scanResult != null)
-                        RefreshDashboardView();
-                }));
-            });
+            if (_trayMinimizeToggleItem != null)
+                _trayMinimizeToggleItem.Checked = _syncCfg.MinimizeToTray;
         }
 
-        private void RepriceLocalRecordsWithUpdatedEngine()
+        private void ToggleThemeFromUi()
         {
-            if (_scanResult == null) return;
-            try
+            _isDark = !_isDark;
+            if (_syncCfg != null)
             {
-                PricingEngine pe = new PricingEngine(_homeDir);
-                _scanResult.PricingModelCount = pe.Count;
-                for (int i = 0; i < _scanResult.Records.Count; i++)
-                {
-                    RecordBucket r = _scanResult.Records[i];
-                    if (string.Equals(r.RateLabel, "$1 / $4", StringComparison.Ordinal))
-                    {
-                        double act, bas;
-                        ModelRate mr;
-                        pe.ComputeCost(r.Model, r.FreshInput, r.Output, r.CacheRead, r.CacheWrite, 0.0, out act, out bas, out mr);
-                        r.CostUsd = act;
-                        r.BaselineUsd = bas;
-                        r.RateLabel = mr.Label;
-                    }
-                }
-                if (_scanResult.RecentRequests != null)
-                {
-                    for (int i = 0; i < _scanResult.RecentRequests.Count; i++)
-                    {
-                        RecentRequestRecord rq = _scanResult.RecentRequests[i];
-                        if (rq.CostUsd <= 0.0)
-                        {
-                            double act, bas;
-                            ModelRate mr;
-                            pe.ComputeCost(rq.Model, rq.FreshInput, rq.Output, rq.CacheRead, rq.CacheWrite, 0.0, out act, out bas, out mr);
-                            rq.CostUsd = act;
-                        }
-                    }
-                }
-                _localNode = SyncService.BuildLocalSnapshot(_scanResult, _syncCfg);
+                _syncCfg.IsDarkTheme = _isDark;
+                SyncService.SaveConfig(_syncCfg);
             }
-            catch { }
+
+            DesignSystem.ApplyTheme(this, _isDark);
+            ModernWindowChrome.SyncDwmTheme(this, _isDark);
+
+            if (_themeToggleIcon != null)
+                _themeToggleIcon.Data = Geometry.Parse(_isDark ? UiIcons.Sun : UiIcons.Moon);
+            if (_themeToggleBtn != null)
+                _themeToggleBtn.ToolTip = _isDark ? "切换至浅色主题 (Paper Zinc)" : "切换至深色主题 (Obsidian Zinc)";
+            if (_miniHud != null)
+                _miniHud.SetTheme(_isDark);
+            if (_requestInspector != null)
+                _requestInspector.SetTheme(_isDark);
+
+            ModernControlsFactory.UpdateSegmentedGroup(_currencyBtns, _isCny ? 0 : 1);
+            ModernControlsFactory.UpdateSegmentedGroup(_rangeBtns, FindPresetRangeIndex(_rangeDays));
+            ModernControlsFactory.UpdateSegmentedGroup(_leftModeBtns, _leftRankByMachine ? 1 : 0);
+            ModernControlsFactory.UpdateSegmentedGroup(_metricBtns, _rankByCost ? 0 : 1);
+            ModernControlsFactory.UpdateSegmentedGroup(_chartTypeBtns, _chartLineMode ? 0 : 1);
+            UpdateNavVisuals();
+            UpdateCloudStatusUi();
+
+            RefreshDashboardView();
+            if (_settingsView != null)
+                _settingsView.ReloadFromConfig();
         }
 
-        private void UpdatePriceBadgeUi(bool syncing)
+        private void UpdateFxUiState(bool isLive, bool isSyncing)
         {
-            if (_statusPriceText == null || _statusPriceBorder == null) return;
-            if (syncing)
+            if (_sidebarFxDot == null) return;
+            if (isSyncing)
             {
-                _statusPriceText.Text = "价格库更新中…";
-                _statusPriceText.SetResourceReference(TextBlock.ForegroundProperty, "AccentAmber");
-                return;
-            }
-            int totalModels = _scanResult != null ? _scanResult.PricingModelCount : 0;
-            if (totalModels > 0)
-            {
-                _statusPriceText.Text = string.Format(CultureInfo.InvariantCulture, "价格库 {0:N0} 模型", totalModels);
-                _statusPriceText.SetResourceReference(TextBlock.ForegroundProperty, "AccentEmerald");
-            }
-            else
-            {
-                _statusPriceText.Text = "价格库就绪";
-                _statusPriceText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-            }
-            _statusPriceBorder.ToolTip = string.Format(
-                CultureInfo.InvariantCulture,
-                "独立三源云端模型价格库（零外部软件依赖）\n当前覆盖模型数: {0}\n数据源: {1}{2}\n点击立即从 models.dev + LiteLLM + OpenRouter 强制同步最新单价",
-                totalModels > 0 ? totalModels.ToString("N0", CultureInfo.InvariantCulture) : "加载中",
-                string.IsNullOrEmpty(PricingEngine.CurrentSourceLabel) ? _priceSyncSource : PricingEngine.CurrentSourceLabel,
-                string.IsNullOrEmpty(_priceSyncTime) ? "" : ("\n更新时间: " + _priceSyncTime));
-        }
-
-        private void StartExchangeRateSyncAsync(bool forceRefresh)
-        {
-            if (_fxIsSyncing) return;
-            _fxIsSyncing = true;
-            if (_fxStatusBtnText != null)
-            {
-                _fxStatusBtnText.Text = "…";
-                _fxStatusBtnText.SetResourceReference(TextBlock.ForegroundProperty, "AccentAmber");
-            }
-
-            Task.Run(delegate()
-            {
-                ExchangeRateInfo fx = ExchangeRateService.FetchLatestUsdToCny(forceRefresh);
-                Dispatcher.BeginInvoke(new Action(delegate()
-                {
-                    _fxIsSyncing = false;
-                    ApplyFetchedRate(fx);
-                }));
-            });
-        }
-
-        private void ApplyFetchedRate(ExchangeRateInfo fx)
-        {
-            if (fx == null) return;
-            _usdToCny = fx.Rate;
-            _fxSource = fx.Source;
-            _fxUpdatedAt = fx.UpdatedAt;
-
-            _suppressRateEvent = true;
-            try
-            {
-                if (_rateInput != null)
-                    _rateInput.Text = _usdToCny.ToString("0.00##", CultureInfo.InvariantCulture);
-            }
-            finally
-            {
-                _suppressRateEvent = false;
-            }
-
-            UpdateFxBadgeUi(fx.IsLive, false);
-            if (_scanResult != null)
-                RefreshDashboardView();
-        }
-
-        private void UpdateFxBadgeUi(bool isLive, bool isManual)
-        {
-            if (_fxStatusBtnText == null || _fxStatusBtnBorder == null) return;
-            if (isManual)
-            {
-                _fxStatusBtnText.Text = "手动";
-                _fxStatusBtnText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-                _fxStatusBtnBorder.ToolTip = "当前使用手动输入汇率: " + _usdToCny.ToString("0.00##", CultureInfo.InvariantCulture) + "\n点击此处恢复并刷新在线实时汇率";
+                _sidebarFxDot.SetResourceReference(Shapes.Shape.FillProperty, "AccentPrimary");
             }
             else if (isLive)
             {
-                _fxStatusBtnText.Text = "实时";
-                _fxStatusBtnText.SetResourceReference(TextBlock.ForegroundProperty, "AccentEmerald");
-                _fxStatusBtnBorder.ToolTip = string.Format(
-                    CultureInfo.InvariantCulture,
-                    "USD/CNY 自动实时汇率: {0:0.0000}\n数据来源: {1}{2}\n点击立即重新拉取最新汇率",
-                    _usdToCny,
-                    _fxSource,
-                    string.IsNullOrEmpty(_fxUpdatedAt) ? "" : ("\n更新时间: " + _fxUpdatedAt));
+                _sidebarFxDot.SetResourceReference(Shapes.Shape.FillProperty, "SemanticSuccess");
             }
             else
             {
-                _fxStatusBtnText.Text = "默认";
-                _fxStatusBtnText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-                _fxStatusBtnBorder.ToolTip = "当前使用缓存/默认汇率 " + _usdToCny.ToString("0.00", CultureInfo.InvariantCulture) + "\n点击此处拉取在线实时汇率";
+                _sidebarFxDot.SetResourceReference(Shapes.Shape.FillProperty, "FgMuted");
+            }
+
+            if (_rateInput != null)
+            {
+                string timePart = string.IsNullOrEmpty(_fxUpdatedAt) ? "" : (" · 更新于 " + _fxUpdatedAt);
+                _rateInput.ToolTip = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "USD/CNY 折算汇率: {0:0.####}（来源: {1}{2}）",
+                    _usdToCny,
+                    _fxSource,
+                    timePart);
             }
         }
 
-        // Silent Non-Blocking Incremental Scan (NEVER grays out or locks the screen!)
-        private void RunSilentScanAsync(string targetHome, bool triggerCloudSyncIfEnabled, bool forceUiRefresh)
+        private void UpdatePriceUiState(bool isSyncing)
         {
-            if (_isScanning)
+            if (_sidebarPriceText == null) return;
+            int cnt = _scanResult != null ? _scanResult.PricingModelCount : 0;
+            if (isSyncing)
             {
-                _pendingRescan = true;
-                return;
+                _sidebarPriceText.Text = "正在同步云端单价...";
+            }
+            else if (cnt > 0)
+            {
+                _sidebarPriceText.Text = string.Format(CultureInfo.InvariantCulture, "价格库 {0:N0} 模型", cnt);
+            }
+            else
+            {
+                _sidebarPriceText.Text = "内置+三源价格库";
             }
 
-            _isScanning = true;
-            if (_statusPulseDot != null)
-                _statusPulseDot.SetResourceReference(Shape.FillProperty, "AccentAmber");
-
-            bool scanWsl = _syncCfg != null && _syncCfg.ScanLocalWsl;
-            bool hadNoPriorResult = (_scanResult == null);
-
-            Task.Run(delegate()
-            {
-                TokenScanner scanner = new TokenScanner(targetHome, scanWsl);
-                ScanResult res = scanner.Run();
-
-                Dispatcher.BeginInvoke(new Action(delegate()
-                {
-                    _isScanning = false;
-                    if (_statusPulseDot != null)
-                        _statusPulseDot.SetResourceReference(Shape.FillProperty, "AccentEmerald");
-
-                    long newTopTs = (res.RecentRequests != null && res.RecentRequests.Count > 0)
-                        ? res.RecentRequests[0].TimestampMs
-                        : 0L;
-
-                    int prevArchivedCount = _scanResult != null ? _scanResult.ArchivedFilesCount : -1;
-                    bool hasChanges = hadNoPriorResult ||
-                                      forceUiRefresh ||
-                                      res.ChangedFilesCount > 0 ||
-                                      res.ArchivedFilesCount != prevArchivedCount ||
-                                      newTopTs != _lastTopRequestTs;
-
-                    _scanResult = res;
-                    _lastTopRequestTs = newTopTs;
-
-                    if (hasChanges)
-                    {
-                        _localNode = SyncService.BuildLocalSnapshot(res, _syncCfg);
-                        _remoteNodes = SyncService.LoadCachedRemoteNodes(_syncCfg.MachineId);
-
-                        if (res.Warnings.Count > 0)
-                        {
-                            _warningBanner.Visibility = Visibility.Visible;
-                            _warningText.Text = "部分目录受权限限制无法读取（" + string.Join(", ", res.Warnings.ToArray()) + "）。直接运行 TokLens.exe 可读取全部数据。";
-                        }
-                        else
-                        {
-                            _warningBanner.Visibility = Visibility.Collapsed;
-                        }
-
-                        UpdatePriceBadgeUi(_priceIsSyncing);
-                        RefreshDashboardView();
-
-                        // Schedule debounced cloud push when local files changed in background
-                        if (res.ChangedFilesCount > 0 && !triggerCloudSyncIfEnabled && _cloudDebounceTimer != null && _syncCfg != null && _syncCfg.AutoSync && _syncCfg.IsConfigured)
-                        {
-                            _cloudDebounceTimer.Stop();
-                            _cloudDebounceTimer.Start();
-                        }
-                    }
-
-                    if (triggerCloudSyncIfEnabled && _syncCfg != null && _syncCfg.AutoSync && _syncCfg.IsConfigured)
-                    {
-                        StartBackgroundCloudSync();
-                    }
-
-                    if (_pendingRescan)
-                    {
-                        _pendingRescan = false;
-                        RunSilentScanAsync(_homeDir, false, false);
-                    }
-                }));
-            });
-        }
-
-        private void StartBackgroundCloudSync()
-        {
-            if (_cloudSyncRunning || _localNode == null) return;
-            _cloudSyncRunning = true;
-            _lastSyncStatus = "同步中…";
-            UpdateCloudStatusUi();
-
-            NodeSnapshot snapCopy = _localNode;
-            SyncConfig cfgCopy = _syncCfg;
-
-            Task.Run(delegate()
-            {
-                SyncOutcome outcome = SyncService.SyncNow(cfgCopy, snapCopy, false);
-                Dispatcher.BeginInvoke(new Action(delegate()
-                {
-                    _cloudSyncRunning = false;
-                    if (outcome != null)
-                    {
-                        _remoteNodes = outcome.RemoteNodes ?? SyncService.LoadCachedRemoteNodes(_syncCfg.MachineId);
-                        _lastSyncStatus = outcome.Success
-                            ? ("已同步 " + DateTime.Now.ToString("HH:mm", CultureInfo.InvariantCulture))
-                            : "同步异常";
-                    }
-                    UpdateCloudStatusUi();
-                    RefreshDashboardView();
-                }));
-            });
+            string tInfo = string.IsNullOrEmpty(_priceSyncTime) ? "" : (" · " + _priceSyncTime);
+            _sidebarPriceText.ToolTip = "三源模型价格库（点击打开模型单价工作台）：" + _priceSyncSource + tInfo;
         }
 
         private void UpdateCloudStatusUi()
         {
-            if (_statusCloudText == null || _statusCloudBorder == null) return;
+            if (_navSyncSubText == null) return;
+
             if (_cloudSyncRunning)
             {
-                _statusCloudText.Text = "云端同步中…";
-                _statusCloudText.SetResourceReference(TextBlock.ForegroundProperty, "AccentAmber");
+                _navSyncSubText.Text = "正在与云端同步...";
+                _navSyncSubText.SetResourceReference(TextBlock.ForegroundProperty, "AccentText");
+                _navItemBorders[ViewSettings].ToolTip = "正在同步本机与远端设备账单...";
+                return;
             }
-            else if (_syncCfg != null && _syncCfg.IsConfigured)
+
+            if (_syncCfg == null || !_syncCfg.IsConfigured)
             {
-                string ch = string.Equals(_syncCfg.Provider, "webdav", StringComparison.OrdinalIgnoreCase) ? "WebDAV" : "Gist";
-                string tail = string.IsNullOrEmpty(_lastSyncStatus) ? "自动同步已开启" : _lastSyncStatus;
-                _statusCloudText.Text = ch + " · " + tail;
-                _statusCloudText.SetResourceReference(TextBlock.ForegroundProperty, "AccentEmerald");
-                _statusCloudBorder.ToolTip = "多端自动同步通道已激活（每 5 分钟及本机变动后自动同步）\n点击打开多端同步设置";
+                _navSyncSubText.Text = "点击配置云同步";
+                _navSyncSubText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+                _navItemBorders[ViewSettings].ToolTip = "同步与设置 (Ctrl+,) — 尚未配置 GitHub Gist 或 WebDAV 多端同步";
+                return;
+            }
+
+            bool isDav = string.Equals(_syncCfg.Provider, "webdav", StringComparison.OrdinalIgnoreCase);
+            string provName = isDav ? "WebDAV" : "Gist";
+
+            // 修复旧版即使同步报错依然显示绿字的 Bug：失败时明确显示琥珀/危险色与错误原因 Tooltip！
+            if (_cloudHasAttempted && !_cloudLastOk)
+            {
+                _navSyncSubText.Text = provName + " 同步异常";
+                _navSyncSubText.SetResourceReference(TextBlock.ForegroundProperty, "SemanticWarning");
+                _navItemBorders[ViewSettings].ToolTip = string.IsNullOrEmpty(_lastSyncStatus)
+                    ? "上次云同步失败，点击打开设置排查"
+                    : _lastSyncStatus;
+                return;
+            }
+
+            int remCnt = _remoteNodes != null ? _remoteNodes.Count : 0;
+            _navSyncSubText.Text = remCnt > 0
+                ? string.Format(CultureInfo.InvariantCulture, "{0} 已就绪 (+{1})", provName, remCnt)
+                : (provName + " 已就绪");
+            _navSyncSubText.SetResourceReference(TextBlock.ForegroundProperty, "SemanticSuccess");
+            _navItemBorders[ViewSettings].ToolTip = string.IsNullOrEmpty(_lastSyncStatus)
+                ? (provName + " 多端自动同步已启用")
+                : _lastSyncStatus;
+        }
+
+        private void UpdateTopSubContextText()
+        {
+            if (_viewSubContextText == null) return;
+
+            if (_activeView == ViewSettings)
+            {
+                _viewSubContextText.Text = "管理多端云同步、配对码、Linux/macOS 探针、时光机备份与系统偏好";
+                return;
+            }
+            if (_activeView == ViewDoctor)
+            {
+                _viewSubContextText.Text = "深度巡检 26 项 AI 工具、WSL2 与 GitHub CLI 令牌状态";
+                return;
+            }
+            if (_activeView == ViewProjects)
+            {
+                _viewSubContextText.Text = "本机离线解析仓库与工作区 Token 归因（零路径上传云端）";
+                return;
+            }
+            if (_activeView == ViewWhatIf)
+            {
+                _viewSubContextText.Text = "基于真实历史四维 Token 画像推演跨模型迁移差价";
+                return;
+            }
+            if (_activeView == ViewBloat)
+            {
+                _viewSubContextText.Text = "透视长对话滚雪球膨胀、提示词缓存效率与异常会话";
+                return;
+            }
+            if (_activeView == ViewInsights)
+            {
+                _viewSubContextText.Text = "2026 订阅回本等效评估、365 天热力图与昼夜节律洞察";
+                return;
+            }
+
+            List<string> tags = new List<string>();
+            if (_selectedDate != null)
+                tags.Add("单日: " + _selectedDate);
+            if (_selectedTool != null)
+                tags.Add("工具: " + _selectedTool);
+
+            if (tags.Count > 0)
+            {
+                _viewSubContextText.Text = string.Join(" · ", tags.ToArray());
+                return;
+            }
+
+            if (_scanResult != null)
+            {
+                _viewSubContextText.Text = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "增量扫描 {0:F2}s · 跟踪 {1:N0} 文件",
+                    _scanResult.ElapsedSeconds,
+                    _scanResult.TotalFilesTracked);
             }
             else
             {
-                _statusCloudText.Text = "多端同步: 未配置";
-                _statusCloudText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-                _statusCloudBorder.ToolTip = "点击配置 GitHub 私有 Gist 或 WebDAV，自动汇总多台电脑与 Linux VPS 账单";
+                _viewSubContextText.Text = "实时监听就绪";
             }
         }
 
-        private List<NodeSnapshot> GetAllNodes()
+        private static int FindPresetRangeIndex(int days)
         {
-            List<NodeSnapshot> all = new List<NodeSnapshot>();
+            for (int i = 0; i < PresetRangeDays.Length; i++)
+            {
+                if (PresetRangeDays[i] == days)
+                    return i;
+            }
+            return -1;
+        }
+
+        private static bool ParseOnlineState(NodeSnapshot snap, out string statusLabel)
+        {
+            if (snap == null)
+            {
+                statusLabel = "未知";
+                return false;
+            }
+            if (snap.IsLocal)
+            {
+                statusLabel = "本机实时";
+                return true;
+            }
+            DateTime parsed;
+            if (!string.IsNullOrWhiteSpace(snap.SyncedAt) &&
+                DateTime.TryParseExact(
+                    snap.SyncedAt.Trim(),
+                    "yyyy-MM-dd HH:mm:ss",
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeLocal,
+                    out parsed))
+            {
+                double hours = (DateTime.Now - parsed).TotalHours;
+                if (hours <= 24.0)
+                {
+                    statusLabel = "在线";
+                    return true;
+                }
+                int days = (int)Math.Floor(hours / 24.0);
+                statusLabel = days >= 2
+                    ? string.Format(CultureInfo.InvariantCulture, "离线 ({0}天前)", days)
+                    : "离线 (>24h)";
+                return false;
+            }
+            statusLabel = "远端缓存";
+            return true;
+        }
+
+        private void RefreshDashboardView()
+        {
+            if (_kpiCostVal == null) return;
+
+            PricingEngine pricing = null;
+            try { pricing = new PricingEngine(_homeDir); } catch { }
+
+            // 0. 组装全集群节点列表（本机 + 远端缓存节点）并合并全量记录桶
+            List<NodeSnapshot> allNodes = new List<NodeSnapshot>();
             if (_localNode != null)
-                all.Add(_localNode);
+            {
+                Program.ApplyNodeAliasToSnapshot(_localNode, _syncCfg);
+                allNodes.Add(_localNode);
+            }
+            else
+            {
+                NodeSnapshot placeholderLocal = new NodeSnapshot();
+                placeholderLocal.MachineId = _syncCfg != null ? SyncService.SanitizeMachineId(_syncCfg.MachineId) : "win-local";
+                placeholderLocal.MachineName = (_syncCfg != null && !string.IsNullOrWhiteSpace(_syncCfg.MachineName)) ? _syncCfg.MachineName : "本机";
+                placeholderLocal.MachineType = "windows";
+                placeholderLocal.OsInfo = Environment.OSVersion.VersionString;
+                placeholderLocal.SyncedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+                placeholderLocal.IsLocal = true;
+                Program.ApplyNodeAliasToSnapshot(placeholderLocal, _syncCfg);
+                allNodes.Add(placeholderLocal);
+            }
+
             if (_remoteNodes != null)
             {
                 for (int i = 0; i < _remoteNodes.Count; i++)
                 {
-                    NodeSnapshot rn = _remoteNodes[i];
-                    if (rn != null && (_localNode == null || !string.Equals(rn.MachineId, _localNode.MachineId, StringComparison.OrdinalIgnoreCase)))
-                        all.Add(rn);
-                }
-            }
-            return all;
-        }
-
-        private List<RecordBucket> GetAllMergedRecords()
-        {
-            List<NodeSnapshot> nodes = GetAllNodes();
-            List<RecordBucket> merged = new List<RecordBucket>();
-            for (int n = 0; n < nodes.Count; n++)
-            {
-                NodeSnapshot snap = nodes[n];
-                if (snap.Records == null) continue;
-                for (int i = 0; i < snap.Records.Count; i++)
-                {
-                    RecordBucket r = snap.Records[i];
-                    if (string.IsNullOrEmpty(r.MachineId)) r.MachineId = snap.MachineId;
-                    if (string.IsNullOrEmpty(r.MachineName)) r.MachineName = snap.MachineName;
-                    if (string.IsNullOrEmpty(r.MachineType)) r.MachineType = snap.MachineType;
-                    merged.Add(r);
-                }
-            }
-            return merged;
-        }
-
-        private string ComputeCutoffDate(List<RecordBucket> allRecords)
-        {
-            if (_rangeDays <= 0) return null;
-            DateTime baseDt = DateTime.Now.Date;
-            for (int i = 0; i < allRecords.Count; i++)
-            {
-                string d = allRecords[i].Date;
-                if (!string.IsNullOrEmpty(d) && d != "未知日期")
-                {
-                    DateTime parsed;
-                    if (DateTime.TryParseExact(d, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out parsed))
+                    if (_remoteNodes[i] != null)
                     {
-                        if (parsed > baseDt) baseDt = parsed;
+                        Program.ApplyNodeAliasToSnapshot(_remoteNodes[i], _syncCfg);
+                        allNodes.Add(_remoteNodes[i]);
                     }
                 }
             }
-            return baseDt.AddDays(-(_rangeDays - 1)).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-        }
 
-        private static string GetMachineTypeBadge(string machineType, bool isLocal)
-        {
-            string baseType = "Windows";
-            if (string.Equals(machineType, "vps", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(machineType, "linux", StringComparison.OrdinalIgnoreCase))
-                baseType = "Linux VPS";
-            else if (string.Equals(machineType, "macos", StringComparison.OrdinalIgnoreCase))
-                baseType = "macOS";
-            return isLocal ? (baseType + " · 本机") : baseType;
-        }
-
-        // -------------------- Main Dashboard Refresh --------------------
-        private void RefreshDashboardView()
-        {
-            if (_scanResult == null) return;
-
-            List<NodeSnapshot> allNodes = GetAllNodes();
-            List<RecordBucket> allRecords = GetAllMergedRecords();
-            string cutoff = ComputeCutoffDate(allRecords);
-
-            // 1. Time Window Filter
-            List<RecordBucket> timeFiltered = new List<RecordBucket>();
-            for (int i = 0; i < allRecords.Count; i++)
+            if (_selectedMachineId != null)
             {
-                RecordBucket r = allRecords[i];
-                if (cutoff == null || (r.Date != "未知日期" && string.CompareOrdinal(r.Date, cutoff) >= 0))
+                bool foundSelected = false;
+                for (int i = 0; i < allNodes.Count; i++)
                 {
-                    if (r.TotalTokens > 0)
-                        timeFiltered.Add(r);
+                    if (string.Equals(allNodes[i].MachineId, _selectedMachineId, StringComparison.OrdinalIgnoreCase))
+                    {
+                        foundSelected = true;
+                        break;
+                    }
                 }
+                if (!foundSelected)
+                    _selectedMachineId = null;
             }
 
-            // 2. Per-Machine Summary Map
-            Dictionary<string, MachineRowView> machineMap = new Dictionary<string, MachineRowView>(StringComparer.OrdinalIgnoreCase);
-            Dictionary<string, HashSet<string>> machineTools = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+            List<RecordBucket> allRecords = new List<RecordBucket>(256);
+            string latestKnownDate = (_scanResult != null && !string.IsNullOrEmpty(_scanResult.ReferenceDate))
+                ? _scanResult.ReferenceDate
+                : "";
+            string todayDateStr = DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+            double globalTodayUsd = 0.0;
+            long globalTodayTokens = 0L;
 
             for (int n = 0; n < allNodes.Count; n++)
             {
-                NodeSnapshot snap = allNodes[n];
-                MachineRowView mv = new MachineRowView();
-                mv.MachineId = snap.MachineId;
-                mv.MachineName = string.IsNullOrEmpty(snap.MachineName) ? snap.MachineId : snap.MachineName;
-                mv.TypeBadge = GetMachineTypeBadge(snap.MachineType, snap.IsLocal);
-                mv.SyncedAt = snap.IsLocal ? "实时监听中" : (string.IsNullOrEmpty(snap.SyncedAt) ? "本地缓存" : snap.SyncedAt);
-                mv.IsLocal = snap.IsLocal;
-                machineMap[snap.MachineId] = mv;
-                machineTools[snap.MachineId] = new HashSet<string>(StringComparer.Ordinal);
-            }
-
-            double grandCostInRange = 0.0;
-            for (int i = 0; i < timeFiltered.Count; i++)
-            {
-                RecordBucket r = timeFiltered[i];
-                MachineRowView mv;
-                if (!machineMap.TryGetValue(r.MachineId, out mv))
+                NodeSnapshot node = allNodes[n];
+                if (node.Records == null) continue;
+                for (int r = 0; r < node.Records.Count; r++)
                 {
-                    mv = new MachineRowView();
-                    mv.MachineId = r.MachineId;
-                    mv.MachineName = string.IsNullOrEmpty(r.MachineName) ? r.MachineId : r.MachineName;
-                    mv.TypeBadge = GetMachineTypeBadge(r.MachineType, false);
-                    mv.SyncedAt = "本地缓存";
-                    machineMap[r.MachineId] = mv;
-                    machineTools[r.MachineId] = new HashSet<string>(StringComparer.Ordinal);
+                    RecordBucket rb = node.Records[r];
+                    if (rb == null) continue;
+                    rb.MachineId = node.MachineId;
+                    rb.MachineName = node.MachineName;
+                    rb.MachineType = node.MachineType;
+                    allRecords.Add(rb);
+
+                    if (!string.IsNullOrEmpty(rb.Date) && rb.Date != "未知日期" && string.CompareOrdinal(rb.Date, latestKnownDate) > 0)
+                        latestKnownDate = rb.Date;
+
+                    if (string.Equals(rb.Date, todayDateStr, StringComparison.Ordinal))
+                    {
+                        globalTodayUsd += rb.CostUsd;
+                        globalTodayTokens += rb.TotalTokens;
+                    }
                 }
-                mv.Turns += r.Turns;
-                mv.FreshInput += r.FreshInput;
-                mv.CacheRead += r.CacheRead;
-                mv.Output += r.Output;
-                mv.TotalTokens += r.TotalTokens;
-                mv.CostUsd += r.CostUsd;
-                machineTools[r.MachineId].Add(r.Tool);
-                grandCostInRange += r.CostUsd;
             }
 
-            if (_selectedMachineId != null && !machineMap.ContainsKey(_selectedMachineId))
-                _selectedMachineId = null;
+            _latestExportBuckets = allRecords;
+            if (string.IsNullOrEmpty(latestKnownDate))
+                latestKnownDate = todayDateStr;
 
-            List<MachineRowView> machineList = new List<MachineRowView>(machineMap.Values);
-            machineList.Sort(delegate(MachineRowView a, MachineRowView b)
+            // 更新系统托盘悬浮提示与菜单（带 <=60 字符截断保护）
+            UpdateSystemTrayStats(globalTodayUsd, globalTodayTokens);
+
+            // 更新顶栏 22px 无跳动内联告警胶囊（目录访问告警 + 每日预算超支告警）
+            int dirWarnCount = (_scanResult != null && _scanResult.Warnings != null) ? _scanResult.Warnings.Count : 0;
+            bool overBudget = (_syncCfg != null && _syncCfg.DailyBudgetUsd > 0.0 && globalTodayUsd >= _syncCfg.DailyBudgetUsd);
+            if (_inlineAlertBadge != null && _inlineAlertText != null)
             {
-                int c = _rankByCost ? b.CostUsd.CompareTo(a.CostUsd) : b.TotalTokens.CompareTo(a.TotalTokens);
-                if (c != 0) return c;
+                if (overBudget || dirWarnCount > 0)
+                {
+                    if (overBudget && dirWarnCount > 0)
+                        _inlineAlertText.Text = string.Format(CultureInfo.InvariantCulture, "超出日预算 · 告警 ({0})", dirWarnCount);
+                    else if (overBudget)
+                        _inlineAlertText.Text = "已超每日预算";
+                    else
+                        _inlineAlertText.Text = string.Format(CultureInfo.InvariantCulture, "诊断提示 ({0})", dirWarnCount);
+                    _inlineAlertBadge.Visibility = Visibility.Visible;
+                }
+                else
+                {
+                    _inlineAlertBadge.Visibility = Visibility.Collapsed;
+                }
+            }
+
+            // 1. 时间范围过滤（基于自然日 DateTime.Now.Date，避免历史锚点偏移）
+            DateTime cutoffDate = DateTime.MinValue;
+            string cutoffStr = null;
+            if (_rangeDays > 0)
+            {
+                cutoffDate = DateTime.Now.Date.AddDays(-(_rangeDays - 1));
+                cutoffStr = cutoffDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+            }
+
+            List<RecordBucket> timeFiltered = new List<RecordBucket>(allRecords.Count);
+            for (int i = 0; i < allRecords.Count; i++)
+            {
+                RecordBucket rb = allRecords[i];
+                if (cutoffStr == null)
+                {
+                    timeFiltered.Add(rb);
+                }
+                else if (!string.IsNullOrEmpty(rb.Date) && rb.Date != "未知日期" && string.CompareOrdinal(rb.Date, cutoffStr) >= 0)
+                {
+                    timeFiltered.Add(rb);
+                }
+            }
+
+            // 2. 构建设备聚合视图列表 MachineRowView（供顶栏选择器、侧栏徽章、概览按设备排行与视图 3 集群卡片共用）
+            string[] palette = DesignSystem.GetChartPalette(_isDark);
+            List<MachineRowView> machineViews = new List<MachineRowView>(allNodes.Count);
+            double sumMachineMetric = 0.0;
+            double maxMachineMetric = 0.0;
+
+            for (int i = 0; i < allNodes.Count; i++)
+            {
+                NodeSnapshot ns = allNodes[i];
+                MachineRowView mv = new MachineRowView();
+                mv.MachineId = ns.MachineId;
+                mv.MachineName = string.IsNullOrWhiteSpace(ns.MachineName) ? ns.MachineId : ns.MachineName;
+                bool isVps = string.Equals(ns.MachineType, "vps", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(ns.MachineType, "linux", StringComparison.OrdinalIgnoreCase);
+                mv.TypeBadge = ns.IsLocal ? "Windows 本机" : (isVps ? "Linux VPS" : "远端电脑");
+                mv.OsInfo = string.IsNullOrWhiteSpace(ns.OsInfo) ? (isVps ? "Linux" : "Windows") : ns.OsInfo;
+                string statusLbl;
+                mv.IsOnline = ParseOnlineState(ns, out statusLbl);
+                mv.StatusText = statusLbl;
+                mv.SyncedAt = ns.IsLocal ? "实时增量同步" : (string.IsNullOrWhiteSpace(ns.SyncedAt) ? "—" : ns.SyncedAt);
+                mv.IsLocal = ns.IsLocal;
+                mv.ColorHex = palette[i % palette.Length];
+
+                HashSet<string> toolsOnMachine = new HashSet<string>(StringComparer.Ordinal);
+                for (int r = 0; r < timeFiltered.Count; r++)
+                {
+                    RecordBucket rb = timeFiltered[r];
+                    if (!string.Equals(rb.MachineId, ns.MachineId, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    mv.Turns += rb.Turns;
+                    mv.FreshInput += rb.FreshInput;
+                    mv.CacheRead += rb.CacheRead;
+                    mv.Output += rb.Output;
+                    mv.TotalTokens += rb.TotalTokens;
+                    mv.CostUsd += rb.CostUsd;
+                    if (!string.IsNullOrEmpty(rb.Tool) && rb.TotalTokens > 0)
+                        toolsOnMachine.Add(rb.Tool);
+                }
+
+                mv.ToolCount = toolsOnMachine.Count;
+                if (toolsOnMachine.Count == 0)
+                {
+                    mv.ToolsSummary = "暂无时间段内记录";
+                }
+                else
+                {
+                    List<string> tNames = new List<string>(toolsOnMachine);
+                    tNames.Sort(StringComparer.OrdinalIgnoreCase);
+                    mv.ToolsSummary = tNames.Count <= 3
+                        ? string.Join(", ", tNames.ToArray())
+                        : string.Format(CultureInfo.InvariantCulture, "{0}, {1} 等 {2} 款", tNames[0], tNames[1], tNames.Count);
+                }
+
+                mv.CostCny = mv.CostUsd * _usdToCny;
+                mv.FreshInputText = FormatterUtil.FormatTokens(mv.FreshInput);
+                mv.CacheReadText = FormatterUtil.FormatTokens(mv.CacheRead);
+                mv.OutputText = FormatterUtil.FormatTokens(mv.Output);
+                mv.TotalTokensText = FormatterUtil.FormatTokens(mv.TotalTokens);
+                mv.UsdText = FormatterUtil.FormatMoney(mv.CostUsd, false, _usdToCny);
+                mv.CnyText = FormatterUtil.FormatMoney(mv.CostUsd, true, _usdToCny);
+                mv.FormattedMoney = FormatterUtil.FormatMoney(mv.CostUsd, _isCny, _usdToCny);
+
+                double metricVal = _rankByCost ? mv.CostUsd : (double)mv.TotalTokens;
+                sumMachineMetric += metricVal;
+                if (metricVal > maxMachineMetric) maxMachineMetric = metricVal;
+
+                machineViews.Add(mv);
+            }
+
+            machineViews.Sort(delegate(MachineRowView a, MachineRowView b)
+            {
                 if (a.IsLocal != b.IsLocal) return a.IsLocal ? -1 : 1;
-                return string.Compare(a.MachineName, b.MachineName, StringComparison.OrdinalIgnoreCase);
+                return b.CostUsd.CompareTo(a.CostUsd);
             });
 
-            double maxMachMetric = 0.0;
-            double sumMachMetric = 0.0;
-            for (int i = 0; i < machineList.Count; i++)
+            for (int i = 0; i < machineViews.Count; i++)
             {
-                MachineRowView m = machineList[i];
-                List<string> tNames = new List<string>(machineTools[m.MachineId]);
-                tNames.Sort(StringComparer.OrdinalIgnoreCase);
-                m.ToolCount = tNames.Count;
-                m.ToolsSummary = tNames.Count > 0 ? string.Join(", ", tNames.ToArray()) : "该时段无记录";
-                m.FreshInputText = FormatterUtil.FormatTokens(m.FreshInput);
-                m.CacheReadText = FormatterUtil.FormatTokens(m.CacheRead);
-                m.OutputText = FormatterUtil.FormatTokens(m.Output);
-                m.TotalTokensText = FormatterUtil.FormatTokens(m.TotalTokens);
-                m.CostCny = m.CostUsd * _usdToCny;
-                m.UsdText = FormatterUtil.FormatMoney(m.CostUsd, false, _usdToCny);
-                m.CnyText = FormatterUtil.FormatMoney(m.CostUsd, true, _usdToCny);
-                m.FormattedMoney = FormatterUtil.FormatMoney(m.CostUsd, _isCny, _usdToCny);
-                m.ColorHex = ToolPalette[i % ToolPalette.Length];
-
-                double metric = _rankByCost ? m.CostUsd : (double)m.TotalTokens;
-                sumMachMetric += metric;
-                if (metric > maxMachMetric) maxMachMetric = metric;
+                MachineRowView mv = machineViews[i];
+                double m = _rankByCost ? mv.CostUsd : (double)mv.TotalTokens;
+                mv.SharePercent = sumMachineMetric > 0.0 ? (m * 100.0 / sumMachineMetric) : 0.0;
+                mv.ShareText = mv.SharePercent.ToString("F1", CultureInfo.InvariantCulture) + "%";
+                mv.BarRatio = maxMachineMetric > 0.0 ? Math.Max(0.02, m / maxMachineMetric) : 0.0;
             }
-            for (int i = 0; i < machineList.Count; i++)
+            _latestMachineViews = machineViews;
+
+            // 更新侧边栏节点数徽章与顶栏设备选择胶囊
+            if (_navDeviceCountText != null)
+                _navDeviceCountText.Text = machineViews.Count.ToString(CultureInfo.InvariantCulture);
+
+            if (_deviceSelectorText != null && _deviceSelectorDot != null)
             {
-                MachineRowView m = machineList[i];
-                double metric = _rankByCost ? m.CostUsd : (double)m.TotalTokens;
-                m.SharePercent = sumMachMetric > 0 ? (metric * 100.0 / sumMachMetric) : 0.0;
-                m.ShareText = m.SharePercent.ToString("F1", CultureInfo.InvariantCulture) + "%";
-                m.BarRatio = maxMachMetric > 0 ? Math.Max(0.02, metric / maxMachMetric) : 0.0;
+                if (_selectedMachineId == null)
+                {
+                    _deviceSelectorText.Text = string.Format(CultureInfo.InvariantCulture, "全部设备 ({0})", machineViews.Count);
+                    _deviceSelectorDot.SetResourceReference(Shapes.Shape.FillProperty, "SemanticSuccess");
+                }
+                else
+                {
+                    for (int i = 0; i < machineViews.Count; i++)
+                    {
+                        if (string.Equals(machineViews[i].MachineId, _selectedMachineId, StringComparison.OrdinalIgnoreCase))
+                        {
+                            _deviceSelectorText.Text = machineViews[i].MachineName;
+                            _deviceSelectorDot.SetResourceReference(Shapes.Shape.FillProperty, machineViews[i].IsOnline ? "SemanticSuccess" : "SemanticWarning");
+                            break;
+                        }
+                    }
+                }
             }
 
-            _machineGrid.ItemsSource = machineList;
-            RenderDeviceStrip(allNodes, machineMap, grandCostInRange);
-            UpdateCloudStatusUi();
-
-            // 3. Machine Filter
-            List<RecordBucket> machineFiltered = new List<RecordBucket>();
+            // 3. 设备范围过滤
+            List<RecordBucket> machineFiltered = new List<RecordBucket>(timeFiltered.Count);
             for (int i = 0; i < timeFiltered.Count; i++)
             {
-                RecordBucket r = timeFiltered[i];
-                if (_selectedMachineId == null || string.Equals(r.MachineId, _selectedMachineId, StringComparison.OrdinalIgnoreCase))
-                    machineFiltered.Add(r);
+                RecordBucket rb = timeFiltered[i];
+                if (_selectedMachineId == null || string.Equals(rb.MachineId, _selectedMachineId, StringComparison.OrdinalIgnoreCase))
+                    machineFiltered.Add(rb);
             }
 
-            // 4. Active Tools Ranking
+            // 4. 构建 AI 工具排行（当有单日钻取 _selectedDate 时，反映该日工具构成）
             Dictionary<string, ToolRowView> toolMap = new Dictionary<string, ToolRowView>(StringComparer.Ordinal);
             Dictionary<string, HashSet<string>> toolModels = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
             for (int i = 0; i < machineFiltered.Count; i++)
             {
                 RecordBucket r = machineFiltered[i];
+                if (_selectedDate != null && !string.Equals(r.Date, _selectedDate, StringComparison.Ordinal))
+                    continue;
                 if (r.TotalTokens <= 0) continue;
+
                 ToolRowView tv;
                 if (!toolMap.TryGetValue(r.Tool, out tv))
                 {
@@ -2391,7 +5382,8 @@ namespace TokLens
                 tv.Output += r.Output;
                 tv.TotalTokens += r.TotalTokens;
                 tv.CostUsd += r.CostUsd;
-                toolModels[r.Tool].Add(r.Model);
+                if (!string.IsNullOrEmpty(r.Model))
+                    toolModels[r.Tool].Add(r.Model);
             }
 
             if (_selectedTool != null && !toolMap.ContainsKey(_selectedTool))
@@ -2403,63 +5395,147 @@ namespace TokLens
                 return _rankByCost ? b.CostUsd.CompareTo(a.CostUsd) : b.TotalTokens.CompareTo(a.TotalTokens);
             });
 
-            double sumMetric = 0.0;
-            double maxMetric = 0.0;
+            double sumToolMetric = 0.0;
+            double maxToolMetric = 0.0;
             for (int i = 0; i < toolList.Count; i++)
             {
                 ToolRowView t = toolList[i];
                 t.ModelCount = toolModels[t.Tool].Count;
                 t.FormattedMoney = FormatterUtil.FormatMoney(t.CostUsd, _isCny, _usdToCny);
                 t.FormattedTokens = FormatterUtil.FormatTokens(t.TotalTokens);
-                t.ColorHex = ToolPalette[i % ToolPalette.Length];
+                t.ColorHex = DesignSystem.GetProviderColorHex(t.Tool, _isDark);
                 double m = _rankByCost ? t.CostUsd : (double)t.TotalTokens;
-                sumMetric += m;
-                if (m > maxMetric) maxMetric = m;
+                sumToolMetric += m;
+                if (m > maxToolMetric) maxToolMetric = m;
             }
             for (int i = 0; i < toolList.Count; i++)
             {
                 ToolRowView t = toolList[i];
                 double m = _rankByCost ? t.CostUsd : (double)t.TotalTokens;
-                t.SharePercent = sumMetric > 0 ? (m * 100.0 / sumMetric) : 0.0;
-                t.BarRatio = maxMetric > 0 ? Math.Max(0.02, m / maxMetric) : 0.0;
+                t.SharePercent = sumToolMetric > 0.0 ? (m * 100.0 / sumToolMetric) : 0.0;
+                t.BarRatio = maxToolMetric > 0.0 ? Math.Max(0.02, m / maxToolMetric) : 0.0;
             }
 
-            // 5. Tool Filter for KPIs, Models, Daily & Live Per-Request Stream
-            List<RecordBucket> activeRows = new List<RecordBucket>();
+            // 5. 工具过滤（用于构造完整趋势图序列，保留上下文并支持高亮 _selectedDate）
+            List<RecordBucket> chartSourceRows = new List<RecordBucket>(machineFiltered.Count);
             for (int i = 0; i < machineFiltered.Count; i++)
             {
-                if (_selectedTool == null || string.Equals(machineFiltered[i].Tool, _selectedTool, StringComparison.Ordinal))
-                    activeRows.Add(machineFiltered[i]);
+                RecordBucket r = machineFiltered[i];
+                if (_selectedTool == null || string.Equals(r.Tool, _selectedTool, StringComparison.Ordinal))
+                    chartSourceRows.Add(r);
+            }
+
+            Dictionary<string, DailyRowView> dailyMap = new Dictionary<string, DailyRowView>(StringComparer.Ordinal);
+            for (int i = 0; i < chartSourceRows.Count; i++)
+            {
+                RecordBucket r = chartSourceRows[i];
+                string dt = string.IsNullOrEmpty(r.Date) ? "未知日期" : r.Date;
+                DailyRowView dv;
+                if (!dailyMap.TryGetValue(dt, out dv))
+                {
+                    dv = new DailyRowView();
+                    dv.Date = dt;
+                    dailyMap[dt] = dv;
+                }
+                dv.Turns += r.Turns;
+                dv.FreshInput += r.FreshInput;
+                dv.CacheRead += r.CacheRead;
+                dv.CacheWrite += r.CacheWrite;
+                dv.Output += r.Output;
+                dv.TotalTokens += r.TotalTokens;
+                dv.CostUsd += r.CostUsd;
+            }
+
+            List<DailyRowView> dailyDesc = new List<DailyRowView>(dailyMap.Values);
+            dailyDesc.Sort(delegate(DailyRowView a, DailyRowView b)
+            {
+                return string.CompareOrdinal(b.Date, a.Date);
+            });
+
+            _currentDailyAsc = new List<DailyRowView>();
+            for (int i = dailyDesc.Count - 1; i >= 0; i--)
+            {
+                DailyRowView d = dailyDesc[i];
+                d.CostCny = d.CostUsd * _usdToCny;
+                d.FreshInputText = FormatterUtil.FormatTokens(d.FreshInput);
+                d.CacheReadText = FormatterUtil.FormatTokens(d.CacheRead);
+                d.CacheWriteText = FormatterUtil.FormatTokens(d.CacheWrite);
+                d.OutputText = FormatterUtil.FormatTokens(d.Output);
+                d.TotalTokensText = FormatterUtil.FormatTokens(d.TotalTokens);
+                d.UsdText = FormatterUtil.FormatMoney(d.CostUsd, false, _usdToCny);
+                d.CnyText = FormatterUtil.FormatMoney(d.CostUsd, true, _usdToCny);
+                d.FormattedCost = FormatterUtil.FormatMoney(d.CostUsd, _isCny, _usdToCny);
+                if (d.Date != "未知日期")
+                    _currentDailyAsc.Add(d);
+            }
+
+            // 6. 单日钻取过滤后的活跃行（驱动 KPI、模型账单表）
+            List<RecordBucket> activeRows = new List<RecordBucket>(chartSourceRows.Count);
+            for (int i = 0; i < chartSourceRows.Count; i++)
+            {
+                if (_selectedDate == null || string.Equals(chartSourceRows[i].Date, _selectedDate, StringComparison.Ordinal))
+                    activeRows.Add(chartSourceRows[i]);
             }
 
             int totTurns = 0;
-            long totFi = 0, totCr = 0, totCw = 0, totOut = 0;
-            double totCost = 0.0, totBase = 0.0;
-            HashSet<string> activeToolSet = new HashSet<string>(StringComparer.Ordinal);
+            long totFi = 0L, totCr = 0L, totCw = 0L, totOut = 0L;
+            double totCostUsd = 0.0, totBaseUsd = 0.0;
+            double scopedTodayUsd = 0.0;
+            double recent7dUsd = 0.0;
+            string sevenDaysAgoStr = DateTime.Now.Date.AddDays(-6).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+
+            for (int i = 0; i < machineFiltered.Count; i++)
+            {
+                RecordBucket r = machineFiltered[i];
+                if (_selectedTool != null && !string.Equals(r.Tool, _selectedTool, StringComparison.Ordinal))
+                    continue;
+                if (string.Equals(r.Date, todayDateStr, StringComparison.Ordinal))
+                    scopedTodayUsd += r.CostUsd;
+            }
+
+            // 基于当前设备视角的全时间段记录计算近 7 日平均与当月（30天）预测
+            for (int i = 0; i < allRecords.Count; i++)
+            {
+                RecordBucket r = allRecords[i];
+                if (_selectedMachineId != null && !string.Equals(r.MachineId, _selectedMachineId, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (_selectedTool != null && !string.Equals(r.Tool, _selectedTool, StringComparison.Ordinal))
+                    continue;
+                if (!string.IsNullOrEmpty(r.Date) && r.Date != "未知日期" && string.CompareOrdinal(r.Date, sevenDaysAgoStr) >= 0)
+                    recent7dUsd += r.CostUsd;
+            }
 
             Dictionary<string, ModelRowView> modelMap = new Dictionary<string, ModelRowView>(StringComparer.Ordinal);
-            Dictionary<string, DailyRowView> dailyMap = new Dictionary<string, DailyRowView>(StringComparer.Ordinal);
+            HashSet<string> uniqueModels = new HashSet<string>(StringComparer.Ordinal);
 
             for (int i = 0; i < activeRows.Count; i++)
             {
                 RecordBucket r = activeRows[i];
-                activeToolSet.Add(r.Tool);
                 totTurns += r.Turns;
                 totFi += r.FreshInput;
                 totCr += r.CacheRead;
                 totCw += r.CacheWrite;
                 totOut += r.Output;
-                totCost += r.CostUsd;
-                totBase += r.BaselineUsd;
+                totCostUsd += r.CostUsd;
+                totBaseUsd += r.BaselineUsd;
+                if (!string.IsNullOrEmpty(r.Model))
+                    uniqueModels.Add(r.Model);
 
-                string mKey = r.Tool + "||" + r.Model;
+                string mKey = (r.Tool ?? "") + "||" + (r.Model ?? "");
                 ModelRowView mv;
                 if (!modelMap.TryGetValue(mKey, out mv))
                 {
                     mv = new ModelRowView();
-                    mv.Model = r.Model;
-                    mv.Tool = r.Tool;
-                    mv.RateLabel = r.RateLabel;
+                    mv.Tool = r.Tool ?? "未知工具";
+                    mv.Model = r.Model ?? "unknown";
+                    mv.RateLabel = r.RateLabel ?? "";
+                    if (pricing != null)
+                    {
+                        ModelRate mr = pricing.Lookup(mv.Model);
+                        mv.InputPerM = mr.InputPerM;
+                        if (string.IsNullOrWhiteSpace(mv.RateLabel))
+                            mv.RateLabel = mr.Label;
+                    }
                     modelMap[mKey] = mv;
                 }
                 mv.Turns += r.Turns;
@@ -2469,649 +5545,997 @@ namespace TokLens
                 mv.Output += r.Output;
                 mv.TotalTokens += r.TotalTokens;
                 mv.CostUsd += r.CostUsd;
-
-                DailyRowView dv;
-                if (!dailyMap.TryGetValue(r.Date, out dv))
-                {
-                    dv = new DailyRowView();
-                    dv.Date = r.Date;
-                    dailyMap[r.Date] = dv;
-                }
-                dv.Turns += r.Turns;
-                dv.FreshInput += r.FreshInput;
-                dv.CacheRead += r.CacheRead;
-                dv.Output += r.Output;
-                dv.TotalTokens += r.TotalTokens;
-                dv.CostUsd += r.CostUsd;
             }
 
-            long totTokens = totFi + totCr + totCw + totOut;
-            long promptTotal = totFi + totCr + totCw;
-            double hitPct = promptTotal > 0 ? (totCr * 100.0 / promptTotal) : 0.0;
-            double savedUsd = Math.Max(0.0, totBase - totCost);
-            double savedPct = totBase > 0 ? (savedUsd * 100.0 / totBase) : 0.0;
+            // 7. 更新 4 张 Bento KPI 卡片
+            long totAllTokens = totFi + totCr + totCw + totOut;
+            long totPromptTokens = totFi + totCr + totCw;
+            double cacheHitPct = totPromptTokens > 0 ? (totCr * 100.0 / totPromptTokens) : 0.0;
+            double savedUsd = Math.Max(0.0, totBaseUsd - totCostUsd);
+            double savedPct = totBaseUsd > 0.0001 ? Math.Min(99.9, savedUsd * 100.0 / totBaseUsd) : 0.0;
 
-            string scopeLabel = "全部 " + allNodes.Count + " 台设备";
-            if (_selectedMachineId != null && machineMap.ContainsKey(_selectedMachineId))
-                scopeLabel = "单列: " + machineMap[_selectedMachineId].MachineName;
-            string rangeDesc = _rangeDays == 0 ? "全部历史" : (_rangeDays == 1 ? "今日" : ("近 " + _rangeDays + " 天"));
+            _kpiCostVal.Text = FormatterUtil.FormatMoney(totCostUsd, _isCny, _usdToCny);
+            _kpiTodayPillText.Text = "今日 " + FormatterUtil.FormatMoney(scopedTodayUsd, _isCny, _usdToCny);
 
-            // Update Bottom Status Bar (Fixed 28px height -> 0.0px layout shift!)
-            double msElapsed = _scanResult.ElapsedSeconds * 1000.0;
-            string perfText = msElapsed <= 0.1
-                ? "秒开快照"
-                : (msElapsed < 1000.0
-                    ? (msElapsed.ToString("F0", CultureInfo.InvariantCulture) + "ms")
-                    : (_scanResult.ElapsedSeconds.ToString("F2", CultureInfo.InvariantCulture) + "s"));
-            if (_statusLeftText != null)
+            double avgDailyUsd = recent7dUsd / 7.0;
+            double forecast30dUsd = avgDailyUsd * 30.0;
+            _kpiCardCost.ToolTip = string.Format(
+                CultureInfo.InvariantCulture,
+                "等效账单与月度预测\n• 当前筛选合计：{0} ({1})\n• 今日实时消耗：{2}\n• 近 7 天日均：{3} / 天\n• 30 天滚动预测：{4}",
+                FormatterUtil.FormatMoney(totCostUsd, true, _usdToCny),
+                FormatterUtil.FormatMoney(totCostUsd, false, _usdToCny),
+                FormatterUtil.FormatMoney(scopedTodayUsd, _isCny, _usdToCny),
+                FormatterUtil.FormatMoney(avgDailyUsd, _isCny, _usdToCny),
+                FormatterUtil.FormatMoney(forecast30dUsd, _isCny, _usdToCny));
+
+            if (_syncCfg != null && _syncCfg.DailyBudgetUsd > 0.0)
             {
-                string archiveSuffix = _scanResult.ArchivedFilesCount > 0
-                    ? string.Format(CultureInfo.InvariantCulture, " · 已保护 {0} 个清理归档", _scanResult.ArchivedFilesCount)
-                    : "";
-                _statusLeftText.Text = string.Format(
+                _kpiBudgetBarHost.Visibility = Visibility.Visible;
+                double pct = Math.Max(0.0, scopedTodayUsd / _syncCfg.DailyBudgetUsd);
+                double barTotalW = Math.Max(120.0, _kpiCardCost.ActualWidth > 40 ? (_kpiCardCost.ActualWidth - 30.0) : 180.0);
+                _kpiBudgetBarFill.Width = Math.Min(barTotalW, barTotalW * Math.Min(1.0, pct));
+                if (pct >= 1.0)
+                    _kpiBudgetBarFill.SetResourceReference(Border.BackgroundProperty, "SemanticDanger");
+                else if (pct >= 0.8)
+                    _kpiBudgetBarFill.SetResourceReference(Border.BackgroundProperty, "SemanticWarning");
+                else
+                    _kpiBudgetBarFill.SetResourceReference(Border.BackgroundProperty, "AccentPrimary");
+
+                _kpiCostSub.Text = string.Format(
                     CultureInfo.InvariantCulture,
-                    "实时监听中 · {0} ({1}) · 活跃工具 {2} 个 · 扫描 {3}{4}",
-                    scopeLabel,
-                    rangeDesc,
-                    toolList.Count,
-                    perfText,
-                    archiveSuffix);
-
-                string archiveDetail = _scanResult.ArchivedFilesCount > 0
-                    ? string.Format(
-                        CultureInfo.InvariantCulture,
-                        "已自动保留 {0} 个被清理历史日志文件的累计用量（当前活跃跟踪文件 {1} 个）",
-                        _scanResult.ArchivedFilesCount,
-                        _scanResult.TotalFilesTracked)
-                    : string.Format(
-                        CultureInfo.InvariantCulture,
-                        "当前活跃跟踪文件 {0} 个 · 后续清理任何本地或 VPS 日志文件，已入库账单均会自动归档保留",
-                        _scanResult.TotalFilesTracked);
-
-                _statusLeftText.ToolTip = string.Format(
-                    CultureInfo.InvariantCulture,
-                    "双层防清理持久归档保护已启用\n• 本地保护：依托 %APPDATA%\\TokLens\\toklens.db 游标与按日高水位库，清理本地/VPS 日志文件后已入库账单永久保留\n• 云端保护：Gist / WebDAV 同步采用按日高水位合并，即使重装电脑亦不丢历史账单\n• 归档详情：{0}",
-                    archiveDetail);
-            }
-
-            // Update KPI Cards
-            _kpiCostVal.Text = FormatterUtil.FormatMoney(totCost, _isCny, _usdToCny);
-            string altMoney = FormatterUtil.FormatMoney(totCost, !_isCny, _usdToCny);
-            _kpiCostSub.Text = string.Format(
-                CultureInfo.InvariantCulture,
-                "折合 {0} · {1:N0} 次请求 · {2}{3}",
-                altMoney,
-                totTurns,
-                scopeLabel,
-                _selectedTool != null ? (" [" + _selectedTool + "]") : "");
-
-            _kpiTokVal.Text = FormatterUtil.FormatTokens(totTokens);
-            _kpiTokSub.Text = string.Format(
-                CultureInfo.InvariantCulture,
-                "新增输入 {0} · 输出 {1} · {2} 个活跃工具",
-                FormatterUtil.FormatTokens(totFi),
-                FormatterUtil.FormatTokens(totOut),
-                activeToolSet.Count);
-
-            _kpiHitVal.Text = hitPct.ToString("F1", CultureInfo.InvariantCulture) + "%";
-            _kpiHitSub.Text = string.Format(
-                CultureInfo.InvariantCulture,
-                "缓存读取 {0} · 缓存写入 {1}",
-                FormatterUtil.FormatTokens(totCr),
-                FormatterUtil.FormatTokens(totCw));
-
-            _kpiSaveVal.Text = FormatterUtil.FormatMoney(savedUsd, _isCny, _usdToCny);
-            _kpiSaveSub.Text = string.Format(
-                CultureInfo.InvariantCulture,
-                "无缓存原价 {0} · 省下 {1:F1}%",
-                FormatterUtil.FormatMoney(totBase, _isCny, _usdToCny),
-                savedPct);
-
-            // Render Left Ranking List
-            if (_leftRankByMachine)
-            {
-                _clearFilterBtn.Visibility = (_selectedMachineId != null) ? Visibility.Visible : Visibility.Collapsed;
-                if (_selectedMachineId != null && machineMap.ContainsKey(_selectedMachineId))
-                    _clearFilterBtn.Content = machineMap[_selectedMachineId].MachineName + " ×";
-                RenderMachinesRankingList(machineList);
+                    "日预算进度 {0:F0}% ({1} / {2})",
+                    pct * 100.0,
+                    FormatterUtil.FormatMoney(scopedTodayUsd, _isCny, _usdToCny),
+                    FormatterUtil.FormatMoney(_syncCfg.DailyBudgetUsd, _isCny, _usdToCny));
             }
             else
             {
-                _clearFilterBtn.Visibility = (_selectedTool != null) ? Visibility.Visible : Visibility.Collapsed;
-                if (_selectedTool != null)
-                    _clearFilterBtn.Content = _selectedTool + " ×";
-                RenderToolsList(toolList);
+                _kpiBudgetBarHost.Visibility = Visibility.Collapsed;
+                _kpiCostSub.Text = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{0:N0} 次请求 · {1} 个模型 · 月预测 {2}",
+                    totTurns,
+                    uniqueModels.Count,
+                    FormatterUtil.FormatMoney(forecast30dUsd, _isCny, _usdToCny));
             }
 
-            // 6. Build Live Per-Request Stream Rows (Token / Duration / TPS / Cost per turn!)
-            List<LiveRequestRowView> liveRows = new List<LiveRequestRowView>();
-            bool includeLocalLive = (_selectedMachineId == null ||
-                                    (_localNode != null && string.Equals(_selectedMachineId, _localNode.MachineId, StringComparison.OrdinalIgnoreCase)));
-            if (includeLocalLive && _scanResult.RecentRequests != null)
-            {
-                for (int i = 0; i < _scanResult.RecentRequests.Count; i++)
-                {
-                    RecentRequestRecord rq = _scanResult.RecentRequests[i];
-                    if (cutoff != null && rq.Date != "未知日期" && string.CompareOrdinal(rq.Date, cutoff) < 0)
-                        continue;
-                    if (_selectedTool != null && !string.Equals(rq.Tool, _selectedTool, StringComparison.Ordinal))
-                        continue;
+            _kpiTokVal.Text = FormatterUtil.FormatTokens(totAllTokens);
+            _kpiTokSub.Text = string.Format(
+                CultureInfo.InvariantCulture,
+                "新增 {0} · 缓存读 {1} · 输出 {2}",
+                FormatterUtil.FormatTokens(totFi + totCw),
+                FormatterUtil.FormatTokens(totCr),
+                FormatterUtil.FormatTokens(totOut));
 
-                    LiveRequestRowView lv = new LiveRequestRowView();
-                    lv.TimestampMs = rq.TimestampMs;
-                    lv.Date = rq.Date;
-                    lv.TimeText = string.IsNullOrEmpty(rq.TimeLabel) ? rq.Date : rq.TimeLabel;
-                    lv.Tool = rq.Tool;
-                    lv.Model = rq.Model;
-                    lv.FreshInput = rq.FreshInput;
-                    lv.FreshInputText = FormatterUtil.FormatTokens(rq.FreshInput);
-                    lv.CacheRead = rq.CacheRead;
-                    lv.CacheReadText = FormatterUtil.FormatTokens(rq.CacheRead);
-                    lv.CacheWrite = rq.CacheWrite;
-                    lv.CacheWriteText = FormatterUtil.FormatTokens(rq.CacheWrite);
-                    lv.Output = rq.Output;
-                    lv.OutputText = FormatterUtil.FormatTokens(rq.Output);
-                    lv.TotalTokens = rq.TotalTokens;
-                    lv.TotalTokensText = FormatterUtil.FormatTokens(rq.TotalTokens);
-                    lv.DurationMs = rq.DurationMs;
-                    lv.DurationText = FormatterUtil.FormatDuration(rq.DurationMs);
-                    lv.Tps = FormatterUtil.ComputeTps(rq.Output, rq.DurationMs);
-                    lv.TpsText = FormatterUtil.FormatTps(lv.Tps);
-                    lv.CostUsd = rq.CostUsd;
-                    lv.DisplayCost = _isCny ? (rq.CostUsd * _usdToCny) : rq.CostUsd;
-                    lv.FormattedCost = FormatterUtil.FormatMoney(rq.CostUsd, _isCny, _usdToCny);
-                    liveRows.Add(lv);
-                }
+            if (totAllTokens > 0)
+            {
+                double rIn = Math.Max(0.04, (double)(totFi + totCw) / totAllTokens);
+                double rCr = Math.Max(0.04, (double)totCr / totAllTokens);
+                double rOut = Math.Max(0.04, (double)totOut / totAllTokens);
+                _tokSegInputCol.Width = new GridLength(rIn, GridUnitType.Star);
+                _tokSegCacheCol.Width = new GridLength(rCr, GridUnitType.Star);
+                _tokSegOutputCol.Width = new GridLength(rOut, GridUnitType.Star);
             }
-            _liveGrid.ItemsSource = liveRows;
-
-            // Update Bottom Live Request Ticker
-            if (_statusLiveTickerText != null)
+            else
             {
-                if (liveRows.Count > 0)
+                _tokSegInputCol.Width = new GridLength(1, GridUnitType.Star);
+                _tokSegCacheCol.Width = new GridLength(1, GridUnitType.Star);
+                _tokSegOutputCol.Width = new GridLength(1, GridUnitType.Star);
+            }
+
+            _kpiHitVal.Text = cacheHitPct.ToString("F1", CultureInfo.InvariantCulture) + "%";
+            _kpiHitSub.Text = string.Format(
+                CultureInfo.InvariantCulture,
+                "命中 {0} / 提示词总计 {1}",
+                FormatterUtil.FormatTokens(totCr),
+                FormatterUtil.FormatTokens(totPromptTokens));
+
+            _kpiSaveVal.Text = FormatterUtil.FormatMoney(savedUsd, _isCny, _usdToCny);
+            _kpiSavePctText.Text = string.Format(CultureInfo.InvariantCulture, "省 {0:F0}%", savedPct);
+            _kpiSaveSub.Text = "无缓存基准 " + FormatterUtil.FormatMoney(totBaseUsd, _isCny, _usdToCny);
+
+            // 8. 更新中部消耗排行与单日胶囊
+            bool anyFilterActive = (_selectedTool != null || _selectedMachineId != null || _selectedDate != null);
+            if (_clearFilterBtn != null)
+                _clearFilterBtn.Visibility = anyFilterActive ? Visibility.Visible : Visibility.Collapsed;
+
+            if (_selectedDatePill != null && _selectedDatePillText != null)
+            {
+                if (_selectedDate != null)
                 {
-                    LiveRequestRowView top = liveRows[0];
-                    string tpsPart = top.Tps > 0 ? (" · " + top.TpsText) : (top.DurationMs >= 150 ? (" · " + top.DurationText) : "");
-                    _statusLiveTickerText.Text = string.Format(
-                        CultureInfo.InvariantCulture,
-                        "最新 {0} · {1} ({2}) · 输出 {3}{4} · {5}",
-                        top.TimeText,
-                        top.Tool,
-                        top.Model,
-                        top.OutputText,
-                        tpsPart,
-                        top.FormattedCost);
-                }
-                else if (!includeLocalLive)
-                {
-                    _statusLiveTickerText.Text = "远端节点仅同步脱敏按日汇总（切回本机或全部可看实时单条请求流）";
+                    _selectedDatePillText.Text = "已锁定: " + _selectedDate + " ×";
+                    _selectedDatePill.Visibility = Visibility.Visible;
                 }
                 else
                 {
-                    _statusLiveTickerText.Text = "当前筛选范围内暂无实时单条请求记录";
+                    _selectedDatePill.Visibility = Visibility.Collapsed;
                 }
             }
 
-            // 7. Model Billing Rows
-            List<ModelRowView> modelRows = new List<ModelRowView>(modelMap.Values);
-            modelRows.Sort(delegate(ModelRowView a, ModelRowView b) { return b.CostUsd.CompareTo(a.CostUsd); });
-            for (int i = 0; i < modelRows.Count; i++)
+            RenderOverviewRankingList(toolList, machineViews);
+
+            // 9. 更新视图 2：模型明细列表与顶部多色占比条
+            List<ModelRowView> allModels = new List<ModelRowView>(modelMap.Values);
+            allModels.Sort(delegate(ModelRowView a, ModelRowView b)
             {
-                ModelRowView m = modelRows[i];
+                return b.CostUsd.CompareTo(a.CostUsd);
+            });
+
+            double maxModelCost = 0.0;
+            for (int i = 0; i < allModels.Count; i++)
+            {
+                if (allModels[i].CostUsd > maxModelCost)
+                    maxModelCost = allModels[i].CostUsd;
+            }
+
+            List<ModelRowView> filteredModels = new List<ModelRowView>(allModels.Count);
+            for (int i = 0; i < allModels.Count; i++)
+            {
+                ModelRowView m = allModels[i];
                 m.FreshInputText = FormatterUtil.FormatTokens(m.FreshInput);
                 m.CacheReadText = FormatterUtil.FormatTokens(m.CacheRead);
                 m.CacheWriteText = FormatterUtil.FormatTokens(m.CacheWrite);
                 m.OutputText = FormatterUtil.FormatTokens(m.Output);
                 m.TotalTokensText = FormatterUtil.FormatTokens(m.TotalTokens);
+
+                long mPrompt = m.FreshInput + m.CacheRead + m.CacheWrite;
+                m.CacheHitText = mPrompt > 0
+                    ? ((m.CacheRead * 100.0 / mPrompt).ToString("F1", CultureInfo.InvariantCulture) + "%")
+                    : "—";
+
                 m.DisplayCost = _isCny ? (m.CostUsd * _usdToCny) : m.CostUsd;
                 m.FormattedCost = FormatterUtil.FormatMoney(m.CostUsd, _isCny, _usdToCny);
-                m.ShareText = totCost > 0 ? ((m.CostUsd * 100.0 / totCost).ToString("F1", CultureInfo.InvariantCulture) + "%") : "0.0%";
-            }
-            _modelGrid.ItemsSource = modelRows;
+                double share = totCostUsd > 0.0 ? (m.CostUsd * 100.0 / totCostUsd) : 0.0;
+                m.ShareText = share.ToString("F1", CultureInfo.InvariantCulture) + "%";
+                m.BarRatio = maxModelCost > 0.0 ? Math.Max(0.02, m.CostUsd / maxModelCost) : 0.0;
 
-            // 8. Daily Billing Rows
-            List<DailyRowView> dailyAsc = new List<DailyRowView>(dailyMap.Values);
-            dailyAsc.Sort(delegate(DailyRowView a, DailyRowView b) { return string.CompareOrdinal(a.Date, b.Date); });
-            for (int i = 0; i < dailyAsc.Count; i++)
-            {
-                DailyRowView d = dailyAsc[i];
-                d.FreshInputText = FormatterUtil.FormatTokens(d.FreshInput);
-                d.CacheReadText = FormatterUtil.FormatTokens(d.CacheRead);
-                d.OutputText = FormatterUtil.FormatTokens(d.Output);
-                d.TotalTokensText = FormatterUtil.FormatTokens(d.TotalTokens);
-                d.CostCny = d.CostUsd * _usdToCny;
-                d.UsdText = FormatterUtil.FormatMoney(d.CostUsd, false, _usdToCny);
-                d.CnyText = FormatterUtil.FormatMoney(d.CostUsd, true, _usdToCny);
-            }
-            _currentDailyAsc = dailyAsc;
-
-            List<DailyRowView> dailyDesc = new List<DailyRowView>(dailyAsc);
-            dailyDesc.Reverse();
-            _dailyGrid.ItemsSource = dailyDesc;
-
-            // Update Clean Tab Titles (Zero noisy emojis!)
-            _tabBtns[0].Content = string.Format(CultureInfo.InvariantCulture, "实时请求流 ({0})", liveRows.Count);
-            _tabBtns[1].Content = string.Format(CultureInfo.InvariantCulture, "模型账单明细 ({0})", modelRows.Count);
-            _tabBtns[2].Content = string.Format(CultureInfo.InvariantCulture, "设备单列对比 ({0})", machineList.Count);
-            _tabBtns[3].Content = string.Format(CultureInfo.InvariantCulture, "每日账单流水 ({0})", dailyDesc.Count);
-
-            _trendTitleText.Text = _rangeDays > 0
-                ? string.Format(CultureInfo.InvariantCulture, "每日消耗趋势 ({0})", rangeDesc)
-                : "每日消耗趋势";
-
-            _trendHoverText.Text = dailyAsc.Count > 0
-                ? string.Format(CultureInfo.InvariantCulture, "共 {0} 个活跃日 · 悬停柱状图查看详情", dailyAsc.Count)
-                : "当前筛选范围内暂无用量记录";
-            RenderTrendChart();
-        }
-
-        private void OnClearFilterClick(object sender, RoutedEventArgs e)
-        {
-            if (_leftRankByMachine)
-                _selectedMachineId = null;
-            else
-                _selectedTool = null;
-            RefreshDashboardView();
-        }
-
-        // -------------------- Zero-Jump Device Strip Rendering --------------------
-        private void RenderDeviceStrip(List<NodeSnapshot> allNodes, Dictionary<string, MachineRowView> machineMap, double grandCostUsd)
-        {
-            if (_devicePillsStack == null) return;
-            _devicePillsStack.Children.Clear();
-
-            bool allSel = (_selectedMachineId == null);
-            string allLabel = string.Format(
-                CultureInfo.InvariantCulture,
-                "全部设备 ({0}台 · {1})",
-                allNodes.Count,
-                FormatterUtil.FormatMoney(grandCostUsd, _isCny, _usdToCny));
-            Border allPill = CreateDevicePill(allLabel, allSel, "#38BDF8", "查看所有 Windows 电脑与 Linux VPS 的合并总消耗");
-            allPill.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
-            {
-                _selectedMachineId = null;
-                RefreshDashboardView();
-            };
-            _devicePillsStack.Children.Add(allPill);
-
-            List<NodeSnapshot> ordered = new List<NodeSnapshot>(allNodes);
-            ordered.Sort(delegate(NodeSnapshot a, NodeSnapshot b)
-            {
-                if (a.IsLocal != b.IsLocal) return a.IsLocal ? -1 : 1;
-                double ca = machineMap.ContainsKey(a.MachineId) ? machineMap[a.MachineId].CostUsd : 0;
-                double cb = machineMap.ContainsKey(b.MachineId) ? machineMap[b.MachineId].CostUsd : 0;
-                return cb.CompareTo(ca);
-            });
-
-            for (int i = 0; i < ordered.Count; i++)
-            {
-                NodeSnapshot node = ordered[i];
-                MachineRowView mv = machineMap.ContainsKey(node.MachineId) ? machineMap[node.MachineId] : null;
-                double mCost = mv != null ? mv.CostUsd : 0.0;
-                bool isSel = (_selectedMachineId != null && string.Equals(_selectedMachineId, node.MachineId, StringComparison.OrdinalIgnoreCase));
-
-                string rolePrefix = "";
-                if (string.Equals(node.MachineType, "vps", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(node.MachineType, "linux", StringComparison.OrdinalIgnoreCase))
-                    rolePrefix = "VPS · ";
-
-                string localSuffix = node.IsLocal ? " [本机]" : "";
-                string txt = string.Format(
-                    CultureInfo.InvariantCulture,
-                    "{0}{1}{2} · {3}",
-                    rolePrefix,
-                    string.IsNullOrEmpty(node.MachineName) ? node.MachineId : node.MachineName,
-                    localSuffix,
-                    FormatterUtil.FormatMoney(mCost, _isCny, _usdToCny));
-
-                string tip = string.Format(
-                    CultureInfo.InvariantCulture,
-                    "设备: {0} ({1})\n状态: {2}\n当前时间段花费: {3} ({4} Tokens)\n左键点击单列查看该设备{5}",
-                    node.MachineName,
-                    node.MachineId,
-                    node.IsLocal ? "本机实时监听" : (string.IsNullOrEmpty(node.SyncedAt) ? "本地缓存" : node.SyncedAt),
-                    FormatterUtil.FormatMoney(mCost, _isCny, _usdToCny),
-                    mv != null ? mv.TotalTokensText : "0",
-                    node.IsLocal ? " · 可在「多端同步」中修改显示名" : " · 右键可移除本地缓存");
-
-                string dotHex = node.IsLocal ? "#10B981" : (rolePrefix.Length > 0 ? "#818CF8" : "#38BDF8");
-                Border pill = CreateDevicePill(txt, isSel, dotHex, tip);
-                string capturedId = node.MachineId;
-                pill.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+                if (string.IsNullOrEmpty(_modelSearchQuery) ||
+                    (m.Model != null && m.Model.IndexOf(_modelSearchQuery, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                    (m.Tool != null && m.Tool.IndexOf(_modelSearchQuery, StringComparison.OrdinalIgnoreCase) >= 0))
                 {
-                    _selectedMachineId = string.Equals(_selectedMachineId, capturedId, StringComparison.OrdinalIgnoreCase) ? null : capturedId;
-                    RefreshDashboardView();
-                };
+                    filteredModels.Add(m);
+                }
+            }
 
-                if (!node.IsLocal)
+            RenderModelStackedBar(allModels, totCostUsd);
+            if (_modelCountSummaryText != null)
+            {
+                _modelCountSummaryText.Text = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{0} / {1} 个模型组合",
+                    filteredModels.Count,
+                    allModels.Count);
+            }
+            ModernDataGridFactory.UpdateItemsPreservingState(
+                _modelGrid,
+                filteredModels,
+                delegate(object obj)
                 {
-                    string capturedName = node.MachineName;
-                    ContextMenu cm = new ContextMenu();
-                    MenuItem rmItem = new MenuItem { Header = "移除「" + capturedName + "」的本地缓存" };
-                    rmItem.Click += delegate(object s, RoutedEventArgs e)
+                    ModelRowView mr = obj as ModelRowView;
+                    return mr != null ? (mr.Tool + "||" + mr.Model) : "";
+                },
+                false);
+            if (_modelEmptyOverlay != null)
+                _modelEmptyOverlay.Visibility = filteredModels.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+            // 10. 更新视图 3：设备集群卡片与表格
+            RenderDeviceClusterCards(machineViews);
+            ModernDataGridFactory.UpdateItemsPreservingState(
+                _machineGrid,
+                machineViews,
+                delegate(object obj)
+                {
+                    MachineRowView mrv = obj as MachineRowView;
+                    return mrv != null ? mrv.MachineId : "";
+                },
+                false);
+
+            // 11. 更新视图 4：每日流水表（支持月份/日期搜索过滤）
+            List<DailyRowView> filteredDaily = new List<DailyRowView>(dailyDesc.Count);
+            double sumDailyFilteredUsd = 0.0;
+            long sumDailyFilteredTok = 0L;
+            for (int i = 0; i < dailyDesc.Count; i++)
+            {
+                DailyRowView d = dailyDesc[i];
+                if (_selectedDate != null && !string.Equals(d.Date, _selectedDate, StringComparison.Ordinal))
+                    continue;
+                if (!string.IsNullOrEmpty(_dailySearchQuery) &&
+                    (d.Date == null || d.Date.IndexOf(_dailySearchQuery, StringComparison.OrdinalIgnoreCase) < 0))
+                    continue;
+
+                filteredDaily.Add(d);
+                sumDailyFilteredUsd += d.CostUsd;
+                sumDailyFilteredTok += d.TotalTokens;
+            }
+
+            if (_dailyFilteredSummaryText != null)
+            {
+                _dailyFilteredSummaryText.Text = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "共 {0} 天 · 合计 {1} · {2} Tokens",
+                    filteredDaily.Count,
+                    FormatterUtil.FormatMoney(sumDailyFilteredUsd, _isCny, _usdToCny),
+                    FormatterUtil.FormatTokens(sumDailyFilteredTok));
+            }
+            ModernDataGridFactory.UpdateItemsPreservingState(
+                _dailyGrid,
+                filteredDaily,
+                delegate(object obj)
+                {
+                    DailyRowView dr = obj as DailyRowView;
+                    return dr != null ? dr.Date : "";
+                },
+                false);
+            if (_dailyEmptyOverlay != null)
+                _dailyEmptyOverlay.Visibility = filteredDaily.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+            // 12. 更新视图 0 快览流与视图 1 实时请求流（同时刷新右侧单笔透视抽屉币种）
+            if (_requestInspector != null)
+                _requestInspector.SetCurrency(_isCny, _usdToCny);
+            RefreshLiveRequestGrids(cutoffStr);
+
+            // 13. 缓存专项分析视图所需数据集并按需同步当前活跃视图
+            List<RecordBucket> fullHistoryMachineRows = new List<RecordBucket>(allRecords.Count);
+            List<RecordBucket> fullHistoryScopedRows = new List<RecordBucket>(allRecords.Count);
+            for (int i = 0; i < allRecords.Count; i++)
+            {
+                RecordBucket rb = allRecords[i];
+                if (rb == null) continue;
+                if (_selectedMachineId != null && !string.Equals(rb.MachineId, _selectedMachineId, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                fullHistoryMachineRows.Add(rb);
+                if (_selectedTool == null || string.Equals(rb.Tool, _selectedTool, StringComparison.Ordinal))
+                    fullHistoryScopedRows.Add(rb);
+            }
+            _latestFullHistoryMachineRows = fullHistoryMachineRows;
+            _latestFullHistoryScopedRows = fullHistoryScopedRows;
+            _latestSpecialistMachineRows = machineFiltered;
+            _latestSpecialistActiveRows = activeRows;
+            _latestReferenceDate = latestKnownDate;
+
+            HashSet<string> allKnownModelIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < allRecords.Count; i++)
+            {
+                if (allRecords[i] != null && !string.IsNullOrWhiteSpace(allRecords[i].Model))
+                    allKnownModelIds.Add(allRecords[i].Model.Trim());
+            }
+            _latestUniqueModelNames = new List<string>(allKnownModelIds);
+
+            RefreshActiveSpecialistView(true);
+
+            // 14. 同步桌面置顶微胶囊 HUD 与智能日预算/燃烧速率守卫告警
+            if (_miniHud != null)
+            {
+                string todayCostStr = FormatterUtil.FormatMoney(globalTodayUsd, _isCny, _usdToCny);
+                string todayTokStr = FormatterUtil.FormatTokens(globalTodayTokens);
+                _miniHud.UpdateTelemetry(todayCostStr, todayTokStr, _latestHudModelTps, !_isScanning, overBudget);
+            }
+
+            if (!_skipAutoScan && _scanResult != null)
+            {
+                try
+                {
+                    double budgetLimit = _syncCfg != null ? _syncCfg.DailyBudgetUsd : 0.0;
+                    List<BudgetAlertEvent> alerts = _budgetGuard.Evaluate(
+                        allRecords,
+                        _scanResult.RecentRequests,
+                        budgetLimit,
+                        _isCny,
+                        _usdToCny);
+                    if (alerts != null)
                     {
-                        SyncService.RemoveCachedNode(capturedId);
-                        _remoteNodes = SyncService.LoadCachedRemoteNodes(_syncCfg.MachineId);
-                        if (string.Equals(_selectedMachineId, capturedId, StringComparison.OrdinalIgnoreCase))
-                            _selectedMachineId = null;
-                        RefreshDashboardView();
-                    };
-                    cm.Items.Add(rmItem);
-                    pill.ContextMenu = cm;
+                        for (int a = 0; a < alerts.Count; a++)
+                        {
+                            BudgetAlertEvent ev = alerts[a];
+                            if (ev != null)
+                                ShowToastSafe(ev.Title, ev.Message, ev.Variant);
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            // 15. 更新顶栏副文案与重绘趋势图
+            UpdateTopSubContextText();
+            RedrawChart();
+        }
+
+        private void RefreshLiveRequestGrids(string cutoffDateStr)
+        {
+            string localMid = _localNode != null ? _localNode.MachineId : (_syncCfg != null ? _syncCfg.MachineId : "");
+            bool viewingRemoteOnly = (_selectedMachineId != null && !string.Equals(_selectedMachineId, localMid, StringComparison.OrdinalIgnoreCase));
+
+            List<LiveRequestRowView> allLiveRows = new List<LiveRequestRowView>();
+            List<LiveRequestRowView> overviewPreviewRows = new List<LiveRequestRowView>();
+
+            if (!viewingRemoteOnly && _scanResult != null && _scanResult.RecentRequests != null)
+            {
+                string todayDateStr = DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+                List<RecentRequestRecord> rawList = _scanResult.RecentRequests;
+                for (int i = 0; i < rawList.Count; i++)
+                {
+                    RecentRequestRecord rq = rawList[i];
+                    if (rq == null) continue;
+                    if (cutoffDateStr != null && !string.IsNullOrEmpty(rq.Date) && string.CompareOrdinal(rq.Date, cutoffDateStr) < 0)
+                        continue;
+                    if (_selectedDate != null && !string.Equals(rq.Date, _selectedDate, StringComparison.Ordinal))
+                        continue;
+                    if (_selectedTool != null && !string.Equals(rq.Tool, _selectedTool, StringComparison.Ordinal))
+                        continue;
+
+                    string formattedTime = rq.TimeLabel ?? "";
+                    if (string.Equals(rq.Date, todayDateStr, StringComparison.Ordinal))
+                    {
+                        int spIdx = formattedTime.IndexOf(' ');
+                        if (spIdx >= 0 && spIdx + 1 < formattedTime.Length)
+                            formattedTime = formattedTime.Substring(spIdx + 1);
+                    }
+
+                    double tps = FormatterUtil.ComputeTps(rq.Output, rq.DurationMs);
+                    LiveRequestRowView row = new LiveRequestRowView();
+                    row.TimestampMs = rq.TimestampMs;
+                    row.Date = rq.Date;
+                    row.TimeText = formattedTime;
+                    row.Tool = rq.Tool;
+                    row.Model = rq.Model;
+                    row.FreshInput = rq.FreshInput;
+                    row.FreshInputText = FormatterUtil.FormatTokens(rq.FreshInput);
+                    row.CacheRead = rq.CacheRead;
+                    row.CacheReadText = FormatterUtil.FormatTokens(rq.CacheRead);
+                    row.CacheWrite = rq.CacheWrite;
+                    row.CacheWriteText = FormatterUtil.FormatTokens(rq.CacheWrite);
+                    row.Output = rq.Output;
+                    row.OutputText = FormatterUtil.FormatTokens(rq.Output);
+                    row.TotalTokens = rq.TotalTokens;
+                    row.TotalTokensText = FormatterUtil.FormatTokens(rq.TotalTokens);
+                    row.DurationMs = rq.DurationMs;
+                    row.DurationText = FormatterUtil.FormatDuration(rq.DurationMs);
+                    row.Tps = tps;
+                    row.TpsText = FormatterUtil.FormatTps(tps);
+                    row.CostUsd = rq.CostUsd;
+                    row.DisplayCost = _isCny ? (rq.CostUsd * _usdToCny) : rq.CostUsd;
+                    row.FormattedCost = FormatterUtil.FormatMoney(rq.CostUsd, _isCny, _usdToCny);
+
+                    if (overviewPreviewRows.Count < 30)
+                        overviewPreviewRows.Add(row);
+
+                    if (string.IsNullOrEmpty(_liveSearchQuery) ||
+                        (row.Model != null && row.Model.IndexOf(_liveSearchQuery, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                        (row.Tool != null && row.Tool.IndexOf(_liveSearchQuery, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                        (row.TimeText != null && row.TimeText.IndexOf(_liveSearchQuery, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                        (rq.TimeLabel != null && rq.TimeLabel.IndexOf(_liveSearchQuery, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                        (rq.Date != null && rq.Date.IndexOf(_liveSearchQuery, StringComparison.OrdinalIgnoreCase) >= 0))
+                    {
+                        allLiveRows.Add(row);
+                    }
+                }
+            }
+
+            // 更新顶部最新一笔动态摘要与 HUD 微胶囊模型速率文案
+            if (overviewPreviewRows.Count > 0)
+            {
+                LiveRequestRowView top = overviewPreviewRows[0];
+                string summary = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "最新 {0} · {1} ({2}) · 输出 {3} · {4} · {5}",
+                    top.TimeText,
+                    top.Tool,
+                    top.Model,
+                    top.OutputText,
+                    top.TpsText,
+                    top.FormattedCost);
+                if (_overviewLiveTickerText != null) _overviewLiveTickerText.Text = summary;
+                if (_liveStreamSummaryText != null) _liveStreamSummaryText.Text = summary;
+                _latestHudModelTps = string.IsNullOrWhiteSpace(top.TpsText) || top.TpsText == "—"
+                    ? (top.Model ?? "实时活跃")
+                    : ((top.Model ?? "实时") + " · " + top.TpsText);
+            }
+            else
+            {
+                string fallback = viewingRemoteOnly
+                    ? "当前已锁定远端节点（云同步仅传输按日聚合脱敏账单，不含单笔请求时间戳）"
+                    : "免代理实时监听中 · 发起新对话后自动捕获单笔耗时与 TPS";
+                if (_overviewLiveTickerText != null) _overviewLiveTickerText.Text = fallback;
+                if (_liveStreamSummaryText != null) _liveStreamSummaryText.Text = fallback;
+                _latestHudModelTps = "实时监听就绪";
+            }
+
+            if (_liveClearFilterBtn != null)
+            {
+                bool hasLiveFilter = (!string.IsNullOrEmpty(_liveSearchQuery) || _selectedTool != null || _selectedDate != null);
+                _liveClearFilterBtn.Visibility = hasLiveFilter ? Visibility.Visible : Visibility.Collapsed;
+            }
+
+            ModernDataGridFactory.UpdateItemsPreservingState(
+                _overviewLiveGrid,
+                overviewPreviewRows,
+                delegate(object obj)
+                {
+                    LiveRequestRowView lr = obj as LiveRequestRowView;
+                    return lr != null ? (lr.TimestampMs.ToString(CultureInfo.InvariantCulture) + "|" + lr.Tool + "|" + lr.Model + "|" + lr.TotalTokens.ToString(CultureInfo.InvariantCulture)) : "";
+                },
+                true);
+            if (_overviewLiveEmpty != null)
+                _overviewLiveEmpty.Visibility = overviewPreviewRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+
+            UpdateLivePauseButtonVisual();
+            if (!_livePaused)
+            {
+                ModernDataGridFactory.UpdateItemsPreservingState(
+                    _liveGrid,
+                    allLiveRows,
+                    delegate(object obj)
+                    {
+                        LiveRequestRowView lr = obj as LiveRequestRowView;
+                        return lr != null ? (lr.TimestampMs.ToString(CultureInfo.InvariantCulture) + "|" + lr.Tool + "|" + lr.Model + "|" + lr.TotalTokens.ToString(CultureInfo.InvariantCulture)) : "";
+                    },
+                    true);
+                if (_liveEmptyOverlay != null)
+                {
+                    if (_liveEmptyTitle != null)
+                        _liveEmptyTitle.Text = viewingRemoteOnly ? "远端节点仅同步按日脱敏汇总账单" : "暂无匹配的实时单笔请求记录";
+                    _liveEmptyOverlay.Visibility = allLiveRows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
+                }
+            }
+        }
+
+        private void RenderOverviewRankingList(List<ToolRowView> tools, List<MachineRowView> machines)
+        {
+            if (_toolsStack == null) return;
+            _toolsStack.Children.Clear();
+
+            if (_leftRankByMachine)
+            {
+                if (machines == null || machines.Count == 0)
+                {
+                    _toolsStack.Children.Add(MakeMutedHintRow("暂无多设备账单数据"));
+                    return;
                 }
 
-                _devicePillsStack.Children.Add(pill);
-            }
-        }
+                for (int i = 0; i < machines.Count; i++)
+                {
+                    MachineRowView mv = machines[i];
+                    bool isSel = (_selectedMachineId != null && string.Equals(_selectedMachineId, mv.MachineId, StringComparison.OrdinalIgnoreCase));
+                    string rightVal = _rankByCost ? mv.FormattedMoney : mv.TotalTokensText;
 
-        private Border CreateDevicePill(string text, bool selected, string dotHex, string tooltip)
-        {
-            Border pill = new Border();
-            pill.Height = 28;
-            pill.CornerRadius = new CornerRadius(6);
-            pill.Padding = new Thickness(10, 0, 10, 0);
-            pill.Margin = new Thickness(0, 0, 7, 0);
-            pill.BorderThickness = new Thickness(1);
-            pill.VerticalAlignment = VerticalAlignment.Center;
-            pill.Cursor = Cursors.Hand;
-            pill.ToolTip = tooltip;
-
-            if (selected)
-            {
-                pill.SetResourceReference(Border.BackgroundProperty, "BgSelected");
-                pill.SetResourceReference(Border.BorderBrushProperty, "AccentBlue");
+                    Border item = CreateInteractiveRankRow(
+                        mv.MachineName,
+                        mv.TypeBadge,
+                        rightVal,
+                        mv.ShareText,
+                        mv.BarRatio,
+                        mv.ColorHex,
+                        isSel,
+                        delegate()
+                        {
+                            _selectedMachineId = isSel ? null : mv.MachineId;
+                            RefreshDashboardView();
+                        });
+                    _toolsStack.Children.Add(item);
+                }
             }
             else
             {
-                pill.SetResourceReference(Border.BackgroundProperty, "BgCard");
-                pill.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
+                if (tools == null || tools.Count == 0)
+                {
+                    _toolsStack.Children.Add(MakeMutedHintRow("当前时间与设备范围内暂无活跃工具记录"));
+                    return;
+                }
+
+                for (int i = 0; i < tools.Count; i++)
+                {
+                    ToolRowView tv = tools[i];
+                    bool isSel = (_selectedTool != null && string.Equals(_selectedTool, tv.Tool, StringComparison.Ordinal));
+                    string rightVal = _rankByCost ? tv.FormattedMoney : tv.FormattedTokens;
+                    string pctTxt = tv.SharePercent.ToString("F1", CultureInfo.InvariantCulture) + "%";
+                    string subBadge = string.Format(CultureInfo.InvariantCulture, "{0} 模型", tv.ModelCount);
+
+                    Border item = CreateInteractiveRankRow(
+                        tv.Tool,
+                        subBadge,
+                        rightVal,
+                        pctTxt,
+                        tv.BarRatio,
+                        tv.ColorHex,
+                        isSel,
+                        delegate()
+                        {
+                            _selectedTool = isSel ? null : tv.Tool;
+                            RefreshDashboardView();
+                        });
+                    _toolsStack.Children.Add(item);
+                }
+            }
+        }
+
+        private Border CreateInteractiveRankRow(
+            string name,
+            string subBadge,
+            string valueText,
+            string shareText,
+            double barRatio,
+            string dotHex,
+            bool isSelected,
+            Action onClick)
+        {
+            Border bd = new Border
+            {
+                CornerRadius = new CornerRadius(7),
+                BorderThickness = new Thickness(1),
+                Padding = new Thickness(9, 6, 9, 6),
+                Margin = new Thickness(0, 0, 2, 4),
+                Cursor = Cursors.Hand
+            };
+
+            if (isSelected)
+            {
+                bd.SetResourceReference(Border.BackgroundProperty, "BgSelected");
+                bd.SetResourceReference(Border.BorderBrushProperty, "AccentSubtleBorder");
+            }
+            else
+            {
+                bd.Background = Brushes.Transparent;
+                bd.BorderBrush = Brushes.Transparent;
             }
 
-            StackPanel sp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            Ellipse dot = new Ellipse
+            bd.MouseEnter += delegate(object s, MouseEventArgs e)
             {
-                Width = 6,
-                Height = 6,
-                Fill = BrushHex(dotHex),
-                Margin = new Thickness(0, 0, 6, 0),
+                if (!isSelected)
+                {
+                    bd.SetResourceReference(Border.BackgroundProperty, "BgHover");
+                    bd.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
+                }
+            };
+            bd.MouseLeave += delegate(object s, MouseEventArgs e)
+            {
+                if (!isSelected)
+                {
+                    bd.Background = Brushes.Transparent;
+                    bd.BorderBrush = Brushes.Transparent;
+                }
+            };
+            bd.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+            {
+                if (onClick != null) onClick();
+            };
+
+            StackPanel sp = new StackPanel();
+            DockPanel topRow = new DockPanel();
+
+            StackPanel rightSp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            TextBlock valTb = new TextBlock
+            {
+                Text = valueText,
+                FontFamily = DesignSystem.FontMono,
+                FontSize = 11.8,
+                FontWeight = FontWeights.SemiBold,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            valTb.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            rightSp.Children.Add(valTb);
+
+            TextBlock pctTb = new TextBlock
+            {
+                Text = shareText,
+                FontFamily = DesignSystem.FontMono,
+                FontSize = 10.5,
+                Width = 44,
+                TextAlignment = TextAlignment.Right,
+                Margin = new Thickness(6, 0, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            pctTb.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            rightSp.Children.Add(pctTb);
+
+            DockPanel.SetDock(rightSp, Dock.Right);
+            topRow.Children.Add(rightSp);
+
+            StackPanel leftSp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            Shapes.Ellipse dot = new Shapes.Ellipse
+            {
+                Width = 7,
+                Height = 7,
+                Fill = DesignSystem.BrushHex(dotHex),
+                Margin = new Thickness(0, 0, 7, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            leftSp.Children.Add(dot);
+
+            TextBlock nameTb = new TextBlock
+            {
+                Text = name,
+                FontSize = 12,
+                FontWeight = FontWeights.Medium,
+                MaxWidth = 148,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            nameTb.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            leftSp.Children.Add(nameTb);
+
+            if (!string.IsNullOrEmpty(subBadge))
+            {
+                TextBlock badgeTb = new TextBlock
+                {
+                    Text = subBadge,
+                    FontSize = 10.2,
+                    Margin = new Thickness(6, 1, 0, 0),
+                    VerticalAlignment = VerticalAlignment.Center
+                };
+                badgeTb.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+                leftSp.Children.Add(badgeTb);
+            }
+
+            topRow.Children.Add(leftSp);
+            sp.Children.Add(topRow);
+
+            Grid barTrack = new Grid { Height = 3.5, Margin = new Thickness(14, 5, 0, 0) };
+            barTrack.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0.01, barRatio), GridUnitType.Star) });
+            barTrack.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0.0, 1.0 - barRatio), GridUnitType.Star) });
+
+            Border bgRail = new Border { CornerRadius = new CornerRadius(1.8) };
+            bgRail.SetResourceReference(Border.BackgroundProperty, "BgHoverStrong");
+            Grid.SetColumnSpan(bgRail, 2);
+            barTrack.Children.Add(bgRail);
+
+            Border fgFill = new Border
+            {
+                CornerRadius = new CornerRadius(1.8),
+                Background = DesignSystem.BrushHex(dotHex)
+            };
+            Grid.SetColumn(fgFill, 0);
+            barTrack.Children.Add(fgFill);
+
+            sp.Children.Add(barTrack);
+            bd.Child = sp;
+            return bd;
+        }
+
+        private static TextBlock MakeMutedHintRow(string text)
+        {
+            TextBlock tb = new TextBlock
+            {
+                Text = text,
+                FontSize = 11.8,
+                Margin = new Thickness(8, 22, 8, 12),
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            tb.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            return tb;
+        }
+
+        private void RenderModelStackedBar(List<ModelRowView> models, double totalCostUsd)
+        {
+            if (_modelStackedBarGrid == null || _modelLegendWrap == null) return;
+            _modelStackedBarGrid.Children.Clear();
+            _modelStackedBarGrid.ColumnDefinitions.Clear();
+            _modelLegendWrap.Children.Clear();
+
+            if (models == null || models.Count == 0 || totalCostUsd <= 0.0)
+            {
+                _modelLegendWrap.Children.Add(new TextBlock
+                {
+                    Text = "暂无模型账单占比数据",
+                    FontSize = 11,
+                    Foreground = DesignSystem.BrushHex(_isDark ? "#71717A" : "#71717A")
+                });
+                return;
+            }
+
+            string[] palette = DesignSystem.GetChartPalette(_isDark);
+            int topCount = Math.Min(6, models.Count);
+            double coveredUsd = 0.0;
+
+            for (int i = 0; i < topCount; i++)
+            {
+                ModelRowView m = models[i];
+                double ratio = Math.Max(0.005, m.CostUsd / totalCostUsd);
+                coveredUsd += m.CostUsd;
+                string hex = DesignSystem.GetProviderColorHex(m.Model + " " + m.Tool, _isDark);
+                if (i > 0 && i < palette.Length && string.Equals(hex, DesignSystem.GetProviderColorHex(models[i - 1].Model + " " + models[i - 1].Tool, _isDark), StringComparison.OrdinalIgnoreCase))
+                {
+                    hex = palette[i % palette.Length];
+                }
+
+                _modelStackedBarGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(ratio, GridUnitType.Star) });
+                Border seg = new Border
+                {
+                    Background = DesignSystem.BrushHex(hex),
+                    Margin = new Thickness(i == 0 ? 0 : 1.5, 0, 0, 0),
+                    ToolTip = m.Model + " (" + m.Tool + ") · " + m.FormattedCost + " · " + m.ShareText
+                };
+                Grid.SetColumn(seg, i);
+                _modelStackedBarGrid.Children.Add(seg);
+
+                _modelLegendWrap.Children.Add(MakeLegendChip(hex, m.Model, m.ShareText));
+            }
+
+            double restUsd = Math.Max(0.0, totalCostUsd - coveredUsd);
+            if (models.Count > topCount && restUsd > 0.0001)
+            {
+                double restRatio = Math.Max(0.01, restUsd / totalCostUsd);
+                string otherHex = _isDark ? "#52525B" : "#A1A1AA";
+                _modelStackedBarGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(restRatio, GridUnitType.Star) });
+                Border otherSeg = new Border
+                {
+                    Background = DesignSystem.BrushHex(otherHex),
+                    Margin = new Thickness(1.5, 0, 0, 0)
+                };
+                Grid.SetColumn(otherSeg, topCount);
+                _modelStackedBarGrid.Children.Add(otherSeg);
+
+                string restPct = (restUsd * 100.0 / totalCostUsd).ToString("F1", CultureInfo.InvariantCulture) + "%";
+                _modelLegendWrap.Children.Add(MakeLegendChip(otherHex, string.Format(CultureInfo.InvariantCulture, "其余 {0} 个模型", models.Count - topCount), restPct));
+            }
+        }
+
+        private static UIElement MakeLegendChip(string colorHex, string label, string pct)
+        {
+            StackPanel sp = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                Margin = new Thickness(0, 2, 14, 2),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            sp.Children.Add(new Shapes.Ellipse
+            {
+                Width = 7,
+                Height = 7,
+                Fill = DesignSystem.BrushHex(colorHex),
+                Margin = new Thickness(0, 0, 5, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            });
+
+            TextBlock nameTb = new TextBlock
+            {
+                Text = label,
+                FontFamily = DesignSystem.FontMono,
+                FontSize = 11,
+                MaxWidth = 170,
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+            nameTb.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            sp.Children.Add(nameTb);
+
+            TextBlock pctTb = new TextBlock
+            {
+                Text = pct,
+                FontFamily = DesignSystem.FontMono,
+                FontSize = 10.8,
+                Margin = new Thickness(4, 0, 0, 0)
+            };
+            pctTb.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            sp.Children.Add(pctTb);
+            return sp;
+        }
+
+        private void RenderDeviceClusterCards(List<MachineRowView> machines)
+        {
+            if (_deviceCardsStack == null) return;
+            _deviceCardsStack.Children.Clear();
+
+            if (machines != null)
+            {
+                for (int i = 0; i < machines.Count; i++)
+                {
+                    MachineRowView mv = machines[i];
+                    bool isSelected = (_selectedMachineId != null && string.Equals(_selectedMachineId, mv.MachineId, StringComparison.OrdinalIgnoreCase));
+
+                    Border card = ModernControlsFactory.CreateCard(new Thickness(13, 11, 13, 10));
+                    card.Width = 238;
+                    card.Margin = new Thickness(0, 0, 10, 2);
+                    card.Cursor = Cursors.Hand;
+
+                    if (isSelected)
+                    {
+                        card.SetResourceReference(Border.BackgroundProperty, "BgSelected");
+                        card.SetResourceReference(Border.BorderBrushProperty, "BorderFocus");
+                    }
+
+                    StackPanel sp = new StackPanel();
+
+                    // 顶行：OS 图标 + 设备名 + 在线胶囊
+                    DockPanel top = new DockPanel();
+                    TextBlock badgeLbl;
+                    Shapes.Ellipse badgeDot;
+                    Border statusPill = ModernControlsFactory.CreateStatusBadge(
+                        mv.StatusText,
+                        mv.IsOnline ? "success" : "warning",
+                        out badgeLbl,
+                        out badgeDot);
+                    DockPanel.SetDock(statusPill, Dock.Right);
+                    top.Children.Add(statusPill);
+
+                    StackPanel titleRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+                    bool isLinux = mv.TypeBadge != null && mv.TypeBadge.IndexOf("Linux", StringComparison.OrdinalIgnoreCase) >= 0;
+                    Shapes.Path nodeIcon = UiIcons.CreateIcon(isLinux ? UiIcons.Terminal : UiIcons.Devices, 14.5, "AccentText");
+                    nodeIcon.Margin = new Thickness(0, 0, 6, 0);
+                    titleRow.Children.Add(nodeIcon);
+
+                    TextBlock nameTb = new TextBlock
+                    {
+                        Text = mv.MachineName,
+                        FontSize = 12.8,
+                        FontWeight = FontWeights.SemiBold,
+                        MaxWidth = 112,
+                        TextTrimming = TextTrimming.CharacterEllipsis
+                    };
+                    nameTb.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+                    titleRow.Children.Add(nameTb);
+                    top.Children.Add(titleRow);
+                    sp.Children.Add(top);
+
+                    // OS 与工具信息
+                    TextBlock osTb = new TextBlock
+                    {
+                        Text = mv.OsInfo + " · " + mv.ToolCount.ToString(CultureInfo.InvariantCulture) + " 款活跃工具",
+                        FontSize = 10.8,
+                        Margin = new Thickness(0, 6, 0, 6),
+                        TextTrimming = TextTrimming.CharacterEllipsis
+                    };
+                    osTb.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+                    sp.Children.Add(osTb);
+
+                    // 金额与占比
+                    DockPanel bot = new DockPanel();
+                    TextBlock shareTb = new TextBlock
+                    {
+                        Text = "占比 " + mv.ShareText,
+                        FontFamily = DesignSystem.FontMono,
+                        FontSize = 10.8,
+                        VerticalAlignment = VerticalAlignment.Bottom
+                    };
+                    shareTb.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+                    DockPanel.SetDock(shareTb, Dock.Right);
+                    bot.Children.Add(shareTb);
+
+                    TextBlock costTb = new TextBlock
+                    {
+                        Text = mv.FormattedMoney,
+                        FontFamily = DesignSystem.FontDisplay,
+                        FontSize = 18,
+                        FontWeight = FontWeights.SemiBold
+                    };
+                    costTb.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+                    ModernControlsFactory.EnableTabularNumbers(costTb, false);
+                    bot.Children.Add(costTb);
+                    sp.Children.Add(bot);
+
+                    MachineRowView captured = mv;
+                    card.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+                    {
+                        _selectedMachineId = isSelected ? null : captured.MachineId;
+                        RefreshDashboardView();
+                    };
+
+                    _deviceCardsStack.Children.Add(card);
+                }
+            }
+
+            // 末尾引导卡片：+ 接入新电脑 / Linux VPS
+            Border addCard = ModernControlsFactory.CreateCard(new Thickness(14, 11, 14, 10));
+            addCard.Width = 200;
+            addCard.Margin = new Thickness(0, 0, 4, 2);
+            addCard.Cursor = Cursors.Hand;
+            addCard.SetResourceReference(Border.BackgroundProperty, "BgSurface");
+
+            StackPanel addSp = new StackPanel
+            {
+                HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
-                Opacity = selected ? 1.0 : 0.65
+                Margin = new Thickness(0, 8, 0, 8)
             };
-            sp.Children.Add(dot);
+            Shapes.Path plusIc = UiIcons.CreateIcon(UiIcons.Plus, 18.0, "AccentText");
+            plusIc.HorizontalAlignment = HorizontalAlignment.Center;
+            addSp.Children.Add(plusIc);
 
-            TextBlock tb = new TextBlock();
-            tb.Text = text;
-            tb.FontSize = 11.8;
-            // Constant FontWeight.Medium prevents width shift when clicking device pills!
-            tb.FontWeight = FontWeights.Medium;
-            tb.VerticalAlignment = VerticalAlignment.Center;
-            tb.SetResourceReference(TextBlock.ForegroundProperty, selected ? "AccentBlue" : "FgPrimary");
-            sp.Children.Add(tb);
-
-            pill.Child = sp;
-
-            pill.MouseEnter += delegate(object s, MouseEventArgs e)
+            TextBlock addTitle = new TextBlock
             {
-                if (!selected)
-                    pill.SetResourceReference(Border.BorderBrushProperty, "BorderStrong");
+                Text = "接入新电脑 / Linux VPS",
+                FontSize = 12,
+                FontWeight = FontWeights.SemiBold,
+                Margin = new Thickness(0, 6, 0, 2),
+                HorizontalAlignment = HorizontalAlignment.Center
             };
-            pill.MouseLeave += delegate(object s, MouseEventArgs e)
+            addTitle.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            addSp.Children.Add(addTitle);
+
+            TextBlock addSub = new TextBlock
             {
-                if (!selected)
-                    pill.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
+                Text = "配对码或一行命令自动同步",
+                FontSize = 10.8,
+                HorizontalAlignment = HorizontalAlignment.Center
             };
-            return pill;
+            addSub.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            addSp.Children.Add(addSub);
+
+            addCard.Child = addSp;
+            addCard.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
+            {
+                SwitchActiveView(ViewSettings);
+                if (_settingsView != null)
+                    _settingsView.ScrollToSection(1);
+            };
+            _deviceCardsStack.Children.Add(addCard);
         }
 
-        // -------------------- Middle Cards & Trend Chart Rendering --------------------
-        private void RenderMachinesRankingList(List<MachineRowView> machines)
+        // -------------------- 平滑面积折线 / 圆角柱状趋势图（含十字准星虚线 + 跟随式浮层详情卡片 + 点击单日钻取） --------------------
+        private void HideChartCrosshair()
         {
-            _toolsStack.Children.Clear();
-            if (machines.Count == 0)
-            {
-                TextBlock empty = new TextBlock
-                {
-                    Text = "暂无设备统计记录",
-                    Margin = new Thickness(8, 24, 8, 8),
-                    HorizontalAlignment = HorizontalAlignment.Center
-                };
-                empty.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-                _toolsStack.Children.Add(empty);
+            if (_chartCrosshairLine != null) _chartCrosshairLine.Visibility = Visibility.Collapsed;
+            if (_chartHoverDot != null) _chartHoverDot.Visibility = Visibility.Collapsed;
+            if (_chartFloatingCard != null) _chartFloatingCard.Visibility = Visibility.Collapsed;
+        }
+
+        private void ShowChartCrosshair(DailyRowView day, double xCenter, double yPoint, double topPad, double plotH, double canvasW)
+        {
+            if (day == null || _chartCrosshairLine == null || _chartFloatingCard == null)
                 return;
-            }
 
-            for (int i = 0; i < machines.Count; i++)
+            _chartCrosshairLine.X1 = xCenter;
+            _chartCrosshairLine.X2 = xCenter;
+            _chartCrosshairLine.Y1 = topPad;
+            _chartCrosshairLine.Y2 = topPad + plotH;
+            _chartCrosshairLine.Visibility = Visibility.Visible;
+
+            if (_chartHoverDot != null)
             {
-                MachineRowView m = machines[i];
-                bool isSel = (_selectedMachineId != null && string.Equals(_selectedMachineId, m.MachineId, StringComparison.OrdinalIgnoreCase));
-                SolidColorBrush dotBrush = BrushHex(m.ColorHex);
-
-                Border rowBd = new Border();
-                rowBd.CornerRadius = new CornerRadius(7);
-                rowBd.Padding = new Thickness(10, 7, 10, 7);
-                rowBd.Margin = new Thickness(0, 0, 0, 5);
-                rowBd.BorderThickness = new Thickness(1);
-                rowBd.Cursor = Cursors.Hand;
-                rowBd.SetResourceReference(Border.BackgroundProperty, isSel ? "BgSelected" : "BgSurface");
-                if (isSel)
-                    rowBd.BorderBrush = dotBrush;
-                else
-                    rowBd.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
-
-                StackPanel vStack = new StackPanel();
-                DockPanel topLine = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
-
-                StackPanel rightNums = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-                DockPanel.SetDock(rightNums, Dock.Right);
-
-                TextBlock moneyTxt = new TextBlock { Text = m.FormattedMoney, FontWeight = FontWeights.Bold, FontSize = 12.2 };
-                moneyTxt.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
-                rightNums.Children.Add(moneyTxt);
-
-                TextBlock tokShareTxt = new TextBlock
-                {
-                    Text = string.Format(CultureInfo.InvariantCulture, " · {0} ({1:F1}%)", m.TotalTokensText, m.SharePercent),
-                    FontSize = 11,
-                    VerticalAlignment = VerticalAlignment.Center
-                };
-                tokShareTxt.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-                rightNums.Children.Add(tokShareTxt);
-                topLine.Children.Add(rightNums);
-
-                StackPanel leftInfo = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-                Ellipse dot = new Ellipse { Width = 7, Height = 7, Fill = dotBrush, Margin = new Thickness(0, 0, 7, 0), VerticalAlignment = VerticalAlignment.Center };
-                leftInfo.Children.Add(dot);
-
-                TextBlock nameTxt = new TextBlock
-                {
-                    Text = m.MachineName + (m.IsLocal ? " [本机]" : ""),
-                    FontWeight = FontWeights.SemiBold,
-                    FontSize = 12.2,
-                    TextTrimming = TextTrimming.CharacterEllipsis
-                };
-                nameTxt.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
-                leftInfo.Children.Add(nameTxt);
-
-                TextBlock subMeta = new TextBlock
-                {
-                    Text = string.Format(CultureInfo.InvariantCulture, "  {0}工具 · {1}次", m.ToolCount, m.Turns),
-                    FontSize = 10.8,
-                    VerticalAlignment = VerticalAlignment.Center
-                };
-                subMeta.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-                leftInfo.Children.Add(subMeta);
-
-                topLine.Children.Add(leftInfo);
-                vStack.Children.Add(topLine);
-
-                Grid barGrid = new Grid { Height = 4 };
-                barGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(m.BarRatio, GridUnitType.Star) });
-                barGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0.0, 1.0 - m.BarRatio), GridUnitType.Star) });
-
-                Border trackBg = new Border { CornerRadius = new CornerRadius(2) };
-                trackBg.SetResourceReference(Border.BackgroundProperty, "BgElevated");
-                Grid.SetColumnSpan(trackBg, 2);
-                barGrid.Children.Add(trackBg);
-
-                Border trackFill = new Border { CornerRadius = new CornerRadius(2), Background = dotBrush };
-                Grid.SetColumn(trackFill, 0);
-                barGrid.Children.Add(trackFill);
-
-                vStack.Children.Add(barGrid);
-                rowBd.Child = vStack;
-
-                string machKey = m.MachineId;
-                rowBd.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
-                {
-                    _selectedMachineId = string.Equals(_selectedMachineId, machKey, StringComparison.OrdinalIgnoreCase) ? null : machKey;
-                    RefreshDashboardView();
-                };
-                _toolsStack.Children.Add(rowBd);
+                Canvas.SetLeft(_chartHoverDot, xCenter - 4.0);
+                Canvas.SetTop(_chartHoverDot, yPoint - 4.0);
+                _chartHoverDot.Visibility = Visibility.Visible;
             }
+
+            _chartFloatingDateText.Text = day.Date + (_selectedDate == day.Date ? " (当前锁定)" : " · 点击锁定该日");
+            _chartFloatingPrimaryText.Text = string.Format(
+                CultureInfo.InvariantCulture,
+                "{0}  ({1})",
+                _isCny ? day.CnyText : day.UsdText,
+                day.TotalTokensText + " Tokens");
+            _chartFloatingSubText.Text = string.Format(
+                CultureInfo.InvariantCulture,
+                "{0} 次调用 · 缓存读 {1} · 输出 {2}",
+                day.Turns,
+                day.CacheReadText,
+                day.OutputText);
+
+            _chartFloatingCard.Visibility = Visibility.Visible;
+            _chartFloatingCard.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            double cardW = Math.Max(168.0, _chartFloatingCard.DesiredSize.Width);
+            double leftX = (xCenter + 14.0 + cardW <= canvasW - 6.0)
+                ? (xCenter + 12.0)
+                : Math.Max(8.0, xCenter - cardW - 12.0);
+            Canvas.SetLeft(_chartFloatingCard, leftX);
+            Canvas.SetTop(_chartFloatingCard, Math.Max(4.0, topPad));
         }
 
-        private void RenderToolsList(List<ToolRowView> tools)
+        private void RedrawChart()
         {
-            _toolsStack.Children.Clear();
-            if (tools.Count == 0)
-            {
-                TextBlock empty = new TextBlock
-                {
-                    Text = "当前时间或设备范围内暂无 AI 工具使用记录",
-                    Margin = new Thickness(8, 24, 8, 8),
-                    HorizontalAlignment = HorizontalAlignment.Center
-                };
-                empty.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-                _toolsStack.Children.Add(empty);
-                return;
-            }
-
-            for (int i = 0; i < tools.Count; i++)
-            {
-                ToolRowView t = tools[i];
-                bool isSel = (_selectedTool != null && string.Equals(_selectedTool, t.Tool, StringComparison.Ordinal));
-                SolidColorBrush dotBrush = BrushHex(t.ColorHex);
-
-                Border rowBd = new Border();
-                rowBd.CornerRadius = new CornerRadius(7);
-                rowBd.Padding = new Thickness(10, 7, 10, 7);
-                rowBd.Margin = new Thickness(0, 0, 0, 5);
-                rowBd.BorderThickness = new Thickness(1);
-                rowBd.Cursor = Cursors.Hand;
-                rowBd.SetResourceReference(Border.BackgroundProperty, isSel ? "BgSelected" : "BgSurface");
-                if (isSel)
-                    rowBd.BorderBrush = dotBrush;
-                else
-                    rowBd.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
-
-                StackPanel vStack = new StackPanel();
-                DockPanel topLine = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
-
-                StackPanel rightNums = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-                DockPanel.SetDock(rightNums, Dock.Right);
-
-                TextBlock moneyTxt = new TextBlock { Text = t.FormattedMoney, FontWeight = FontWeights.Bold, FontSize = 12.2 };
-                moneyTxt.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
-                rightNums.Children.Add(moneyTxt);
-
-                TextBlock tokShareTxt = new TextBlock
-                {
-                    Text = string.Format(CultureInfo.InvariantCulture, " · {0} ({1:F1}%)", t.FormattedTokens, t.SharePercent),
-                    FontSize = 11,
-                    VerticalAlignment = VerticalAlignment.Center
-                };
-                tokShareTxt.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-                rightNums.Children.Add(tokShareTxt);
-                topLine.Children.Add(rightNums);
-
-                StackPanel leftInfo = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-                Ellipse dot = new Ellipse { Width = 7, Height = 7, Fill = dotBrush, Margin = new Thickness(0, 0, 7, 0), VerticalAlignment = VerticalAlignment.Center };
-                leftInfo.Children.Add(dot);
-
-                TextBlock nameTxt = new TextBlock
-                {
-                    Text = t.Tool,
-                    FontWeight = FontWeights.SemiBold,
-                    FontSize = 12.2,
-                    TextTrimming = TextTrimming.CharacterEllipsis
-                };
-                nameTxt.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
-                leftInfo.Children.Add(nameTxt);
-
-                TextBlock turnsTxt = new TextBlock
-                {
-                    Text = string.Format(CultureInfo.InvariantCulture, "  {0}次", t.Turns),
-                    FontSize = 10.8,
-                    VerticalAlignment = VerticalAlignment.Center
-                };
-                turnsTxt.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-                leftInfo.Children.Add(turnsTxt);
-
-                topLine.Children.Add(leftInfo);
-                vStack.Children.Add(topLine);
-
-                Grid barGrid = new Grid { Height = 4 };
-                barGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(t.BarRatio, GridUnitType.Star) });
-                barGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0.0, 1.0 - t.BarRatio), GridUnitType.Star) });
-
-                Border trackBg = new Border { CornerRadius = new CornerRadius(2) };
-                trackBg.SetResourceReference(Border.BackgroundProperty, "BgElevated");
-                Grid.SetColumnSpan(trackBg, 2);
-                barGrid.Children.Add(trackBg);
-
-                Border trackFill = new Border { CornerRadius = new CornerRadius(2), Background = dotBrush };
-                Grid.SetColumn(trackFill, 0);
-                barGrid.Children.Add(trackFill);
-
-                vStack.Children.Add(barGrid);
-                rowBd.Child = vStack;
-
-                string toolKey = t.Tool;
-                rowBd.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
-                {
-                    _selectedTool = string.Equals(_selectedTool, toolKey, StringComparison.Ordinal) ? null : toolKey;
-                    RefreshDashboardView();
-                };
-                rowBd.MouseEnter += delegate(object s, MouseEventArgs e)
-                {
-                    if (!string.Equals(_selectedTool, toolKey, StringComparison.Ordinal))
-                        rowBd.SetResourceReference(Border.BorderBrushProperty, "BorderStrong");
-                };
-                rowBd.MouseLeave += delegate(object s, MouseEventArgs e)
-                {
-                    if (!string.Equals(_selectedTool, toolKey, StringComparison.Ordinal))
-                        rowBd.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
-                };
-
-                _toolsStack.Children.Add(rowBd);
-            }
-        }
-
-        private void RenderTrendChart()
-        {
-            if (_chartCanvas == null) return;
+            if (_chartCanvas == null || _chartInteractiveHost == null) return;
             _chartCanvas.Children.Clear();
+            HideChartCrosshair();
 
-            double w = _chartHost.ActualWidth;
-            double h = _chartHost.ActualHeight;
-            if (w <= 60 || h <= 40) return;
-            _chartCanvas.Width = w;
-            _chartCanvas.Height = h;
+            double w = _chartInteractiveHost.ActualWidth;
+            double h = _chartInteractiveHost.ActualHeight;
+            if (w < 80.0 || h < 60.0) return;
 
             if (_currentDailyAsc == null || _currentDailyAsc.Count == 0)
             {
-                TextBlock empty = new TextBlock { Text = "暂无每日趋势数据", FontSize = 12 };
+                TextBlock empty = new TextBlock
+                {
+                    Text = "当前筛选范围内暂无按日趋势数据",
+                    FontSize = 12
+                };
                 empty.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-                Canvas.SetLeft(empty, (w - 100) / 2.0);
-                Canvas.SetTop(empty, (h - 20) / 2.0);
+                Canvas.SetLeft(empty, Math.Max(16.0, w * 0.5 - 92.0));
+                Canvas.SetTop(empty, Math.Max(16.0, h * 0.5 - 10.0));
                 _chartCanvas.Children.Add(empty);
                 return;
             }
 
-            double leftPad = 56.0;
-            double rightPad = 8.0;
-            double topPad = 8.0;
-            double bottomPad = 22.0;
+            double leftPad = 52.0;
+            double rightPad = 12.0;
+            double topPad = 10.0;
+            double bottomPad = 24.0;
             double plotW = Math.Max(20.0, w - leftPad - rightPad);
             double plotH = Math.Max(20.0, h - topPad - bottomPad);
 
@@ -3124,14 +6548,21 @@ namespace TokLens
             }
             if (maxVal <= 0.0) maxVal = 1.0;
 
-            SolidColorBrush gridBrush = (SolidColorBrush)Resources["BorderCard"];
-            SolidColorBrush lblBrush = (SolidColorBrush)Resources["FgMuted"];
+            Brush gridBrush = TryFindResource("BorderSubtle") as Brush ?? DesignSystem.BrushHex(_isDark ? "#1E1E24" : "#F1F1F4");
+            Brush axisTextBrush = TryFindResource("FgMuted") as Brush ?? DesignSystem.BrushHex("#71717A");
+            Color accentColor = (Color)ColorConverter.ConvertFromString(_isDark ? "#818CF8" : "#4F46E5");
+            Brush strokeBrush = DesignSystem.BrushHex(_isDark ? "#818CF8" : "#4F46E5");
+            Brush barBrush = TryFindResource("ChartBarFill") as Brush ?? DesignSystem.BrushHex(_isDark ? "#5E6AD2" : "#4F46E5");
+            Brush barHoverBrush = TryFindResource("ChartBarHover") as Brush ?? strokeBrush;
 
-            double[] ratios = new double[] { 0.0, 0.5, 1.0 };
-            for (int r = 0; r < ratios.Length; r++)
+            // Y 轴水平参考线与刻度标签
+            int yTicks = 3;
+            for (int t = 0; t <= yTicks; t++)
             {
-                double y = topPad + plotH * (1.0 - ratios[r]);
-                Line ln = new Line
+                double frac = (double)t / yTicks;
+                double y = topPad + plotH * (1.0 - frac);
+
+                Shapes.Line gl = new Shapes.Line
                 {
                     X1 = leftPad,
                     X2 = leftPad + plotW,
@@ -3140,305 +6571,1117 @@ namespace TokLens
                     Stroke = gridBrush,
                     StrokeThickness = 1.0
                 };
-                if (r > 0) ln.StrokeDashArray = new DoubleCollection(new double[] { 3, 3 });
-                _chartCanvas.Children.Add(ln);
+                _chartCanvas.Children.Add(gl);
 
-                double refV = maxVal * ratios[r];
-                string yText;
+                double tickVal = maxVal * frac;
+                string yLabelText;
                 if (_rankByCost)
                 {
-                    double usdEq = _isCny ? (refV / _usdToCny) : refV;
-                    yText = ratios[r] == 0.0 ? (_isCny ? "¥0" : "$0") : FormatterUtil.FormatMoney(usdEq, _isCny, _usdToCny);
+                    string sym = _isCny ? "¥" : "$";
+                    yLabelText = tickVal >= 100.0
+                        ? (sym + tickVal.ToString("F0", CultureInfo.InvariantCulture))
+                        : (sym + tickVal.ToString("0.##", CultureInfo.InvariantCulture));
                 }
                 else
                 {
-                    yText = FormatterUtil.FormatTokens((long)refV);
+                    yLabelText = FormatterUtil.FormatTokens((long)Math.Round(tickVal));
                 }
 
                 TextBlock yLbl = new TextBlock
                 {
-                    Text = yText,
-                    FontSize = 10.2,
-                    Foreground = lblBrush,
-                    Width = leftPad - 6,
+                    Text = yLabelText,
+                    FontFamily = DesignSystem.FontMono,
+                    FontSize = 10.0,
+                    Foreground = axisTextBrush,
+                    Width = leftPad - 6.0,
                     TextAlignment = TextAlignment.Right
                 };
-                Canvas.SetLeft(yLbl, 0);
-                Canvas.SetTop(yLbl, y - 7);
+                Canvas.SetLeft(yLbl, 0.0);
+                Canvas.SetTop(yLbl, y - 7.0);
                 _chartCanvas.Children.Add(yLbl);
             }
 
             int n = _currentDailyAsc.Count;
             double slotW = plotW / n;
-            double gap = n > 45 ? 1.5 : (n > 20 ? 3.0 : 5.0);
-            double barW = Math.Max(2.0, Math.Min(32.0, slotW - gap));
-
-            LinearGradientBrush barGrad = new LinearGradientBrush(
-                (Color)ColorConverter.ConvertFromString(_isDark ? "#38BDF8" : "#0EA5E9"),
-                (Color)ColorConverter.ConvertFromString(_isDark ? "#6366F1" : "#4F46E5"),
-                90.0);
-            barGrad.Freeze();
-
-            LinearGradientBrush hoverGrad = new LinearGradientBrush(
-                (Color)ColorConverter.ConvertFromString("#7DD3FC"),
-                (Color)ColorConverter.ConvertFromString("#818CF8"),
-                90.0);
-            hoverGrad.Freeze();
+            Point[] pts = new Point[n];
 
             for (int i = 0; i < n; i++)
             {
                 DailyRowView d = _currentDailyAsc[i];
                 double v = _rankByCost ? (_isCny ? d.CostCny : d.CostUsd) : (double)d.TotalTokens;
-                double bh = Math.Max(2.5, (v / maxVal) * plotH);
-                double xCenter = leftPad + slotW * i + slotW * 0.5;
-                double bx = xCenter - barW * 0.5;
-                double by = topPad + plotH - bh;
+                double ratio = Math.Max(0.0, Math.Min(1.0, v / maxVal));
+                double px = (n == 1)
+                    ? (leftPad + plotW * 0.5)
+                    : (leftPad + slotW * i + slotW * 0.5);
+                double py = topPad + plotH * (1.0 - ratio);
+                pts[i] = new Point(px, py);
+            }
 
-                Border bar = new Border
+            if (_chartLineMode && n >= 2)
+            {
+                // 平滑三次贝塞尔面积填充 + 描边折线
+                PathFigure areaFig = new PathFigure { StartPoint = new Point(pts[0].X, topPad + plotH), IsClosed = true, IsFilled = true };
+                areaFig.Segments.Add(new LineSegment(pts[0], false));
+
+                PathFigure strokeFig = new PathFigure { StartPoint = pts[0], IsClosed = false, IsFilled = false };
+
+                for (int i = 0; i < n - 1; i++)
                 {
-                    Width = barW,
-                    Height = bh,
-                    CornerRadius = new CornerRadius(Math.Min(4.0, barW * 0.4), Math.Min(4.0, barW * 0.4), 0, 0),
-                    Background = barGrad
+                    Point p0 = pts[i];
+                    Point p1 = pts[i + 1];
+                    double dx = (p1.X - p0.X) * 0.42;
+                    Point c1 = new Point(p0.X + dx, p0.Y);
+                    Point c2 = new Point(p1.X - dx, p1.Y);
+                    areaFig.Segments.Add(new BezierSegment(c1, c2, p1, true));
+                    strokeFig.Segments.Add(new BezierSegment(c1, c2, p1, true));
+                }
+                areaFig.Segments.Add(new LineSegment(new Point(pts[n - 1].X, topPad + plotH), false));
+
+                LinearGradientBrush areaFill = new LinearGradientBrush();
+                areaFill.StartPoint = new Point(0, 0);
+                areaFill.EndPoint = new Point(0, 1);
+                areaFill.GradientStops.Add(new GradientStop(Color.FromArgb(_isDark ? (byte)76 : (byte)52, accentColor.R, accentColor.G, accentColor.B), 0.0));
+                areaFill.GradientStops.Add(new GradientStop(Color.FromArgb(2, accentColor.R, accentColor.G, accentColor.B), 1.0));
+                areaFill.Freeze();
+
+                PathGeometry areaGeo = new PathGeometry();
+                areaGeo.Figures.Add(areaFig);
+                Shapes.Path areaPath = new Shapes.Path { Data = areaGeo, Fill = areaFill };
+                _chartCanvas.Children.Add(areaPath);
+
+                PathGeometry strokeGeo = new PathGeometry();
+                strokeGeo.Figures.Add(strokeFig);
+                Shapes.Path linePath = new Shapes.Path
+                {
+                    Data = strokeGeo,
+                    Stroke = strokeBrush,
+                    StrokeThickness = 2.0,
+                    StrokeLineJoin = PenLineJoin.Round
                 };
-                Canvas.SetLeft(bar, bx);
-                Canvas.SetTop(bar, by);
-                _chartCanvas.Children.Add(bar);
+                _chartCanvas.Children.Add(linePath);
 
-                Border hit = new Border
+                // 数据点圆点（单日选中态高亮放大）
+                if (n <= 45 || _selectedDate != null)
                 {
-                    Width = Math.Max(barW, slotW),
+                    for (int i = 0; i < n; i++)
+                    {
+                        bool isLockedDay = (_selectedDate != null && string.Equals(_currentDailyAsc[i].Date, _selectedDate, StringComparison.Ordinal));
+                        if (n > 45 && !isLockedDay) continue;
+
+                        double rSize = isLockedDay ? 8.0 : 5.0;
+                        Shapes.Ellipse dot = new Shapes.Ellipse
+                        {
+                            Width = rSize,
+                            Height = rSize,
+                            Fill = isLockedDay ? DesignSystem.BrushHex("#F59E0B") : strokeBrush
+                        };
+                        Canvas.SetLeft(dot, pts[i].X - rSize * 0.5);
+                        Canvas.SetTop(dot, pts[i].Y - rSize * 0.5);
+                        _chartCanvas.Children.Add(dot);
+                    }
+                }
+            }
+            else
+            {
+                // 圆角细柱图（或仅 1 天数据时的优雅柱状展示）
+                double gap = n > 45 ? 1.5 : (n > 20 ? 3.0 : 5.0);
+                double barW = Math.Max(2.5, Math.Min(26.0, slotW - gap));
+
+                for (int i = 0; i < n; i++)
+                {
+                    DailyRowView d = _currentDailyAsc[i];
+                    bool isLockedDay = (_selectedDate != null && string.Equals(d.Date, _selectedDate, StringComparison.Ordinal));
+                    double bh = Math.Max(2.5, (topPad + plotH) - pts[i].Y);
+                    double bx = pts[i].X - barW * 0.5;
+                    double by = topPad + plotH - bh;
+
+                    Border bar = new Border
+                    {
+                        Width = barW,
+                        Height = bh,
+                        CornerRadius = new CornerRadius(Math.Min(4.0, barW * 0.45), Math.Min(4.0, barW * 0.45), 0, 0),
+                        Background = isLockedDay ? DesignSystem.BrushHex("#F59E0B") : barBrush,
+                        Opacity = (_selectedDate != null && !isLockedDay) ? 0.45 : 1.0
+                    };
+                    Canvas.SetLeft(bar, bx);
+                    Canvas.SetTop(bar, by);
+                    _chartCanvas.Children.Add(bar);
+                }
+            }
+
+            // X 轴自适应稀疏日期标签（零重叠）
+            int labelStep = Math.Max(1, (int)Math.Ceiling(n / Math.Max(2.0, Math.Floor(plotW / 66.0))));
+            for (int i = 0; i < n; i++)
+            {
+                if (i != 0 && i != n - 1 && (i % labelStep != 0))
+                    continue;
+                if (i != n - 1 && (n - 1 - i) < Math.Max(1, labelStep / 2))
+                    continue;
+
+                string rawDate = _currentDailyAsc[i].Date ?? "";
+                string shortDate = rawDate.Length >= 10 ? rawDate.Substring(5) : rawDate;
+                TextBlock xLbl = new TextBlock
+                {
+                    Text = shortDate,
+                    FontFamily = DesignSystem.FontMono,
+                    FontSize = 10.0,
+                    Foreground = axisTextBrush
+                };
+                Canvas.SetLeft(xLbl, Math.Max(leftPad, Math.Min(w - 38.0, pts[i].X - 16.0)));
+                Canvas.SetTop(xLbl, topPad + plotH + 5.0);
+                _chartCanvas.Children.Add(xLbl);
+            }
+
+            // 全宽透明命中柱：悬停显示十字准星与跟随卡片，左键点击按单日钻取过滤！
+            for (int i = 0; i < n; i++)
+            {
+                DailyRowView capturedDay = _currentDailyAsc[i];
+                Point capturedPt = pts[i];
+                double hitX = leftPad + slotW * i;
+
+                Border hitCol = new Border
+                {
+                    Width = Math.Max(4.0, slotW),
                     Height = plotH,
                     Background = Brushes.Transparent,
                     Cursor = Cursors.Hand
                 };
-                hit.ToolTip = string.Format(
-                    CultureInfo.InvariantCulture,
-                    "{0}\n等效花费: {1} ({2})\n总 Token: {3}  (请求 {4} 次)\n新增输入: {5}  |  缓存读: {6}  |  输出: {7}",
-                    d.Date,
-                    d.CnyText,
-                    d.UsdText,
-                    d.TotalTokensText,
-                    d.Turns,
-                    d.FreshInputText,
-                    d.CacheReadText,
-                    d.OutputText);
+                Canvas.SetLeft(hitCol, hitX);
+                Canvas.SetTop(hitCol, topPad);
 
-                DailyRowView captured = d;
-                Border capturedBar = bar;
-                hit.MouseEnter += delegate(object s, MouseEventArgs e)
+                hitCol.MouseEnter += delegate(object s, MouseEventArgs e)
                 {
-                    capturedBar.Background = hoverGrad;
-                    _trendHoverText.Text = string.Format(
-                        CultureInfo.InvariantCulture,
-                        "{0}  ·  {1}  ·  {2} Tokens  ·  {3} 次请求",
-                        captured.Date,
-                        _isCny ? captured.CnyText : captured.UsdText,
-                        captured.TotalTokensText,
-                        captured.Turns);
+                    ShowChartCrosshair(capturedDay, capturedPt.X, capturedPt.Y, topPad, plotH, w);
                 };
-                hit.MouseLeave += delegate(object s, MouseEventArgs e)
+                hitCol.MouseMove += delegate(object s, MouseEventArgs e)
                 {
-                    capturedBar.Background = barGrad;
+                    ShowChartCrosshair(capturedDay, capturedPt.X, capturedPt.Y, topPad, plotH, w);
                 };
-
-                Canvas.SetLeft(hit, leftPad + slotW * i);
-                Canvas.SetTop(hit, topPad);
-                _chartCanvas.Children.Add(hit);
-            }
-
-            int[] tickIdx = n == 1 ? new int[] { 0 } : (n == 2 ? new int[] { 0, 1 } : new int[] { 0, n / 2, n - 1 });
-            for (int t = 0; t < tickIdx.Length; t++)
-            {
-                int idx = tickIdx[t];
-                TextBlock xl = new TextBlock
+                hitCol.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
                 {
-                    Text = _currentDailyAsc[idx].Date,
-                    FontSize = 10.2,
-                    Foreground = lblBrush
-                };
-                double lx = leftPad + slotW * idx + slotW * 0.5 - 30.0;
-                if (lx < leftPad) lx = leftPad;
-                if (lx > leftPad + plotW - 62.0) lx = leftPad + plotW - 62.0;
-                Canvas.SetLeft(xl, lx);
-                Canvas.SetTop(xl, topPad + plotH + 4.0);
-                _chartCanvas.Children.Add(xl);
-            }
-        }
-
-        // -------------------- Dialog & Menu Handlers --------------------
-        private void OpenSyncDialog(int initialTab)
-        {
-            bool prevWsl = _syncCfg.ScanLocalWsl;
-            SyncWindow dlg = new SyncWindow(this, _syncCfg, _scanResult, delegate(SyncOutcome outcome)
-            {
-                _localNode = SyncService.BuildLocalSnapshot(_scanResult, _syncCfg);
-                if (outcome != null)
-                {
-                    _remoteNodes = outcome.RemoteNodes ?? SyncService.LoadCachedRemoteNodes(_syncCfg.MachineId);
-                    _lastSyncStatus = outcome.Success
-                        ? ("已同步 " + DateTime.Now.ToString("HH:mm", CultureInfo.InvariantCulture))
-                        : "同步异常";
-                }
-                else
-                {
-                    _remoteNodes = SyncService.LoadCachedRemoteNodes(_syncCfg.MachineId);
-                }
-                UpdateCloudStatusUi();
-
-                if (_syncCfg.ScanLocalWsl != prevWsl)
-                {
-                    prevWsl = _syncCfg.ScanLocalWsl;
-                    RunSilentScanAsync(_homeDir, false, true);
-                }
-                else
-                {
+                    _selectedDate = (_selectedDate != null && string.Equals(_selectedDate, capturedDay.Date, StringComparison.Ordinal))
+                        ? null
+                        : capturedDay.Date;
                     RefreshDashboardView();
-                }
-            }, initialTab);
-            dlg.ShowDialog();
-        }
+                };
 
-        private void OnChooseDirectoryClick(object sender, RoutedEventArgs e)
-        {
-            using (WinForms.FolderBrowserDialog dlg = new WinForms.FolderBrowserDialog())
-            {
-                dlg.Description = "请选择要扫描的 Windows 用户主目录（例如 C:\\Users\\YourName）";
-                dlg.SelectedPath = _homeDir;
-                dlg.ShowNewFolderButton = false;
-                if (dlg.ShowDialog() == WinForms.DialogResult.OK && !string.IsNullOrWhiteSpace(dlg.SelectedPath))
-                {
-                    _homeDir = dlg.SelectedPath;
-                    _selectedTool = null;
-                    RebuildDirectoryWatchers(_homeDir);
-                    RunSilentScanAsync(_homeDir, false, true);
-                }
+                _chartCanvas.Children.Add(hitCol);
             }
         }
 
-        private void OnOpenWebReportClick(object sender, RoutedEventArgs e)
+        // -------------------- 报表导出与系统交互（全流程 ToastManager 非阻塞通知，零 MessageBox） --------------------
+        private void ExportAndOpenHtmlReport()
         {
-            if (_scanResult == null) return;
             try
             {
-                string reportPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "TokLens_Report.html");
-                HtmlExporter.ExportHtmlReport(GetAllMergedRecords(), _scanResult, _usdToCny, reportPath);
-                ProcessStartInfo psi = new ProcessStartInfo(reportPath);
-                psi.UseShellExecute = true;
-                Process.Start(psi);
+                string fileName = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "TokLens_Report_{0}.html",
+                    DateTime.Now.ToString("yyyyMMdd_HHmmss", CultureInfo.InvariantCulture));
+                string outDir = Path.Combine(SyncService.AppConfigDir, "exports");
+                Directory.CreateDirectory(outDir);
+                string outPath = Path.Combine(outDir, fileName);
+
+                HtmlExporter.ExportHtmlReport(_latestExportBuckets, _scanResult, _usdToCny, outPath);
+                try { Process.Start(new ProcessStartInfo(outPath) { UseShellExecute = true }); } catch { }
+
+                if (_toastManager != null)
+                {
+                    _toastManager.ShowWithAction(
+                        "交互式网页看板已生成",
+                        fileName,
+                        "success",
+                        "打开所在文件夹",
+                        delegate() { OpenInExplorerSelect(outPath); });
+                }
             }
             catch (Exception ex)
             {
-                MessageBox.Show(this, "生成网页报告失败：" + ex.Message, "知微 · TokLens", MessageBoxButton.OK, MessageBoxImage.Warning);
+                ShowToastSafe("导出 HTML 看板失败", ex.Message, "danger");
             }
         }
 
-        private void OnExportCsvClick(object sender, RoutedEventArgs e)
+        private void ExportCsvWithDialog()
         {
-            if (_scanResult == null) return;
-            using (WinForms.SaveFileDialog sfd = new WinForms.SaveFileDialog())
-            {
-                sfd.Title = "导出多设备 Token 账单明细 CSV";
-                sfd.Filter = "CSV 表格文件 (*.csv)|*.csv";
-                sfd.FileName = "TokLens_多端Token账单_" + DateTime.Now.ToString("yyyyMMdd_HHmm", CultureInfo.InvariantCulture) + ".csv";
-                if (sfd.ShowDialog() == WinForms.DialogResult.OK && !string.IsNullOrWhiteSpace(sfd.FileName))
-                {
-                    try
-                    {
-                        FormatterUtil.ExportCsv(GetAllMergedRecords(), _usdToCny, sfd.FileName);
-                        MessageBox.Show(this, "多设备 CSV 账单明细已导出至：\n" + sfd.FileName, "导出成功 · 知微 TokLens", MessageBoxButton.OK, MessageBoxImage.Information);
-                    }
-                    catch (Exception ex)
-                    {
-                        MessageBox.Show(this, "导出 CSV 失败：" + ex.Message, "知微 · TokLens", MessageBoxButton.OK, MessageBoxImage.Error);
-                    }
-                }
-            }
-        }
-
-        private int FindPresetRangeIndex(int days)
-        {
-            for (int i = 0; i < PresetRangeDays.Length; i++)
-            {
-                if (PresetRangeDays[i] == days) return i;
-            }
-            return -1;
-        }
-
-        private void OnShowArchiveProtectionStatusClick(object sender, RoutedEventArgs e)
-        {
-            string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-            string resolvedDbPath = string.IsNullOrEmpty(appData)
-                ? @"%APPDATA%\TokLens\toklens.db"
-                : System.IO.Path.Combine(System.IO.Path.Combine(appData, "TokLens"), "toklens.db");
-            bool dbExists = false;
-            long dbBytes = 0L;
             try
             {
-                if (!string.IsNullOrEmpty(appData) && File.Exists(resolvedDbPath))
+                using (WinForms.SaveFileDialog sfd = new WinForms.SaveFileDialog())
                 {
-                    dbExists = true;
-                    dbBytes = new FileInfo(resolvedDbPath).Length;
+                    sfd.Title = "导出多设备 AI Token 财务对账明细 (.csv)";
+                    sfd.Filter = "CSV 表格文件 (*.csv)|*.csv";
+                    sfd.FileName = string.Format(
+                        CultureInfo.InvariantCulture,
+                        "TokLens_Billing_{0}.csv",
+                        DateTime.Now.ToString("yyyyMMdd_HHmm", CultureInfo.InvariantCulture));
+
+                    if (sfd.ShowDialog() == WinForms.DialogResult.OK && !string.IsNullOrWhiteSpace(sfd.FileName))
+                    {
+                        string outPath = sfd.FileName;
+                        FormatterUtil.ExportCsv(_latestExportBuckets, _usdToCny, outPath);
+                        if (_toastManager != null)
+                        {
+                            _toastManager.ShowWithAction(
+                                "CSV 财务明细导出成功",
+                                Path.GetFileName(outPath),
+                                "success",
+                                "打开所在文件夹",
+                                delegate() { OpenInExplorerSelect(outPath); });
+                        }
+                    }
                 }
             }
-            catch { }
-
-            int activeFiles = _scanResult != null ? _scanResult.TotalFilesTracked : 0;
-            int archivedFiles = _scanResult != null ? _scanResult.ArchivedFilesCount : 0;
-            string dbStatusNote = dbExists
-                ? string.Format(CultureInfo.InvariantCulture, "（已就绪，约 {0:F1} KB）", dbBytes / 1024.0)
-                : "（首次扫描完成后自动生成）";
-
-            string syncStateText;
-            if (_syncCfg != null && _syncCfg.IsConfigured)
+            catch (Exception ex)
             {
-                string ch = string.Equals(_syncCfg.Provider, "webdav", StringComparison.OrdinalIgnoreCase)
-                    ? "WebDAV 网盘"
-                    : "GitHub 私有 Gist";
-                syncStateText = "已激活（通道：" + ch + "）";
+                ShowToastSafe("导出 CSV 失败", ex.Message, "danger");
+            }
+        }
+
+        private void ExportJsonWithDialog()
+        {
+            try
+            {
+                using (WinForms.SaveFileDialog sfd = new WinForms.SaveFileDialog())
+                {
+                    sfd.Title = "导出脱敏账单汇总快照 (.json)";
+                    sfd.Filter = "JSON 文件 (*.json)|*.json";
+                    sfd.FileName = string.Format(
+                        CultureInfo.InvariantCulture,
+                        "TokLens_Summary_{0}.json",
+                        DateTime.Now.ToString("yyyyMMdd_HHmm", CultureInfo.InvariantCulture));
+
+                    if (sfd.ShowDialog() == WinForms.DialogResult.OK && !string.IsNullOrWhiteSpace(sfd.FileName))
+                    {
+                        string outPath = sfd.FileName;
+                        WriteMergedSummaryJson(
+                            _scanResult,
+                            _latestExportBuckets,
+                            Math.Max(1, _latestMachineViews.Count),
+                            _usdToCny,
+                            _fxSource,
+                            outPath);
+
+                        if (_toastManager != null)
+                        {
+                            _toastManager.ShowWithAction(
+                                "JSON 脱敏汇总导出成功",
+                                Path.GetFileName(outPath),
+                                "success",
+                                "打开所在文件夹",
+                                delegate() { OpenInExplorerSelect(outPath); });
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ShowToastSafe("导出 JSON 失败", ex.Message, "danger");
+            }
+        }
+
+        internal static void WriteMergedSummaryJson(
+            ScanResult localScan,
+            List<RecordBucket> mergedRows,
+            int deviceCount,
+            double rate,
+            string rateSource,
+            string outPath)
+        {
+            ScanResult synthetic = new ScanResult();
+            if (localScan != null)
+            {
+                synthetic.UserHome = localScan.UserHome;
+                synthetic.GeneratedAt = localScan.GeneratedAt;
+                synthetic.ReferenceDate = localScan.ReferenceDate;
+                synthetic.PricingModelCount = localScan.PricingModelCount;
+                synthetic.ElapsedSeconds = localScan.ElapsedSeconds;
+                synthetic.ChangedFilesCount = localScan.ChangedFilesCount;
+                synthetic.TotalFilesTracked = localScan.TotalFilesTracked;
+                synthetic.ArchivedFilesCount = localScan.ArchivedFilesCount;
+                synthetic.RecentRequests = localScan.RecentRequests;
+                if (localScan.Warnings != null)
+                    synthetic.Warnings.AddRange(localScan.Warnings);
             }
             else
             {
-                syncStateText = "未配置（可在顶部「多端同步」中开启跨重装云端高水位保护）";
+                synthetic.GeneratedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+                synthetic.ReferenceDate = DateTime.Now.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
             }
 
-            string msg = string.Format(
-                CultureInfo.InvariantCulture,
-                "【双层历史账单防清理持久归档：已启用】\n\n" +
-                "1. 本机 SQLite 游标与按日高水位库\n" +
-                "   • 库路径：%APPDATA%\\TokLens\\toklens.db\n" +
-                "   • 实际位置：{0} {1}\n" +
-                "   • 当前跟踪活跃文件数：{2:N0} 个\n" +
-                "   • 已保护的被清理历史文件数：{3:N0} 个\n\n" +
-                "2. 云端 Gist / WebDAV 高水位合并保护\n" +
-                "   • 多端同步状态：{4}\n" +
-                "   • 保护机制：电脑或 Linux VPS（~/.toklens/ledger.db）定期清理会话日志、清空缓存，甚至彻底重装电脑操作系统，本地归档库与云端高水位合并（High-Water-Mark）均会完整保留已入库与已同步的历史账单，永不归零。",
-                resolvedDbPath,
-                dbStatusNote,
-                activeFiles,
-                archivedFiles,
-                syncStateText);
+            synthetic.Records = mergedRows ?? new List<RecordBucket>();
+            FormatterUtil.ExportSummaryJson(synthetic, rate, rateSource, outPath);
 
-            MessageBox.Show(
-                this,
-                msg,
-                "防清理归档保护状态 — 知微 · TokLens",
-                MessageBoxButton.OK,
-                MessageBoxImage.Information);
+            // 补充 v2.2 产品版本号与多设备节点计数元数据
+            try
+            {
+                JavaScriptSerializer js = new JavaScriptSerializer();
+                js.MaxJsonLength = int.MaxValue;
+                Dictionary<string, object> dict = js.DeserializeObject(File.ReadAllText(outPath, Encoding.UTF8)) as Dictionary<string, object>;
+                if (dict != null)
+                {
+                    dict["app"] = AppConstants.ProductTitle;
+                    dict["version"] = AppConstants.VersionTag;
+                    dict["device_count"] = Math.Max(1, deviceCount);
+                    File.WriteAllText(outPath, js.Serialize(dict), new UTF8Encoding(false));
+                }
+            }
+            catch { }
         }
 
-        private void OnToggleThemeClick(object sender, RoutedEventArgs e)
+        private static void OpenInExplorerSelect(string filePath)
         {
-            _isDark = !_isDark;
-            if (_themeMenuItem != null)
-                _themeMenuItem.Header = _isDark ? "切换为浅色主题" : "切换为深色主题";
-            ApplyThemeResources();
-            UpdateSegVisuals(_rangeBtns, FindPresetRangeIndex(_rangeDays));
-            UpdateSegVisuals(_currencyBtns, _isCny ? 0 : 1);
-            UpdateSegVisuals(_leftModeBtns, _leftRankByMachine ? 1 : 0);
-            UpdateSegVisuals(_metricBtns, _rankByCost ? 0 : 1);
-            UpdateSegVisuals(_tabBtns, _activeTab == 4 ? -1 : _activeTab);
-            RefreshDashboardView();
+            if (string.IsNullOrWhiteSpace(filePath)) return;
+            try
+            {
+                if (File.Exists(filePath))
+                {
+                    Process.Start(new ProcessStartInfo("explorer.exe", "/select,\"" + filePath + "\"") { UseShellExecute = true });
+                    return;
+                }
+                string dir = Directory.Exists(filePath) ? filePath : Path.GetDirectoryName(filePath);
+                if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir))
+                {
+                    Process.Start(new ProcessStartInfo("explorer.exe", "\"" + dir + "\"") { UseShellExecute = true });
+                }
+            }
+            catch { }
+        }
+
+        private void ShowToastSafe(string title, string detail, string variant)
+        {
+            if (_toastManager == null) return;
+            try
+            {
+                _toastManager.Show(title, detail, string.IsNullOrEmpty(variant) ? "info" : variant);
+            }
+            catch { }
+        }
+
+        private static bool TrySetClipboardText(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return false;
+            try
+            {
+                Clipboard.SetDataObject(text, true);
+                return true;
+            }
+            catch
+            {
+                try
+                {
+                    WinForms.Clipboard.SetText(text);
+                    return true;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+        }
+
+        // -------------------- 专项引擎同步、命令面板、桌面胶囊 HUD、时光机与多格式导出 --------------------
+        private void RefreshActiveSpecialistView(bool fromDataRefresh)
+        {
+            try
+            {
+                List<RecordBucket> machineRows = _latestSpecialistMachineRows ?? new List<RecordBucket>();
+                List<RecordBucket> activeRows = _latestSpecialistActiveRows ?? new List<RecordBucket>();
+                List<RecentRequestRecord> recentList = (_scanResult != null && _scanResult.RecentRequests != null)
+                    ? _scanResult.RecentRequests
+                    : new List<RecentRequestRecord>();
+
+                if (_activeView == ViewProjects && _projectView != null)
+                {
+                    PricingEngine pe = new PricingEngine(_homeDir);
+                    _projectView.RefreshAttribution(machineRows, pe, _isCny, _usdToCny, _isDark);
+                }
+                else if (_activeView == ViewInsights && _insightsView != null)
+                {
+                    List<RecordBucket> insightsRows = _latestFullHistoryMachineRows ?? machineRows;
+                    _insightsView.RenderInsights(insightsRows, recentList, _isCny, _usdToCny, _isDark, _latestReferenceDate);
+                }
+                else if (_activeView == ViewWhatIf && _whatIfView != null)
+                {
+                    PricingEngine pe = new PricingEngine(_homeDir);
+                    List<RecordBucket> whatIfRows = _latestFullHistoryScopedRows ?? activeRows;
+                    _whatIfView.RenderSimulator(whatIfRows, pe, _isCny, _usdToCny, _isDark);
+                }
+                else if (_activeView == ViewBloat && _bloatView != null)
+                {
+                    _bloatView.RenderBloatAnalysis(activeRows, recentList, _isCny, _usdToCny, _isDark);
+                }
+                else if (_activeView == ViewDoctor && _doctorView != null)
+                {
+                    if (_skipAutoScan)
+                    {
+                        _doctorView.RenderReport(new SystemHealthReport(), _isDark);
+                    }
+                    else if (!_doctorLoadedOnce || !fromDataRefresh)
+                    {
+                        _doctorLoadedOnce = true;
+                        _doctorView.RefreshDoctor(_isDark);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private void OpenCommandPalette()
+        {
+            if (_commandPalette == null) return;
+            if (_commandPalette.IsOpen)
+            {
+                _commandPalette.Close();
+                return;
+            }
+
+            List<PaletteCommandItem> items = new List<PaletteCommandItem>(28);
+
+            // 1. 十一大旗舰视图跳转
+            items.Add(new PaletteCommandItem("nav-overview", "视图导航", "跳转至：概览看板", "四维 Bento KPI、消耗构成排行与平滑趋势图", "Ctrl+1", UiIcons.Overview, delegate() { SwitchActiveView(ViewOverview); }));
+            items.Add(new PaletteCommandItem("nav-live", "视图导航", "跳转至：实时请求流与单笔透视", "实时捕获单笔 API 耗时、TPS 与右侧计费瀑布流抽屉", "Ctrl+2", UiIcons.Activity, delegate() { SwitchActiveView(ViewLiveStream); }));
+            items.Add(new PaletteCommandItem("nav-models", "视图导航", "跳转至：模型与工具账单", "多色堆叠分布、百万输入单价排序与自定义费率覆盖", "Ctrl+3", UiIcons.Models, delegate() { SwitchActiveView(ViewModels); }));
+            items.Add(new PaletteCommandItem("nav-projects", "视图导航", "跳转至：项目与工作区归因雷达", "本机离线解析各代码仓库与 IDE 工作区算力投入", "Ctrl+4", UiIcons.Folder, delegate() { SwitchActiveView(ViewProjects); }));
+            items.Add(new PaletteCommandItem("nav-insights", "视图导航", "跳转至：智算洞察与 FinOps 中心", "2026 订阅回本等效评估矩阵、365 天热力图与昼夜节律", "Ctrl+5", UiIcons.Sparkles, delegate() { SwitchActiveView(ViewInsights); }));
+            items.Add(new PaletteCommandItem("nav-whatif", "视图导航", "跳转至：模型平替成本模拟器", "基于历史真实四维 Token 画像推演跨模型平替差价", "Ctrl+6", UiIcons.Swap, delegate() { SwitchActiveView(ViewWhatIf); }));
+            items.Add(new PaletteCommandItem("nav-bloat", "视图导航", "跳转至：上下文膨胀显微镜", "诊断长对话滚雪球膨胀与低缓存命中异常会话", "Ctrl+7", UiIcons.Layers, delegate() { SwitchActiveView(ViewBloat); }));
+            items.Add(new PaletteCommandItem("nav-devices", "视图导航", "跳转至：设备与 Linux/macOS 集群", "跨 Windows / Linux VPS / macOS 节点状态与账单对比", "Ctrl+8", UiIcons.Devices, delegate() { SwitchActiveView(ViewDevices); }));
+            items.Add(new PaletteCommandItem("nav-daily", "视图导航", "跳转至：每日流水与多格式导出", "含缓存写入对账列的完整日流水与 7 种报表导出", "Ctrl+9", UiIcons.Calendar, delegate() { SwitchActiveView(ViewDailyExport); }));
+            items.Add(new PaletteCommandItem("nav-doctor", "视图导航", "跳转至：AI 环境体检医生", "一键巡检 26 项本地 AI 工具、WSL2 与 GitHub CLI 状态", "Ctrl+0", UiIcons.Doctor, delegate() { SwitchActiveView(ViewDoctor); }));
+            items.Add(new PaletteCommandItem("nav-settings", "视图导航", "跳转至：同步与设置", "GitHub Gist / WebDAV 同步、一键配对码与系统偏好", "Ctrl+,", UiIcons.Settings, delegate() { SwitchActiveView(ViewSettings); }));
+
+            // 2. 效率工具与工作台
+            items.Add(new PaletteCommandItem("tool-hud", "桌面工作台", "显示 / 隐藏桌面置顶微胶囊 HUD", "Dynamic Island 风格高颜值置顶悬浮窗，穿透与透明度可调", "Ctrl+M", UiIcons.Capsule, delegate() { ToggleMiniHudWindow(); }));
+            items.Add(new PaletteCommandItem("tool-pricing", "桌面工作台", "打开模型单价与自定义费率工作台", "浏览 1500+ 云端模型单价或配置私有中转 custom_prices.json", "", UiIcons.Models, delegate() { OpenPricingStudioDialog(null); }));
+            items.Add(new PaletteCommandItem("tool-token-guide", "帮助与排障", "为什么家里和单位自动读取的 gh 令牌不一样？", "深度图解 GitHub 设备独立 OAuth 令牌 (gho_...) 与同账号 Gist 汇聚原理", "F1", UiIcons.Key, delegate() { OpenShortcutAndGuideDialog(1); }));
+            items.Add(new PaletteCommandItem("tool-shortcuts", "帮助与排障", "打开全局键盘快捷键速查表", "双列键盘速查矩阵，支持全键盘流极速操控", "F1", UiIcons.Help, delegate() { OpenShortcutAndGuideDialog(0); }));
+            items.Add(new PaletteCommandItem("tool-scan", "数据与同步", "立即增量扫描本地日志并触发多端同步", "毫秒级 SQLite 字节偏移游标增量重扫 + 实时汇率同步", "F5", UiIcons.Refresh, delegate() { RunSilentScanAsync(_homeDir, true, true); StartExchangeRateSyncAsync(false); }));
+            items.Add(new PaletteCommandItem("tool-backup-now", "数据与同步", "立即创建本地时光机压缩快照 (.toklens.gz)", "将本机与缓存多节点高水位账本安全归档至 backups 目录", "", UiIcons.History, delegate() { CreateManualTimeMachineSnapshot(); }));
+            items.Add(new PaletteCommandItem("tool-theme", "界面偏好", _isDark ? "切换至浅色主题 (Paper Zinc)" : "切换至深色主题 (Obsidian Zinc)", "实时联动 Windows 11 DWM 沉浸式标题栏与悬浮胶囊", "", _isDark ? UiIcons.Sun : UiIcons.Moon, delegate() { ToggleThemeFromUi(); }));
+            items.Add(new PaletteCommandItem("tool-currency", "界面偏好", _isCny ? "切换为美元计价 ($ USD)" : "切换为人民币计价 (¥ CNY)", "全局 KPI、图表、模型表与单笔透视同步切换", "", UiIcons.Swap, delegate()
+            {
+                _isCny = !_isCny;
+                if (_syncCfg != null) { _syncCfg.PreferCny = _isCny; SyncService.SaveConfig(_syncCfg); }
+                ModernControlsFactory.UpdateSegmentedGroup(_currencyBtns, _isCny ? 0 : 1);
+                RefreshDashboardView();
+                if (_settingsView != null) _settingsView.ReloadFromConfig();
+            }));
+
+            // 3. 七大导出与分享动作
+            items.Add(new PaletteCommandItem("exp-html", "报表与分享", "导出并打开交互式网页看板 (.html)", "独立单文件离线 HTML 报表", "Ctrl+E", UiIcons.ExternalLink, delegate() { ExportAndOpenHtmlReport(); }));
+            items.Add(new PaletteCommandItem("exp-md", "报表与分享", "导出 FinOps 深度财务战报 (.md)", "原生 GitHub GFM 表格与 ASCII 趋势图", "", UiIcons.Sparkles, delegate() { ExportMarkdownWithDialog(); }));
+            items.Add(new PaletteCommandItem("exp-svg-poster", "报表与分享", "导出极客算力分享海报 (.svg)", "840×460 矢量高清 Bento 分享卡", "", UiIcons.Layers, delegate() { ExportSvgPosterWithDialog(); }));
+            items.Add(new PaletteCommandItem("exp-svg-badge", "报表与分享", "导出 GitHub README 算力徽章 (.svg)", "Shields.io 扁平风格个人主页动态徽章", "", UiIcons.Models, delegate() { ExportReadmeBadgeWithDialog(); }));
+            items.Add(new PaletteCommandItem("exp-clip", "报表与分享", "复制纯文本极客战报卡到剪贴板", "直接粘贴发送至飞书 / 企微 / Slack", "", UiIcons.Copy, delegate() { CopyPlainShareCardToClipboard(); }));
+            items.Add(new PaletteCommandItem("exp-csv", "报表与分享", "导出多设备 CSV 财务对账单 (.csv)", "UTF-8 BOM 编码，Excel 直开零乱码", "Ctrl+S", UiIcons.Download, delegate() { ExportCsvWithDialog(); }));
+            items.Add(new PaletteCommandItem("exp-json", "报表与分享", "导出脱敏账单汇总快照 (.json)", "100% 聚合指标，零提示词正文泄露", "", UiIcons.Shield, delegate() { ExportJsonWithDialog(); }));
+
+            _commandPalette.Open(items);
+        }
+
+        private void EnsureMiniHudCreated()
+        {
+            if (_miniHud != null) return;
+            _miniHud = new MiniHudWindow(
+                _isDark,
+                delegate()
+                {
+                    RestoreAndActivateFromTray();
+                },
+                delegate()
+                {
+                    RunSilentScanAsync(_homeDir, true, true);
+                });
+
+            bool overBudget = (_syncCfg != null && _syncCfg.DailyBudgetUsd > 0.0 && _latestTodayUsd >= _syncCfg.DailyBudgetUsd);
+            _miniHud.UpdateTelemetry(
+                FormatterUtil.FormatMoney(_latestTodayUsd, _isCny, _usdToCny),
+                FormatterUtil.FormatTokens(_latestTodayTokens),
+                _latestHudModelTps,
+                true,
+                overBudget);
+        }
+
+        private void ToggleMiniHudWindow()
+        {
+            if (_skipAutoScan) return;
+            try
+            {
+                EnsureMiniHudCreated();
+                if (_miniHud.IsVisible)
+                {
+                    _miniHud.Hide();
+                    if (_trayHudToggleItem != null)
+                        _trayHudToggleItem.Checked = false;
+                }
+                else
+                {
+                    _miniHud.SetTheme(_isDark);
+                    _miniHud.Show();
+                    if (_trayHudToggleItem != null)
+                        _trayHudToggleItem.Checked = true;
+                }
+            }
+            catch (Exception ex)
+            {
+                ShowToastSafe("切换桌面悬浮胶囊失败", ex.Message, "warning");
+            }
+        }
+
+        private void OnGlobalHotkeyTriggered()
+        {
+            if (!IsVisible || WindowState == WindowState.Minimized)
+            {
+                RestoreAndActivateFromTray();
+            }
+            else if (!IsActive)
+            {
+                RestoreAndActivateFromTray();
+            }
+            else
+            {
+                ToggleMiniHudWindow();
+            }
+        }
+
+        private void OpenShortcutAndGuideDialog(int initialTabIndex)
+        {
+            if (_skipAutoScan) return;
+            try
+            {
+                ShortcutAndGuideWindow dlg = new ShortcutAndGuideWindow(this, _isDark, initialTabIndex);
+                dlg.ShowDialog();
+            }
+            catch (Exception ex)
+            {
+                ShowToastSafe("打开帮助指南失败", ex.Message, "warning");
+            }
+        }
+
+        private void OpenPricingStudioDialog(string initialModelId)
+        {
+            if (_skipAutoScan) return;
+            try
+            {
+                List<string> models = new List<string>();
+                if (!string.IsNullOrWhiteSpace(initialModelId))
+                    models.Add(initialModelId.Trim());
+                if (_latestUniqueModelNames != null)
+                {
+                    for (int i = 0; i < _latestUniqueModelNames.Count; i++)
+                        models.Add(_latestUniqueModelNames[i]);
+                }
+
+                PricingStudioWindow dlg = new PricingStudioWindow(
+                    this,
+                    _homeDir,
+                    _isDark,
+                    models,
+                    delegate()
+                    {
+                        try
+                        {
+                            PricingEngine pe = new PricingEngine(_homeDir);
+                            if (_scanResult != null && _scanResult.Records != null)
+                            {
+                                for (int i = 0; i < _scanResult.Records.Count; i++)
+                                {
+                                    RecordBucket rb = _scanResult.Records[i];
+                                    if (rb == null) continue;
+                                    double cost;
+                                    double baseline;
+                                    ModelRate mr;
+                                    pe.ComputeBucketCost(rb.Model, rb.Turns, rb.FreshInput, rb.Output, rb.CacheRead, rb.CacheWrite, 0.0, out cost, out baseline, out mr);
+                                    rb.CostUsd = cost;
+                                    rb.BaselineUsd = baseline;
+                                    rb.RateLabel = mr.Label;
+                                }
+                                _localNode = SyncService.BuildLocalSnapshot(_scanResult, _syncCfg);
+                                Program.ApplyNodeAliasToSnapshot(_localNode, _syncCfg);
+                            }
+                            _remoteNodes = LoadAndRecalculateRemoteNodes(_syncCfg.MachineId, _homeDir, _syncCfg);
+                        }
+                        catch { }
+
+                        UpdatePriceUiState(false);
+                        RefreshDashboardView();
+                        RunSilentScanAsync(_homeDir, true, false);
+                        ShowToastSafe("自定义模型单价已生效", "全站本地与远端节点等效账单已完成重算", "success");
+                    });
+                dlg.ShowDialog();
+            }
+            catch (Exception ex)
+            {
+                ShowToastSafe("打开模型单价工作台失败", ex.Message, "danger");
+            }
+        }
+
+        private void CreateManualTimeMachineSnapshot()
+        {
+            try
+            {
+                BackupArchiveInfo info = BackupAndMigrationService.CreateSnapshotBundle(null, true);
+                if (info != null && _toastManager != null)
+                {
+                    _toastManager.ShowWithAction(
+                        "时光机本地快照已生成",
+                        string.Format(CultureInfo.InvariantCulture, "{0} ({1}, {2} 节点)", info.FileName, info.SizeText, info.NodeCount),
+                        "success",
+                        "打开备份目录",
+                        delegate() { OpenInExplorerSelect(info.FilePath); });
+                }
+            }
+            catch (Exception ex)
+            {
+                ShowToastSafe("创建时光机备份失败", ex.Message, "danger");
+            }
+        }
+
+        private void OpenTimeMachineBackupPopover(UIElement anchor)
+        {
+            StackPanel sp = new StackPanel { Width = 368 };
+            Popup pop = null;
+
+            TextBlock hdr = new TextBlock
+            {
+                Text = "时光机账本备份与跨机迁移 (.toklens.gz)",
+                FontSize = 13,
+                FontWeight = FontWeights.SemiBold,
+                Margin = new Thickness(4, 2, 4, 4)
+            };
+            hdr.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            sp.Children.Add(hdr);
+
+            TextBlock desc = new TextBlock
+            {
+                Text = "每日启动自动保留最近 10 份高压缩无敏快照；支持高水位无损合并外部备份包或离线 VPS 节点快照，绝不冲掉更高历史账单。",
+                FontSize = 11.2,
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(4, 0, 4, 8)
+            };
+            desc.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            sp.Children.Add(desc);
+
+            StackPanel topBtns = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(4, 0, 4, 8) };
+            Button snapNowBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Plus, "立即生成快照", "primary");
+            snapNowBtn.Height = 28;
+            snapNowBtn.Margin = new Thickness(0, 0, 6, 0);
+            snapNowBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                if (pop != null) pop.IsOpen = false;
+                CreateManualTimeMachineSnapshot();
+            };
+            topBtns.Children.Add(snapNowBtn);
+
+            Button importBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Folder, "导入合并备份包...", "secondary");
+            importBtn.Height = 28;
+            importBtn.Margin = new Thickness(0, 0, 6, 0);
+            importBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                if (pop != null) pop.IsOpen = false;
+                ImportTimeMachineBundleWithDialog();
+            };
+            topBtns.Children.Add(importBtn);
+
+            Button openDirBtn = ModernControlsFactory.CreateButton("目录", "ghost");
+            openDirBtn.Height = 28;
+            openDirBtn.Click += delegate(object s, RoutedEventArgs e)
+            {
+                if (pop != null) pop.IsOpen = false;
+                try { Directory.CreateDirectory(BackupAndMigrationService.BackupsDir); } catch { }
+                OpenInExplorerSelect(BackupAndMigrationService.BackupsDir);
+            };
+            topBtns.Children.Add(openDirBtn);
+            sp.Children.Add(topBtns);
+
+            List<BackupArchiveInfo> backups = BackupAndMigrationService.ListLocalBackups();
+            if (backups != null && backups.Count > 0)
+            {
+                Border sep = new Border { Height = 1, Margin = new Thickness(4, 2, 4, 6) };
+                sep.SetResourceReference(Border.BackgroundProperty, "BorderSubtle");
+                sp.Children.Add(sep);
+
+                ScrollViewer sv = new ScrollViewer { MaxHeight = 196, VerticalScrollBarVisibility = ScrollBarVisibility.Auto };
+                StackPanel listSp = new StackPanel();
+                int take = Math.Min(6, backups.Count);
+                for (int i = 0; i < take; i++)
+                {
+                    BackupArchiveInfo bi = backups[i];
+                    Border rowBd = new Border
+                    {
+                        CornerRadius = new CornerRadius(6),
+                        Padding = new Thickness(8, 6, 8, 6),
+                        Margin = new Thickness(0, 0, 0, 3)
+                    };
+                    rowBd.SetResourceReference(Border.BackgroundProperty, "BgSurface");
+
+                    DockPanel rowDock = new DockPanel();
+                    Button restoreBtn = ModernControlsFactory.CreateButton("无损恢复", "secondary");
+                    restoreBtn.Height = 24;
+                    restoreBtn.FontSize = 11;
+                    restoreBtn.Padding = new Thickness(8, 0, 8, 0);
+                    string capturedPath = bi.FilePath;
+                    restoreBtn.Click += delegate(object s, RoutedEventArgs e)
+                    {
+                        if (pop != null) pop.IsOpen = false;
+                        ApplyTimeMachineImportPath(capturedPath);
+                    };
+                    DockPanel.SetDock(restoreBtn, Dock.Right);
+                    rowDock.Children.Add(restoreBtn);
+
+                    StackPanel metaCol = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+                    TextBlock t1 = new TextBlock { Text = bi.CreatedAtText, FontFamily = DesignSystem.FontMono, FontSize = 11.5, FontWeight = FontWeights.SemiBold };
+                    t1.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+                    metaCol.Children.Add(t1);
+
+                    TextBlock t2 = new TextBlock
+                    {
+                        Text = string.Format(CultureInfo.InvariantCulture, "{0} 台设备 · {1} 条记录 · {2}", bi.NodeCount, bi.RecordCount, bi.SizeText),
+                        FontSize = 10.5
+                    };
+                    t2.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+                    metaCol.Children.Add(t2);
+
+                    rowDock.Children.Add(metaCol);
+                    rowBd.Child = rowDock;
+                    listSp.Children.Add(rowBd);
+                }
+                sv.Content = listSp;
+                sp.Children.Add(sv);
+            }
+
+            pop = ModernControlsFactory.CreateModernPopover(anchor, sp);
+            pop.IsOpen = true;
+        }
+
+        private void ImportTimeMachineBundleWithDialog()
+        {
+            try
+            {
+                using (WinForms.OpenFileDialog ofd = new WinForms.OpenFileDialog())
+                {
+                    ofd.Title = "选择 TokLens 时光机备份包或节点快照进行高水位无损合并";
+                    ofd.Filter = "TokLens 备份与快照 (*.gz;*.json)|*.gz;*.json|所有文件 (*.*)|*.*";
+                    if (Directory.Exists(BackupAndMigrationService.BackupsDir))
+                        ofd.InitialDirectory = BackupAndMigrationService.BackupsDir;
+
+                    if (ofd.ShowDialog() == WinForms.DialogResult.OK && !string.IsNullOrWhiteSpace(ofd.FileName))
+                    {
+                        ApplyTimeMachineImportPath(ofd.FileName);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ShowToastSafe("导入备份包失败", ex.Message, "danger");
+            }
+        }
+
+        private void ApplyTimeMachineImportPath(string filePath)
+        {
+            try
+            {
+                PricingEngine pe = new PricingEngine(_homeDir);
+                string summary;
+                int mergedNodes = BackupAndMigrationService.ImportAndMergeSnapshotBundle(filePath, pe, out summary);
+                if (mergedNodes > 0)
+                {
+                    _syncCfg = SyncService.LoadConfig();
+                    _remoteNodes = LoadAndRecalculateRemoteNodes(_syncCfg.MachineId, _homeDir, _syncCfg);
+                    if (_scanResult != null)
+                    {
+                        _localNode = SyncService.BuildLocalSnapshot(_scanResult, _syncCfg);
+                        Program.ApplyNodeAliasToSnapshot(_localNode, _syncCfg);
+                    }
+                    if (_settingsView != null)
+                        _settingsView.ReloadFromConfig();
+                    RefreshDashboardView();
+                    ShowToastSafe("时光机高水位无损合并完成", summary, "success");
+                }
+                else
+                {
+                    ShowToastSafe("未能合并备份包", summary, "warning");
+                }
+            }
+            catch (Exception ex)
+            {
+                ShowToastSafe("恢复备份异常", ex.Message, "danger");
+            }
+        }
+
+        private void UpdateAutoStartButtonLabel()
+        {
+            if (_autoStartToggleBtn == null) return;
+            bool enabled = WindowsShellIntegration.IsAutoStartEnabled();
+            _autoStartToggleBtn.Content = enabled ? "开机自启: 开" : "开机自启: 关";
+        }
+
+        private void ToggleAutoStartFromUi()
+        {
+            bool cur = WindowsShellIntegration.IsAutoStartEnabled();
+            string msg;
+            bool ok = WindowsShellIntegration.SetAutoStartEnabled(!cur, out msg);
+            UpdateAutoStartButtonLabel();
+            ShowToastSafe(
+                ok ? (!cur ? "已开启登录静默自启" : "已关闭开机自启") : "开机自启设置失败",
+                msg,
+                ok ? "success" : "warning");
+        }
+
+        private void ExportMarkdownWithDialog()
+        {
+            try
+            {
+                using (WinForms.SaveFileDialog sfd = new WinForms.SaveFileDialog())
+                {
+                    sfd.Title = "导出 FinOps 深度财务战报 (.md)";
+                    sfd.Filter = "Markdown 文档 (*.md)|*.md";
+                    sfd.FileName = string.Format(
+                        CultureInfo.InvariantCulture,
+                        "TokLens_FinOps_Report_{0}.md",
+                        DateTime.Now.ToString("yyyyMMdd_HHmm", CultureInfo.InvariantCulture));
+
+                    if (sfd.ShowDialog() == WinForms.DialogResult.OK && !string.IsNullOrWhiteSpace(sfd.FileName))
+                    {
+                        string outPath = sfd.FileName;
+                        FinOpsReportExporter.ExportMarkdownFile(outPath, _latestExportBuckets, _isCny, _usdToCny);
+                        if (_toastManager != null)
+                        {
+                            _toastManager.ShowWithAction(
+                                "FinOps Markdown 战报已导出",
+                                Path.GetFileName(outPath),
+                                "success",
+                                "打开所在文件夹",
+                                delegate() { OpenInExplorerSelect(outPath); });
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ShowToastSafe("导出 Markdown 战报失败", ex.Message, "danger");
+            }
+        }
+
+        private void ExportSvgPosterWithDialog()
+        {
+            try
+            {
+                using (WinForms.SaveFileDialog sfd = new WinForms.SaveFileDialog())
+                {
+                    sfd.Title = "导出极客算力分享海报 (.svg)";
+                    sfd.Filter = "SVG 矢量海报 (*.svg)|*.svg";
+                    sfd.FileName = string.Format(
+                        CultureInfo.InvariantCulture,
+                        "TokLens_Poster_{0}.svg",
+                        DateTime.Now.ToString("yyyyMMdd_HHmm", CultureInfo.InvariantCulture));
+
+                    if (sfd.ShowDialog() == WinForms.DialogResult.OK && !string.IsNullOrWhiteSpace(sfd.FileName))
+                    {
+                        string outPath = sfd.FileName;
+                        SvgBadgeAndCardExporter.ExportSharePosterSvg(outPath, _latestExportBuckets, _rangeDays, _isCny, _usdToCny, _isDark);
+                        if (_toastManager != null)
+                        {
+                            _toastManager.ShowWithAction(
+                                "极客算力分享海报已生成",
+                                Path.GetFileName(outPath),
+                                "success",
+                                "打开所在文件夹",
+                                delegate() { OpenInExplorerSelect(outPath); });
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ShowToastSafe("导出 SVG 分享海报失败", ex.Message, "danger");
+            }
+        }
+
+        private void ExportReadmeBadgeWithDialog()
+        {
+            try
+            {
+                using (WinForms.SaveFileDialog sfd = new WinForms.SaveFileDialog())
+                {
+                    sfd.Title = "导出 GitHub README 个人主页算力徽章 (.svg)";
+                    sfd.Filter = "SVG 徽章文件 (*.svg)|*.svg";
+                    sfd.FileName = "toklens-badge.svg";
+
+                    if (sfd.ShowDialog() == WinForms.DialogResult.OK && !string.IsNullOrWhiteSpace(sfd.FileName))
+                    {
+                        string outPath = sfd.FileName;
+                        SvgBadgeAndCardExporter.ExportReadmeShieldSvg(outPath, _latestExportBuckets, _rangeDays, _isCny, _usdToCny);
+                        if (_toastManager != null)
+                        {
+                            _toastManager.ShowWithAction(
+                                "GitHub README 算力徽章已生成",
+                                Path.GetFileName(outPath),
+                                "success",
+                                "打开所在文件夹",
+                                delegate() { OpenInExplorerSelect(outPath); });
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                ShowToastSafe("导出 README 徽章失败", ex.Message, "danger");
+            }
+        }
+
+        private void CopyPlainShareCardToClipboard()
+        {
+            try
+            {
+                string card = FinOpsReportExporter.BuildClipboardShareCard(_latestExportBuckets, _isCny, _usdToCny);
+                if (TrySetClipboardText(card))
+                    ShowToastSafe("纯文本极客战报卡已复制", "可直接粘贴发送至飞书、企业微信、Slack 或社交媒体", "success");
+                else
+                    ShowToastSafe("复制战报卡失败", "系统剪贴板正被其他进程占用，请稍后重试", "warning");
+            }
+            catch (Exception ex)
+            {
+                ShowToastSafe("生成剪贴板战报失败", ex.Message, "danger");
+            }
+        }
+
+        // -------------------- 全局键盘快捷键支持 --------------------
+        private void OnMainWindowPreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (e == null) return;
+
+            ModifierKeys mods = Keyboard.Modifiers;
+            bool ctrlOnly = (mods == ModifierKeys.Control);
+
+            if (ctrlOnly && e.Key == Key.K)
+            {
+                e.Handled = true;
+                OpenCommandPalette();
+                return;
+            }
+
+            if (_commandPalette != null && _commandPalette.IsOpen)
+                return;
+
+            if (e.Key == Key.F1)
+            {
+                e.Handled = true;
+                OpenShortcutAndGuideDialog(0);
+                return;
+            }
+
+            if (e.Key == Key.OemQuestion && (mods == ModifierKeys.Shift || mods == ModifierKeys.None))
+            {
+                if (!(Keyboard.FocusedElement is TextBox) && !(Keyboard.FocusedElement is PasswordBox))
+                {
+                    e.Handled = true;
+                    OpenShortcutAndGuideDialog(0);
+                    return;
+                }
+            }
+
+            if (e.Key == Key.F5 || (ctrlOnly && e.Key == Key.R))
+            {
+                e.Handled = true;
+                RunSilentScanAsync(_homeDir, true, true);
+                StartExchangeRateSyncAsync(false);
+                ShowToastSafe("正在刷新本地与多端账单", "增量扫描已在后台触发", "info");
+                return;
+            }
+
+            if (ctrlOnly)
+            {
+                if (e.Key == Key.D1 || e.Key == Key.NumPad1) { e.Handled = true; SwitchActiveView(ViewOverview); return; }
+                if (e.Key == Key.D2 || e.Key == Key.NumPad2) { e.Handled = true; SwitchActiveView(ViewLiveStream); return; }
+                if (e.Key == Key.D3 || e.Key == Key.NumPad3) { e.Handled = true; SwitchActiveView(ViewModels); return; }
+                if (e.Key == Key.D4 || e.Key == Key.NumPad4) { e.Handled = true; SwitchActiveView(ViewProjects); return; }
+                if (e.Key == Key.D5 || e.Key == Key.NumPad5) { e.Handled = true; SwitchActiveView(ViewInsights); return; }
+                if (e.Key == Key.D6 || e.Key == Key.NumPad6) { e.Handled = true; SwitchActiveView(ViewWhatIf); return; }
+                if (e.Key == Key.D7 || e.Key == Key.NumPad7) { e.Handled = true; SwitchActiveView(ViewBloat); return; }
+                if (e.Key == Key.D8 || e.Key == Key.NumPad8) { e.Handled = true; SwitchActiveView(ViewDevices); return; }
+                if (e.Key == Key.D9 || e.Key == Key.NumPad9) { e.Handled = true; SwitchActiveView(ViewDailyExport); return; }
+                if (e.Key == Key.D0 || e.Key == Key.NumPad0) { e.Handled = true; SwitchActiveView(ViewDoctor); return; }
+                if (e.Key == Key.OemComma) { e.Handled = true; SwitchActiveView(ViewSettings); return; }
+
+                if (e.Key == Key.M)
+                {
+                    e.Handled = true;
+                    ToggleMiniHudWindow();
+                    return;
+                }
+
+                if (e.Key == Key.F)
+                {
+                    e.Handled = true;
+                    if (_activeView == ViewModels && _modelSearchInput != null)
+                    {
+                        _modelSearchInput.Focus();
+                        _modelSearchInput.SelectAll();
+                    }
+                    else if (_activeView == ViewDailyExport && _dailySearchInput != null)
+                    {
+                        _dailySearchInput.Focus();
+                        _dailySearchInput.SelectAll();
+                    }
+                    else
+                    {
+                        SwitchActiveView(ViewLiveStream);
+                        if (_liveSearchInput != null)
+                        {
+                            _liveSearchInput.Focus();
+                            _liveSearchInput.SelectAll();
+                        }
+                    }
+                    return;
+                }
+
+                if (e.Key == Key.S)
+                {
+                    e.Handled = true;
+                    ExportCsvWithDialog();
+                    return;
+                }
+
+                if (e.Key == Key.E)
+                {
+                    e.Handled = true;
+                    ExportAndOpenHtmlReport();
+                    return;
+                }
+            }
+
+            if (e.Key == Key.Escape && mods == ModifierKeys.None)
+            {
+                TextBox focusedTb = Keyboard.FocusedElement as TextBox;
+                if (focusedTb != null)
+                {
+                    if (!string.IsNullOrEmpty(focusedTb.Text) &&
+                        (ReferenceEquals(focusedTb, _liveSearchInput) ||
+                         ReferenceEquals(focusedTb, _modelSearchInput) ||
+                         ReferenceEquals(focusedTb, _dailySearchInput)))
+                    {
+                        focusedTb.Text = "";
+                    }
+                    Keyboard.ClearFocus();
+                    e.Handled = true;
+                    return;
+                }
+
+                if (_activeView == ViewLiveStream && _requestInspector != null && _requestInspector.Visibility == Visibility.Visible)
+                {
+                    CloseRequestInspector();
+                    e.Handled = true;
+                    return;
+                }
+
+                if (_selectedDate != null || _selectedTool != null)
+                {
+                    _selectedDate = null;
+                    _selectedTool = null;
+                    RefreshDashboardView();
+                    e.Handled = true;
+                }
+            }
         }
     }
 }

@@ -1,0 +1,31 @@
+{
+    "version": "2.2.0",
+    "description": "Real-time AI token monitor and equivalent billing lens across Windows, WSL2, macOS, and Linux VPS (知微 · TokLens)",
+    "homepage": "https://github.com/YePiXpert/TokLens",
+    "license": "MIT",
+    "notes": "Run 'TokLens' to launch the desktop dashboard, or 'TokLens --export-html report.html' for headless CLI export. Ledger & settings persist safely in %APPDATA%\\TokLens.",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/YePiXpert/TokLens/releases/download/v2.2.0/TokLens-v2.2-win-x64-portable.zip",
+            "hash": "197f922265ee5f1f5b6ab318c8de11fb9e668d8261887a5485d714b62791852a"
+        }
+    },
+    "bin": "TokLens.exe",
+    "shortcuts": [
+        [
+            "TokLens.exe",
+            "知微 · TokLens"
+        ]
+    ],
+    "checkver": "github",
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/YePiXpert/TokLens/releases/download/v$version/TokLens-v$majorVersion.$minorVersion-win-x64-portable.zip"
+            }
+        },
+        "hash": {
+            "url": "$baseurl/SHA256SUMS.txt"
+        }
+    }
+}

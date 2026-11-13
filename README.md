@@ -1,65 +1,104 @@
-# 知微 · TokLens v2.1
+# 知微 · TokLens v2.2
 
-**多台 Windows 电脑与 Linux VPS 的 AI Token 实时监控与等效账单透镜（绿色便携单文件版）**
+**跨 Windows、macOS、WSL2 与 Linux VPS 的全场景 AI Token 实时遥测与 FinOps 智算账单透镜（绿色单文件旗舰版）**
 
-- **主程序（绿色单文件）**：`TokLens.exe`（纯原生 WPF + 系统内置 `winsqlite3.dll`，零运行时安装依赖，内嵌 Linux VPS 探针脚本）
-- **Linux VPS 零依赖探针**：`vps/toklens_agent.py`（仅需系统自带 Python 3 标准库，支持一键部署与 `crontab` 定时同步）
-
----
-
-## v2.1 核心特性
-
-1. **免代理实时请求流监控（单条 Token / 耗时 / TPS / 单条金额）**
-   - 无需架设本地反向代理，直接基于 `FileSystemWatcher` 文件变动监听（`750ms` 防抖）+ `4s` 静默脉冲 + JSONL 字节偏移游标（`Seek Cursor`）动态捕获每一条新请求。
-   - **「实时请求流」标签页**与**底部实时状态栏**动态滚动显示每条请求的：**请求时间、所属工具、模型名称、新增输入、缓存读取、缓存写入、输出 Token、总 Token、响应耗时、输出速率 `TPS (tok/s)` 与单条等效金额（`¥` / `$`）**。
-2. **零跳动固定视口 UI + 永不弹窗锁屏**
-   - 锁死顶部导航栏（`52px` 三列 `Grid`）与设备胶囊栏（`40px` 单行横向滚动 + 恒定字重），点击切换任何电脑、VPS、时间段或深浅主题均保持 **0.0px 零位移**。
-   - 彻底移除全屏遮罩弹窗：依托 `%APPDATA%\TokLens\toklens.db` 本地 SQLite 快照与文件游标引擎，窗口 **`0ms` 秒开**，后台增量扫描仅需十余毫秒，刷新全程丝滑无感。
-3. **100% 独立三源云端模型价格库 + 自动实时汇率（零外部软件依赖）**
-   - 不依赖任何第三方本地工具，独立从 **models.dev 官方 API + LiteLLM 开源注册表 + OpenRouter 模型 API** 三源自动拉取并合并 1,800+ 模型单价（含输入、输出、缓存读/写阶梯单价），支持 `%USERPROFILE%\.toklens\custom_prices.json` 自定义覆盖。
-   - 自动多源同步 USD/CNY 实时汇率，支持一键切换 `¥` / `$` 或手动输入汇率。
-4. **精准区分 Claude Desktop 与 Claude Code + 全量覆盖 26+ 种 AI Harness**
-   - 解析 `.claude` 会话中的 `entrypoint` 元数据与工作区拓扑，自动将桌面端会话归入 **Claude Desktop**、终端会话归入 **Claude Code**，未使用的工具自动隐藏。
-   - 覆盖 Claude Desktop、Claude Code、OpenAI Codex、Google Antigravity、Gemini CLI、ZCode、Kimi Code、WorkBuddy / CodeBuddy、OpenClaw、Pi / OMP、Qwen Code、Factory Droid、Sourcegraph Amp、Goose、Crush、Aider、OpenCode、MobileClaw、Cursor、Zed、Cline / Roo Code / Kilo Code 等。
-5. **本机 + 云端双通道全自动同步（GitHub 私有 Gist / WebDAV）**
-   - 开启自动同步后，启动时、每 5 分钟以及本机产生新对话后自动在后台静默推拉多端脱敏按日账单（不含任何 Prompt 或对话原文），支持按「全部设备汇总」或单列查看办公电脑、家里电脑与各台 Linux VPS。
-6. **双层历史账单防清理持久归档（删日志 / 清缓存 / 重装 VPS 永不丢账）**
-   - **本地持久归档层**：Windows 桌面端依托 `%APPDATA%\TokLens\toklens.db`、Linux VPS 探针依托 `~/.toklens/ledger.db` 维护文件级增量游标与按日高水位账本；当 AI 工具自动轮转清理旧会话、手动删除日志或清空缓存时，被清理文件的历史累计用量会自动转入持久归档，已入库账单绝不回退扣减。
-   - **云端高水位合并层**：GitHub 私有 Gist 与 WebDAV 多端同步在推拉快照时自动按「日期 + 工具 + 模型」执行高水位合并（High-Water-Mark Merge）；即使彻底重装 Windows 系统或销毁重建 Linux VPS，已同步过的历史账单依然永久保留、永不归零。
+- **Windows 桌面旗舰 + 终端双引擎（单文件零依赖）**：`TokLens.exe`（纯原生 WPF + 系统内置 `winsqlite3.dll` + Win32 Per-Monitor DPI v2，零外部运行时安装依赖，内嵌跨平台 Python 探针）
+- **Linux VPS / macOS 零依赖探针**：`vps/toklens_agent.py`（仅依赖系统内置 Python 3 标准库，支持 Linux `crontab` 与 macOS `LaunchAgent` 后台守护自动同步：`vps/install_macos_launchd.sh`）
+- **深度文档**：[跨设备同步与 GitHub CLI 令牌原理解析](docs/SYNC_AND_GH_TOKEN_GUIDE.md) · [系统架构与高水位账本白皮书](docs/ARCHITECTURE.md) · [版本演进日志](CHANGELOG.md)
 
 ---
 
-## 多端同步快速上手（办公电脑 ↔ 家里电脑 & Linux VPS）
+## 核心问答：为什么到家自动读取的 `gh` 令牌和单位不一样？
 
-### 1. 第一台电脑（如：办公电脑）初始化
-1. 打开 `TokLens.exe` → 点击右上角 **「多端同步」**。
-2. 将「显示名称」设为 `办公电脑`（或自定义名称）。
-3. 在「GitHub 私有 Gist」下：
-   - 若本机已安装并登录 GitHub CLI (`gh`)，直接点击 **「自动读取 gh 登录」**；
-   - 或点击 **「网页申请 Token」**（仅需勾选 `gist` 权限）粘贴填入。
-4. `私有 Gist ID` 保持留空，直接点击右下角 **「保存并立即同步」** —— 程序将自动在你的账号下创建私有 Secret Gist 并上传本机按日脱敏账单。
+这是 **GitHub CLI (`gh`) 的标准设备独立 OAuth 安全设计**，完全正常且**无需把单位的令牌拷贝到家里**：
 
-### 2. 第二台电脑（如：家里电脑）接入同步（两种方式任选）
-- **方式 A（免配对码自动找回 · 最省心）**：
-  1. 在家里电脑下载本仓库 Release 中的 `TokLens.exe`（或 `git clone` 后双击 `build.bat` 编译）。
-  2. 打开 **「多端同步」**，将「显示名称」改为 `家里电脑`。
-  3. 填入同一个 GitHub Token（或点击 **「自动读取 gh 登录」**），**Gist ID 留空**，直接点 **「保存并立即同步」**。
-  4. 程序会自动扫描并绑定你在办公电脑创建的私有 Gist，瞬间合并展示 `全部设备 (2台)`、`家里电脑 [本机]` 与 `办公电脑`！
-- **方式 B（配对码一键导入）**：
-  - 在办公电脑同步窗口右上角点 **「复制配对码」** 发给自己 → 家里电脑点 **「粘贴配对码」** → 确认名称为 `家里电脑` 后点 **「保存并立即同步」**。
+1. **每台电脑独立签发 `gho_...` 设备令牌**：当你在单位电脑与家里电脑分别执行 `gh auth login` 时，GitHub OAuth 服务器会为每一台设备单独颁发一串不同的 `gho_...` 授权令牌（便于日后单独吊销某台旧设备而不影响其他电脑）。
+2. **认同一个 `@用户名` GitHub 账号，不认同一串密码字符串**：TokLens 多端云同步认的是**令牌背后的 GitHub 账号身份（如 `@YePiXpert`）以及 `gist` 权限范围**。只要家里与单位登录的是同一个 GitHub 账号，两串不同的 `gho_...` 令牌天然拥有读写同一个私有账单 Gist（含 `toklens_sync_v1.json` 锚点文件）的完整权限，Gist ID 留空点击同步即可自动寻回并无损合并！
+3. **仅在以下 4 种情况会导致两边没有汇合（应用内已内置自动诊断与一键修复）**：
+   - 环境变量 `GH_TOKEN` / `GITHUB_TOKEN` 覆盖了 `gh` 登录态（常见于单位配置了企业内部 Token）；
+   - `gh auth status` 登录了多个账号（个人号 + 工作号），当前激活账号不一致（可在「同步与设置」下拉选择目标 `@用户名`）；
+   - 某台电脑早期登录 `gh` 时未包含 `gist` 权限（执行 `gh auth refresh -h github.com -s gist` 即可秒级补齐）；
+   - 本地残留已失效的旧 `Gist ID` 返回 `404`（v2.2 已支持自动清空失效 ID 并重新寻回/重建私有 Gist）。
 
-### 3. Linux VPS 探针一键接入
-- 在同步窗口切换到 **「接入其他电脑 / Linux VPS」** 标签页，输入 VPS 名称（如 `主力 VPS-1`），点击 **「复制一键部署命令」**，SSH 登录 VPS 粘贴回车即可自动完成采集上报与 `crontab` 定时同步。
+> 在软件内任意界面按 **`F1`** 切换到「跨设备同步与令牌原理解析」标签页，或进入 **「AI 环境体检医生 (`Ctrl+0`)」** 即可实时核验本机令牌指纹、归属账号与 `gist` 权限。
 
 ---
 
-## 快速使用与重新编译
+## v2.2 全方位重构亮点
 
-- **直接运行**：双击 `TokLens.exe` 即可打开桌面看板（绿色单文件，可任意拷贝至其他电脑运行）。
-- **命令行导出**：
-  ```powershell
-  .\TokLens.exe --export-json summary.json
-  .\TokLens.exe --export-csv  billing.csv
-  .\TokLens.exe --export-html TokLens_Report.html
-  ```
-- **一键重编译**：双击运行 `build.bat`（直接调用 Windows 自带 `.NET Framework 4.x csc.exe` 编译）。
+### 1. Obsidian / Paper Zinc 旗舰级工作台（11 大全高视图 · `0.0px` 零跳动）
+对标 **Linear、Vercel Geist、OpenRouter Activity、Helicone 与 OrbStack** 的现代开发者工具审美：
+- **一体化无边框窗口外壳**：原生支持 Windows 11 Snap Layouts 贴靠布局、DWM 沉浸式暗黑/纸白双主题联动、Per-Monitor V2 跨屏高分屏矢量渲染、可折叠侧边导航栏（`200px` 展开 / `58px` 图标态）与严格锁定 `48px` 的全局上下文顶栏。
+- **11 大全高专业视图**：
+  1. **概览看板 (`Ctrl+1`)**：四维 Bento KPI（含日预算进度与 30 天滚动预测）、工具/设备排行、十字准星平滑面积趋势图（支持点击单日钻取）与实时流快览。
+  2. **实时请求流 (`Ctrl+2`)**：免代理捕获单笔请求耗时与生成速率（`tok/s`），单击任意请求即可滑出右侧 **单笔账单四维计费瀑布流透视抽屉 (`RequestInspectorPanel`)**。
+  3. **模型与工具 (`Ctrl+3`)**：多色堆叠占比条、百万输入单价精准排序，内置 **模型单价浏览器与私有中转自定义费率工作台 (`PricingStudioWindow`)**。
+  4. **项目归因 (`Ctrl+4`)**：100% 本机离线解析 Claude Code、Codex、Cursor 等工作区与代码仓库算力投入，支持一键在资源管理器定位仓库（云端同步零路径泄露）。
+  5. **智算洞察 (`Ctrl+5`)**：2026 主流订阅（Claude Pro/Max、ChatGPT Plus/Pro、Cursor Pro/Ultra）回本等效评估矩阵、GitHub 风格 365 天算力热力图与 24 小时昼夜节律分析。
+  6. **平替模拟器 (`Ctrl+6`)**：基于本机真实历史四维 Token 画像（新增输入 / 缓存读 / 缓存写 / 输出），交互式推演跨模型迁移后的真实账单差价与省钱幅度。
+  7. **会话显微镜 (`Ctrl+7`)**：自动聚类识别长对话上下文「滚雪球膨胀」与低缓存命中异常会话，给出精准开新会话优化建议。
+  8. **设备与集群 (`Ctrl+8`)**：OrbStack 风格多设备状态卡片与跨 Windows / Linux VPS / macOS 集群对比表，支持设备本地备注名与离线节点清理。
+  9. **每日流水与导出 (`Ctrl+9`)**：补齐 `缓存写入 (CacheWrite)` 对账列的完整日流水，集成 **7 种专业报表与社交战报导出**。
+  10. **环境体检医生 (`Ctrl+0`)**：一键巡检 26 项本地 AI 客户端、IDE 数据库、WSL2 发行版与 GitHub CLI 令牌健康度。
+  11. **同步与设置 (`Ctrl+,`)**：GitHub Gist / WebDAV 多端同步、一键加密配对码、Linux/macOS 部署脚本生成、**时光机本地备份恢复** 与 **Windows 登录静默自启**。
+
+### 2. 全局命令面板 (`Ctrl+K`) + 桌面置顶微胶囊 (`Ctrl+M` / `Ctrl+Alt+T`)
+- **全局命令面板 (`CommandPaletteOverlay`)**：支持中文、英文及**中文拼音首字母**极速模糊检索（如输入 `pt` 秒跳「平替模拟器」、输入 `gh` 秒开令牌排障指南）。
+- **Dynamic Island 风格桌面微胶囊 (`MiniHudWindow`)**：无焦点抢占置顶悬浮展示「今日花费 · 今日 Token · 最新模型与 TPS」，支持三档透明度与「锁定位置 + 鼠标穿透」模式，写代码全屏盯盘零遮挡。
+
+### 3. 全覆盖 26+ AI 工具生态 + 双层高水位防清理账本 + 时光机备份
+- **免代理全量采集**：原生支持 Claude Code、Claude Desktop、OpenAI Codex、Google Antigravity、Gemini CLI、Cursor、Windsurf、VS Code (Cline / Roo Code / Kilo Code / Continue)、ZCode、Kimi Code、WorkBuddy / CodeBuddy、OpenClaw、Qwen Code、Factory Droid、Sourcegraph Amp、Goose、Crush、Aider、OpenCode、Zed，以及本机 **WSL2** 与 **Remote SSH** 会话。
+- **永不归零的高水位账本 + 时光机**：本地 SQLite 游标库 + 云端 `MAX(...)` 高水位无损合并 + 每日自动生成 `.toklens.gz` 时光机压缩快照（自动保留最近 10 份），清空日志或重装系统均不丢失历史账单。
+
+### 4. 七维 FinOps 财务与极客分享导出体系
+支持一键导出：**交互式离线 HTML 看板**、**GitHub GFM Markdown 深度战报（含 ASCII 趋势图）**、**UTF-8 BOM Excel 财务对账 CSV**、**840×460 高清矢量 Bento 极客分享海报 (`.svg`)**、**GitHub 个人主页 README 动态徽章 (`.svg`)**、**飞书/企微纯文本战报卡（剪贴板）** 与 **100% 脱敏 JSON 汇总快照**。
+
+---
+
+## 快速安装与多端接入
+
+### Windows 桌面端运行与包管理器支持
+- **绿色单文件直开**：双击运行 `TokLens.exe`（或从 Releases 解压便携包）；附带标准清单支持 [WinGet](packaging/winget/YePiXpert.TokLens.yaml) 与 [Scoop](packaging/scoop/toklens.json)。
+- **源码零依赖一键编译**：在 Windows 10/11 下直接运行 `build.bat`（自动调用系统内置 `.NET Framework 4.x csc.exe`，无需安装 Visual Studio）。
+
+### Linux VPS 与 macOS 守护进程一键接入
+- **Linux VPS (`crontab`)**：在桌面端「同步与设置」输入服务器名称并点击「复制一键部署命令」，SSH 粘贴执行即可完成历史扫描与定时同步。
+- **macOS (`LaunchAgent`)**：在 Mac 终端运行 `bash vps/install_macos_launchd.sh` 即可配置原生 `launchd` 后台低功耗定时同步。
+
+---
+
+## 全局快捷键速查
+
+| 快捷键 | 功能说明 |
+| :--- | :--- |
+| `Ctrl+K` | 唤起全局命令面板（支持中文 / 拼音首字母 / 英文极速检索） |
+| `Ctrl+1` ~ `Ctrl+9`, `Ctrl+0` | 秒切左侧 10 大业务与诊断视图 |
+| `Ctrl+,` | 打开「同步与设置」视图 |
+| `Ctrl+M` | 显示 / 隐藏桌面置顶微胶囊悬浮窗 (`MiniHudWindow`) |
+| `Ctrl+Alt+T` | 系统级全局热键：从后台/托盘唤起主窗口或切换桌面微胶囊 |
+| `F1` / `?` | 打开「快捷键速查 & GitHub 跨设备令牌原理解析」交互指南 |
+| `F5` / `Ctrl+R` | 立即执行后台增量扫描并同步云端账单与实时汇率 |
+| `Ctrl+F` | 聚焦当前视图搜索过滤框 |
+| `Ctrl+E` / `Ctrl+S` | 导出并打开交互式 HTML 看板 / 导出多端 CSV 财务对账单 |
+| `Esc` | 清空搜索框、收起右侧单笔账单透视抽屉或重置单日/工具筛选 |
+
+---
+
+## 终端无头 CLI 引擎 (`TokLens.exe`)
+
+支持在 PowerShell / CMD / Windows Terminal 中直接作为极客 CLI 工具运行（自动通过 Win32 `AttachConsole` 输出彩色 ANSI 表格，零弹窗）：
+
+```powershell
+.\TokLens.exe --help                         # 查看完整 CLI 命令帮助
+.\TokLens.exe --version                      # 查看版本号与运行环境信息
+.\TokLens.exe --today                        # 终端彩色卡片展示今日实时算力账单
+.\TokLens.exe --summary --days 30            # 展示最近 30 天工具与设备消耗对齐表
+.\TokLens.exe --models --days 7              # 查看最近 7 天模型细粒度消耗排行
+.\TokLens.exe --status                       # 单行极简今日花费输出（适合嵌入 Prompt / 状态栏）
+.\TokLens.exe --doctor                       # 在终端运行本机 AI 工具链与 gh 令牌健康巡检
+.\TokLens.exe --sync-now                     # 无头触发本地增量扫描与 Gist / WebDAV 双向同步
+.\TokLens.exe --export-md   FinOps.md        # 导出 GitHub GFM Markdown 深度战报
+.\TokLens.exe --export-svg  Poster.svg       # 导出 840x460 矢量极客算力海报
+.\TokLens.exe --export-badge badge.svg       # 导出 GitHub README 个人主页算力徽章
+.\TokLens.exe --export-html Report.html      # 导出独立单文件交互式网页看板
+```

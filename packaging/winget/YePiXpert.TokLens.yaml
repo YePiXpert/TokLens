@@ -1,0 +1,45 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.singleton.1.6.0.schema.json
+
+PackageIdentifier: YePiXpert.TokLens
+PackageVersion: 2.2.0
+PackageLocale: en-US
+Publisher: YePiXpert
+PublisherUrl: https://github.com/YePiXpert
+PublisherSupportUrl: https://github.com/YePiXpert/TokLens/issues
+Author: YePiXpert
+PackageName: TokLens (知微)
+PackageUrl: https://github.com/YePiXpert/TokLens
+License: MIT
+Copyright: Copyright (c) YePiXpert
+ShortDescription: Real-time AI Token monitor & equivalent billing lens across Windows, WSL2, macOS & Linux VPS | 多端 AI Token 实时监控与等效账单透镜（知微 · TokLens）
+Description: |-
+  TokLens (知微) is a zero-dependency native WPF portable desktop & CLI billing lens that monitors real-time AI token consumption and equivalent API costs across multiple Windows PCs, WSL2 distributions, macOS, and Linux VPS nodes without requiring any local reverse proxy.
+  - Supports 26+ AI coding harnesses & clients including Claude Code, Claude Desktop, Cursor, OpenAI Codex, Gemini CLI, Antigravity, Windsurf, Cline, Roo Code, Aider, OpenCode, and Zed.
+  - Independent 3-source cloud pricing registry (models.dev, LiteLLM, OpenRouter) covering 2,000+ models with real-time USD/CNY exchange rates.
+  - High-water-mark cloud ledger sync via GitHub Secret Gist or WebDAV so historical billing records survive log cleanups and OS reinstalls.
+
+  知微 · TokLens 是一款零运行时安装依赖的原生绿色便携桌面与命令行工具，免代理毫秒级监控多台 Windows 电脑、WSL2、macOS 与 Linux VPS 的 AI Token 消耗与等效账单：
+  - 全面覆盖 Claude Code、Claude Desktop、Cursor、OpenAI Codex、Gemini CLI、Antigravity、Windsurf、Cline、Roo Code、Aider 等 26+ 主流 AI 编程与桌面工具。
+  - 内置独立三源云端模型价格库（2,000+ 模型阶梯单价）与实时汇率换算，支持 CSV / JSON / 交互式 HTML 账单导出。
+  - 支持 GitHub 私有 Gist 与 WebDAV 双层高水位防清理归档同步，清理本地缓存或重装系统永不丢失历史账单。
+Moniker: toklens
+Tags:
+  - ai
+  - token
+  - llm
+  - claude-code
+  - cursor
+  - codex
+  - finops
+ReleaseNotesUrl: https://github.com/YePiXpert/TokLens/releases/tag/v2.2.0
+Installers:
+  - Architecture: x64
+    InstallerType: zip
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: TokLens.exe
+        PortableCommandAlias: toklens
+    InstallerUrl: https://github.com/YePiXpert/TokLens/releases/download/v2.2.0/TokLens-v2.2-win-x64-portable.zip
+    InstallerSha256: 197F922265EE5F1F5B6AB318C8DE11FB9E668D8261887A5485D714B62791852A
+ManifestType: singleton
+ManifestVersion: 1.6.0
