@@ -1,0 +1,31 @@
+name: Build & Verify TokLens
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify Python VPS Agent syntax
+        shell: pwsh
+        run: python -m py_compile vps/toklens_agent.py
+
+      - name: Build TokLens.exe (.NET Framework 4.x)
+        shell: cmd
+        run: call build.bat --nopause
+
+      - name: Upload TokLens.exe Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TokLens-Portable-Windows
+          path: |
+            TokLens.exe
+            vps/toklens_agent.py
