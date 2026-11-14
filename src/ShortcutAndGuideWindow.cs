@@ -557,8 +557,8 @@ namespace TokLens
                 true));
 
             rightStack.Children.Add(BuildShortcutRow(
-                "显示 / 隐藏桌面悬浮条",
-                "迷你胶囊，悬停看今日概况与最近请求",
+                "显示 / 隐藏桌面悬浮球",
+                "外圈是上下文占用，悬停看今日概况与最近请求",
                 new string[][] { new string[] { "Ctrl", "M" } },
                 false));
 

@@ -864,7 +864,7 @@ namespace TokLens
         public string WebDavPass = "";
         public bool IsDarkTheme = true;
         public bool PreferCny = true;
-        // 点 ❌ 时缩到托盘继续运行（悬浮条与监控不中断）；托盘菜单「彻底退出」才结束进程
+        // 点 ❌ 时缩到托盘继续运行（悬浮球与监控不中断）；托盘菜单「彻底退出」才结束进程
         public bool MinimizeToTray = true;
         // 可选功能：订阅记账与回本比例，默认关闭
         public bool ShowSubscriptions = false;
@@ -1055,8 +1055,7 @@ namespace TokLens
         {
             get
             {
-                string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-                return Path.Combine(appData, "TokLens", "pricing_cache.json");
+                return Path.Combine(SyncService.AppConfigDir, "pricing_cache.json");
             }
         }
 
@@ -1487,7 +1486,8 @@ namespace TokLens
                         old.ContainsKey("schema") &&
                         string.Equals(Convert.ToString(old["schema"], CultureInfo.InvariantCulture), "v2.2", StringComparison.Ordinal) &&
                         old.ContainsKey("ts_utc") &&
-                        old.ContainsKey("models"))
+                        old.ContainsKey("models") &&
+                        old.ContainsKey("context"))
                     {
                         long tsUtc = Convert.ToInt64(old["ts_utc"], CultureInfo.InvariantCulture);
                         long nowUtc = (long)(DateTime.UtcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalSeconds;
@@ -1510,6 +1510,9 @@ namespace TokLens
 
             Dictionary<string, double[]> merged = new Dictionary<string, double[]>(StringComparer.OrdinalIgnoreCase);
             Dictionary<string, int> mergedPrio = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            // 模型上下文上限（输入 Token 数），供悬浮球显示上下文占用百分比
+            Dictionary<string, long> context = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, int> contextPrio = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             List<string> sourcesOk = new List<string>();
             JavaScriptSerializer js = new JavaScriptSerializer();
             js.MaxJsonLength = int.MaxValue;
@@ -1535,6 +1538,7 @@ namespace TokLens
                                 if (kv.Key == "sample_spec" || kv.Key.EndsWith(":free", StringComparison.OrdinalIgnoreCase)) continue;
                                 Dictionary<string, object> item = kv.Value as Dictionary<string, object>;
                                 if (item == null) continue;
+                                UpsertContextLimit(context, contextPrio, NormalizeModelId(kv.Key, ""), ParseLongField(item, "max_input_tokens"), IsFirstPartyProviderKey(kv.Key) ? 20 : 10);
                                 double ic = ParsePerTokenToMillion(item, "input_cost_per_token");
                                 double oc = ParsePerTokenToMillion(item, "output_cost_per_token");
                                 if (ic <= 0 || oc <= 0 || ic > 500 || oc > 1500) continue;
@@ -1569,6 +1573,7 @@ namespace TokLens
                                 Dictionary<string, object> m = dataList[i] as Dictionary<string, object>;
                                 if (m == null || !m.ContainsKey("id") || !m.ContainsKey("pricing")) continue;
                                 string rawId = Convert.ToString(m["id"], CultureInfo.InvariantCulture);
+                                UpsertContextLimit(context, contextPrio, NormalizeModelId(rawId, ""), ParseLongField(m, "context_length"), IsFirstPartyProviderKey(rawId) ? 25 : 15);
                                 if (rawId.EndsWith(":free", StringComparison.OrdinalIgnoreCase)) continue;
                                 Dictionary<string, object> pr = m["pricing"] as Dictionary<string, object>;
                                 if (pr == null) continue;
@@ -1608,6 +1613,8 @@ namespace TokLens
                             foreach (KeyValuePair<string, object> mKv in modelsObj)
                             {
                                 Dictionary<string, object> mObj = mKv.Value as Dictionary<string, object>;
+                                if (mObj != null && mObj.ContainsKey("limit"))
+                                    UpsertContextLimit(context, contextPrio, NormalizeModelId(mKv.Key, ""), ParseLongField(mObj["limit"] as Dictionary<string, object>, "context"), firstPartyProv ? 30 : 18);
                                 if (mObj == null || !mObj.ContainsKey("cost")) continue;
                                 Dictionary<string, object> costObj = mObj["cost"] as Dictionary<string, object>;
                                 if (costObj == null) continue;
@@ -1646,6 +1653,7 @@ namespace TokLens
                     saveObj["updated_at"] = nowStr;
                     saveObj["ts_utc"] = nowUtc;
                     saveObj["models"] = merged;
+                    saveObj["context"] = context;
                     File.WriteAllText(fp, js.Serialize(saveObj), new UTF8Encoding(false));
                     lock (CacheLock) { _memCloudCacheMtimeTicks = -1; }
                 }
@@ -1656,6 +1664,86 @@ namespace TokLens
             }
 
             return new PricingSyncInfo(0, "内置基准", "", false);
+        }
+
+        private static long ParseLongField(Dictionary<string, object> d, string key)
+        {
+            if (d == null || !d.ContainsKey(key) || d[key] == null) return 0;
+            try
+            {
+                double v = Convert.ToDouble(d[key], CultureInfo.InvariantCulture);
+                return double.IsNaN(v) || double.IsInfinity(v) || v < 1000 || v > 100000000 ? 0 : (long)v;
+            }
+            catch { return 0; }
+        }
+
+        // 同一模型多个来源时按来源优先级取值（官方渠道优先），同级取较大值
+        private static void UpsertContextLimit(Dictionary<string, long> map, Dictionary<string, int> prio, string slug, long tokens, int priority)
+        {
+            if (string.IsNullOrEmpty(slug) || slug.Length < 2 || tokens <= 0) return;
+            int old;
+            if (prio.TryGetValue(slug, out old) && (old > priority || (old == priority && map[slug] >= tokens))) return;
+            map[slug] = tokens;
+            prio[slug] = priority;
+        }
+
+        private static readonly object ContextLock = new object();
+        private static Dictionary<string, long> _contextLimits;
+        private static long _contextMtime = -1;
+
+        /// <summary>模型的上下文上限（输入 Token）；云端价格库里没有记录时返回 0，调用方应改为显示绝对值。</summary>
+        public static long ContextWindowFor(string model)
+        {
+            string slug = NormalizeModelId(model, "");
+            if (string.IsNullOrEmpty(slug)) return 0;
+            Dictionary<string, long> map = LoadContextLimits();
+            if (map == null || map.Count == 0) return 0;
+            long v;
+            if (map.TryGetValue(slug, out v)) return v;
+            string alt = ConvertClaudeVersionForm(slug);
+            if (alt != null && map.TryGetValue(alt, out v)) return v;
+            string undated = DateSuffixRegex.Replace(slug, "");
+            if (undated != slug && map.TryGetValue(undated, out v)) return v;
+            // 最长前缀：claude-opus-5-5-thinking 之类的变体沿用基础型号
+            string best = null;
+            foreach (string key in map.Keys)
+            {
+                if (key.Length < 4 || !slug.StartsWith(key, StringComparison.OrdinalIgnoreCase)) continue;
+                if (slug.Length > key.Length && slug[key.Length] != '-') continue;
+                if (best == null || key.Length > best.Length) best = key;
+            }
+            return best != null ? map[best] : 0;
+        }
+
+        private static Dictionary<string, long> LoadContextLimits()
+        {
+            try
+            {
+                string fp = CloudPriceCachePath;
+                if (!File.Exists(fp)) return null;
+                long mtime = File.GetLastWriteTimeUtc(fp).Ticks;
+                lock (ContextLock)
+                {
+                    if (_contextLimits != null && _contextMtime == mtime) return _contextLimits;
+                    Dictionary<string, long> parsed = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+                    JavaScriptSerializer js = new JavaScriptSerializer();
+                    js.MaxJsonLength = int.MaxValue;
+                    Dictionary<string, object> root = js.DeserializeObject(File.ReadAllText(fp, Encoding.UTF8)) as Dictionary<string, object>;
+                    Dictionary<string, object> ctx = root != null && root.ContainsKey("context") ? root["context"] as Dictionary<string, object> : null;
+                    if (ctx != null)
+                    {
+                        foreach (KeyValuePair<string, object> kv in ctx)
+                        {
+                            long n = ParseLongField(ctx, kv.Key);
+                            if (n > 0) parsed[kv.Key] = n;
+                        }
+                    }
+                    _contextLimits = parsed;
+                    _contextMtime = mtime;
+                    return parsed;
+                }
+            }
+            catch { return null; }
         }
 
         private static double ParseDirectPerMillion(Dictionary<string, object> d, string key)

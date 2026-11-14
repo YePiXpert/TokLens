@@ -35,12 +35,16 @@ namespace TokLens
         public long TimestampMs, Output, UnpricedRequests;
         public int DurationMs;
         public string TimingSource="";
-        // 悬浮条用的数值（美元口径，显示时按 Cny / Rate 换算）
+        // 悬浮球用的数值（美元口径，显示时按 Cny / Rate 换算）
         public bool Cny;
         public double Rate=ExchangeRateService.DefaultRate;
         public double TodayUsd, LastHourUsd, Last15Usd, LastCostUsd;
         public double CacheHitRate=-1;
         public long TodayTokens, TodayRequests, ContextTokens;
+        public long ContextLimit;                       // 最近一次请求所用模型的上下文上限，未知为 0
+        public bool Alert;                              // Agent 失控（高频消耗）提醒期间为 true
+        public string AlertText = "";
+        public double ContextFraction { get { return ContextLimit > 0 && ContextTokens > 0 ? Math.Min(1.0, (double)ContextTokens / ContextLimit) : -1; } }
         public double[] SparkHour=new double[30];      // 近 60 分钟，每 2 分钟一格
         public double[] SparkTwoHours=new double[24];  // 近 2 小时，每 5 分钟一格
         public List<RecentRequestRecord> Latest=new List<RecentRequestRecord>(); // 最近 5 次请求，新的在前
@@ -70,7 +74,8 @@ namespace TokLens
                 if(age<7200000L)h.SparkTwoHours[23-(int)(age/300000L)]+=c;
             }
             if(latest!=null){h.Tool=latest.Tool;h.Model=latest.Model;h.TimestampMs=latest.TimestampMs;h.Output=latest.Output;h.DurationMs=latest.DurationMs;h.TimingSource=latest.TimingSource;
-                h.ContextTokens=latest.FreshInput+latest.CacheRead+latest.CacheWrite;h.LastCostUsd=latest.CostUsd>0?latest.CostUsd:0;}
+                h.ContextTokens=latest.FreshInput+latest.CacheRead+latest.CacheWrite;h.LastCostUsd=latest.CostUsd>0?latest.CostUsd:0;
+                h.ContextLimit=PricingEngine.ContextWindowFor(latest.Model);}
             recent.Sort(delegate(RecentRequestRecord a,RecentRequestRecord b){return b.TimestampMs.CompareTo(a.TimestampMs);});
             if(recent.Count>5)recent.RemoveRange(5,recent.Count-5);
             h.Latest=recent;

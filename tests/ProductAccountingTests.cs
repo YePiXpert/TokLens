@@ -44,6 +44,13 @@ internal static class ProductAccountingTests
         File.WriteAllText(cfgPath,"{\"close_to_tray\":false}");Check(!SyncService.LoadConfig().MinimizeToTray,"an explicit choice to quit on close is kept");
         Check(new SyncConfig().MinimizeToTray,"new configs stay resident in the tray when the window is closed");
         File.WriteAllText(cfgPath,cfgSaved);
+        string priceCache=PricingEngine.CloudPriceCachePath;Directory.CreateDirectory(Path.GetDirectoryName(priceCache));
+        File.WriteAllText(priceCache,"{\"schema\":\"v2.2\",\"models\":{},\"context\":{\"claude-opus-5-5\":1000000,\"gpt-6-astra\":400000}}");
+        Check(priceCache.StartsWith(SyncService.AppConfigDir),"price cache follows the config directory");
+        Check(PricingEngine.ContextWindowFor("claude-opus-5-5")==1000000&&PricingEngine.ContextWindowFor("anthropic/claude-opus-5-5")==1000000,"context limits come from the price library, provider prefixes ignored");
+        Check(PricingEngine.ContextWindowFor("claude-opus-5-5-20261101")==1000000&&PricingEngine.ContextWindowFor("claude-opus-5-5-thinking")==1000000,"dated and suffixed variants reuse the base model limit");
+        Check(PricingEngine.ContextWindowFor("mystery-model")==0,"unknown models report no limit instead of a guess");
+        File.Delete(priceCache);
         SyncConfig clone=new SyncConfig();clone.CopyFrom(loaded);
         Check(clone.Subscriptions[1].StartDate=="2026-11-01"&&clone.Subscriptions[1].FeeConfirmed,"settings copies preserve subscription history");
         HashSet<string> ids=new HashSet<string>();bool glm=false,kimi=false,ali=false,mini=false;

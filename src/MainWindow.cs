@@ -426,7 +426,7 @@ namespace TokLens
         private DispatcherTimer _cloudAutoTimer;
         private DispatcherTimer _cloudDebounceTimer;
 
-        // 系统托盘与桌面集成（悬浮胶囊 HUD、全局热键、异常燃烧提醒）
+        // 系统托盘与桌面集成（悬浮球、全局热键、异常燃烧提醒）
         private Drawing.Icon _nativeExeIcon;
         private WinForms.NotifyIcon _trayIcon;
         private WinForms.ContextMenuStrip _trayMenu;
@@ -438,6 +438,9 @@ namespace TokLens
         private MiniHudWindow _miniHud;
         private GlobalHotkeyHost _globalHotkey;
         private readonly BurnRateGuard _burnGuard = new BurnRateGuard();
+        // 失控提醒在悬浮球上保持 10 分钟（变红并显示「!」）
+        private DateTime _hudAlertUntilUtc = DateTime.MinValue;
+        private string _hudAlertText = "";
 
         // 布局核心骨架（供 0.0px 零跳动无头自测断言）与全局命令面板覆盖层
         private Border _rootShellBorder;
@@ -750,7 +753,7 @@ namespace TokLens
                     try
                     {
                         _trayIcon.BalloonTipTitle = AppConstants.ProductTitle;
-                        _trayIcon.BalloonTipText = "TokLens 仍在后台运行，悬浮条和用量监控不受影响。双击托盘图标或按 Ctrl+Alt+T 打开；要退出请在托盘图标右键选「彻底退出」。";
+                        _trayIcon.BalloonTipText = "TokLens 仍在后台运行，悬浮球和用量监控不受影响。双击托盘图标或按 Ctrl+Alt+T 打开；要退出请在托盘图标右键选「彻底退出」。";
                         _trayIcon.ShowBalloonTip(2500);
                     }
                     catch { }
@@ -824,7 +827,7 @@ namespace TokLens
                 };
                 _trayMenu.Items.Add(syncRefreshItem);
 
-                _trayHudToggleItem = new WinForms.ToolStripMenuItem("显示 / 隐藏桌面悬浮胶囊 (Ctrl+M)");
+                _trayHudToggleItem = new WinForms.ToolStripMenuItem("显示 / 隐藏桌面悬浮球 (Ctrl+M)");
                 _trayHudToggleItem.Click += delegate(object s, EventArgs e)
                 {
                     Dispatcher.BeginInvoke(new Action(delegate()
@@ -1992,7 +1995,7 @@ namespace TokLens
             Grid.SetRow(_sidebarDataPanel, 2);
             g.Children.Add(_sidebarDataPanel);
 
-            // Row 3: 底部工具条（深浅主题切换、立即扫描刷新、悬浮胶囊、帮助、折叠侧边栏）
+            // Row 3: 底部工具条（深浅主题切换、立即扫描刷新、悬浮球、帮助、折叠侧边栏）
             Border footerBar = new Border();
             footerBar.BorderThickness = new Thickness(0, 1, 0, 0);
             footerBar.Padding = new Thickness(10, 0, 10, 0);
@@ -2031,7 +2034,7 @@ namespace TokLens
             };
             leftUtils.Children.Add(_sidebarRefreshBtn);
 
-            _sidebarHudBtn = ModernControlsFactory.CreateIconGhostButton(UiIcons.Capsule, "显示 / 隐藏桌面置顶微胶囊悬浮窗 (Ctrl+M)");
+            _sidebarHudBtn = ModernControlsFactory.CreateIconGhostButton(UiIcons.Capsule, "显示 / 隐藏桌面悬浮球 (Ctrl+M)");
             _sidebarHudBtn.Margin = new Thickness(3, 0, 0, 0);
             _sidebarHudBtn.Click += delegate(object s, RoutedEventArgs e)
             {
@@ -5785,7 +5788,7 @@ namespace TokLens
 
             RefreshActiveSpecialistView(true);
 
-            // 14. 同步桌面置顶微胶囊 HUD 与异常燃烧速率提醒
+            // 14. 同步桌面悬浮球与异常燃烧速率提醒
             if (_miniHud != null)
             {
                 RefreshMiniHud();
@@ -5806,7 +5809,12 @@ namespace TokLens
                         {
                             BurnRateAlert ev = alerts[a];
                             if (ev != null)
+                            {
                                 ShowToastSafe(ev.Title, ev.Message, ev.Variant);
+                                _hudAlertUntilUtc = DateTime.UtcNow.AddMinutes(10);
+                                _hudAlertText = ev.Title + "：" + ev.Message;
+                                RefreshMiniHud();
+                            }
                         }
                     }
                 }
@@ -7050,13 +7058,13 @@ namespace TokLens
             items.Add(new PaletteCommandItem("nav-settings", "视图导航", "设置 / 同步与偏好", "Gist / WebDAV 同步、配对码、扫描与显示偏好", "Ctrl+,", UiIcons.Settings, delegate() { SwitchActiveView(ViewSettings); }));
 
             // 2. 效率工具与工作台
-            items.Add(new PaletteCommandItem("tool-hud", "桌面工作台", "显示 / 隐藏桌面悬浮条", "迷你胶囊：今日估值、上下文与近 1 小时，悬停看详情", "Ctrl+M", UiIcons.Capsule, delegate() { ToggleMiniHudWindow(); }));
+            items.Add(new PaletteCommandItem("tool-hud", "桌面工作台", "显示 / 隐藏桌面悬浮球", "外圈上下文占用，球心可切换今日估值 / 速率，悬停看详情", "Ctrl+M", UiIcons.Capsule, delegate() { ToggleMiniHudWindow(); }));
             items.Add(new PaletteCommandItem("tool-pricing", "桌面工作台", "设置 / 计价规则", "浏览模型单价，或配置私有中转的自定义费率", "", UiIcons.Models, delegate() { OpenPricingStudioDialog(null); }));
             items.Add(new PaletteCommandItem("tool-token-guide", "帮助与排障", "为什么家里和单位自动读取的 gh 令牌不一样？", "深度图解 GitHub 设备独立 OAuth 令牌 (gho_...) 与同账号 Gist 汇聚原理", "F1", UiIcons.Key, delegate() { OpenShortcutAndGuideDialog(1); }));
             items.Add(new PaletteCommandItem("tool-shortcuts", "帮助与排障", "打开全局键盘快捷键速查表", "双列键盘速查矩阵，支持全键盘流极速操控", "F1", UiIcons.Help, delegate() { OpenShortcutAndGuideDialog(0); }));
             items.Add(new PaletteCommandItem("tool-scan", "数据与同步", "立即增量扫描本地日志并触发多端同步", "增量扫描本机日志，并刷新汇率", "F5", UiIcons.Refresh, delegate() { RunSilentScanAsync(_homeDir, true, true); StartExchangeRateSyncAsync(false); }));
             items.Add(new PaletteCommandItem("tool-backup-now", "数据与同步", "立即创建本地时光机压缩快照 (.toklens.gz)", "将本机与缓存多节点高水位账本安全归档至 backups 目录", "", UiIcons.History, delegate() { CreateManualTimeMachineSnapshot(); }));
-            items.Add(new PaletteCommandItem("tool-theme", "界面偏好", _isDark ? "切换至浅色主题 (Paper Zinc)" : "切换至深色主题 (Obsidian Zinc)", "实时联动 Windows 11 DWM 沉浸式标题栏与悬浮胶囊", "", _isDark ? UiIcons.Sun : UiIcons.Moon, delegate() { ToggleThemeFromUi(); }));
+            items.Add(new PaletteCommandItem("tool-theme", "界面偏好", _isDark ? "切换至浅色主题 (Paper Zinc)" : "切换至深色主题 (Obsidian Zinc)", "同时切换窗口标题栏与悬浮球详情卡片", "", _isDark ? UiIcons.Sun : UiIcons.Moon, delegate() { ToggleThemeFromUi(); }));
             items.Add(new PaletteCommandItem("tool-currency", "界面偏好", _isCny ? "切换为美元计价 ($ USD)" : "切换为人民币计价 (¥ CNY)", "全局 KPI、图表、模型表与单笔透视同步切换", "", UiIcons.Swap, delegate()
             {
                 _isCny = !_isCny;
@@ -7077,7 +7085,10 @@ namespace TokLens
 
         private void RefreshMiniHud()
         {
-            if(_miniHud!=null)_miniHud.UpdateTelemetry(HudTelemetry.FromScan(_scanResult,DateTime.Now,_isCny,_usdToCny));
+            if (_miniHud == null) return;
+            HudTelemetry t = HudTelemetry.FromScan(_scanResult, DateTime.Now, _isCny, _usdToCny);
+            if (DateTime.UtcNow < _hudAlertUntilUtc) { t.Alert = true; t.AlertText = _hudAlertText; }
+            _miniHud.UpdateTelemetry(t);
         }
 
         private void EnsureMiniHudCreated()
@@ -7119,7 +7130,7 @@ namespace TokLens
             }
             catch (Exception ex)
             {
-                ShowToastSafe("切换桌面悬浮胶囊失败", ex.Message, "warning");
+                ShowToastSafe("切换桌面悬浮球失败", ex.Message, "warning");
             }
         }
 
