@@ -182,26 +182,40 @@ namespace TokLens
                 DateTime.TryParseExact(b.StartDate,"yyyy-MM-dd",CultureInfo.InvariantCulture,DateTimeStyles.None,out b0) &&
                 DateTime.TryParseExact(b.EndDate,"yyyy-MM-dd",CultureInfo.InvariantCulture,DateTimeStyles.None,out b1) && a0<=b1 && b0<=a1;
         }
-        // This describes model origin only. It deliberately does not guess the reseller,
-        // account, subscription, or billing channel from the client application's name.
-        public static string ModelOrigin(string model)
+
+        // 回本比例用：把一条用量对应到可能覆盖它的订阅服务商。工具型订阅（Cursor 等）里的请求算给工具，
+        // 其余按模型厂商。只是估算：模型来源不能证明付费渠道（也可能是 API Key 按量计费）。
+        public static string UsageProvider(string tool, string model)
         {
+            string t=(tool??"").Trim().ToLowerInvariant();
+            if(t.Contains("cursor")) return "cursor";
+            if(t.Contains("windsurf") || t.Contains("devin")) return "windsurf";
+            if(t.Contains("copilot")) return "copilot";
+            if(t.Contains("trae")) return "trae";
+            if(t.StartsWith("zed")) return "zed";
+            if(t.Contains("codebuddy")) return "codebuddy";
             string m=(model??"").ToLowerInvariant();
-            if(m.Contains("glm") || m.StartsWith("z-ai/")) return "智谱 GLM";
-            if(m.Contains("kimi") || m.Contains("moonshot")) return "Kimi / Moonshot";
-            if(m.Contains("qwen") || m.Contains("qvq") || m.Contains("tongyi")) return "通义 Qwen";
-            if(m.Contains("minimax")) return "MiniMax";
-            if(m.Contains("deepseek")) return "DeepSeek";
-            if(m.Contains("doubao") || m.StartsWith("seed-")) return "字节豆包";
-            if(m.Contains("hunyuan")) return "腾讯混元";
-            if(m.Contains("ernie")) return "百度文心";
-            if(m.Contains("mimo")) return "小米 MiMo";
-            if(m.Contains("step-")) return "阶跃星辰";
-            if(m.Contains("claude")) return "Anthropic";
-            if(m.Contains("gemini") || m.Contains("gemma")) return "Google";
-            if(m.Contains("gpt-") || m.StartsWith("o1") || m.StartsWith("o3") || m.StartsWith("o4") || m.Contains("codex")) return "OpenAI";
-            if(m.Contains("grok")) return "xAI";
-            return "来源待识别";
+            if(m.Contains("claude")) return "claude";
+            if(m.Contains("gpt-") || m.Contains("codex") || m.StartsWith("o1") || m.StartsWith("o3") || m.StartsWith("o4")) return "openai";
+            if(m.Contains("gemini") || m.Contains("gemma")) return "google";
+            if(m.Contains("glm") || m.StartsWith("z-ai/")) return "glm";
+            if(m.Contains("kimi") || m.Contains("moonshot")) return "kimi";
+            if(m.Contains("minimax")) return "minimax";
+            if(m.Contains("deepseek")) return "deepseek";
+            if(m.Contains("qwen") || m.Contains("qvq") || m.Contains("tongyi")) return "aliyun";
+            if(m.Contains("doubao") || m.StartsWith("seed-")) return "volcano";
+            if(m.Contains("hunyuan")) return "tencent-hy";
+            if(m.Contains("ernie")) return "baidu";
+            return null;
+        }
+
+        private static readonly HashSet<string> UsageMatchedProviders=new HashSet<string>(StringComparer.Ordinal){
+            "cursor","windsurf","copilot","trae","zed","codebuddy","claude","openai","google","glm","kimi","minimax","deepseek","aliyun","volcano","tencent-hy","baidu"};
+
+        /// <summary>该服务商能否自动对应到用量（自定义、通用 Token Plan 等无法对应）。</summary>
+        public static bool CoversUsage(string providerId)
+        {
+            return providerId!=null && UsageMatchedProviders.Contains(providerId);
         }
     }
 }

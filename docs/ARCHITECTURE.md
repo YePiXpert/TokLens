@@ -55,9 +55,9 @@ flowchart TD
 | `src/MainWindow.cs` | `Program`, `MainWindow` | 单实例入口、无头 CLI 导出与 `--self-test-ui` 布局回归验证、主窗口多视图状态编排、自愈型 `FileSystemWatcher` 与后台定时调度。 |
 | `src/RequestInspectorPanel.cs` | `RequestInspectorPanel` | `300px` 实时请求取证侧栏（双币成本与缓存省钱拆解、四维 Token 构成瀑布条、延迟与 TPS 吞吐仪表、单条 JSON 导出）。 |
 | `src/CommandPaletteOverlay.cs` | `CommandPaletteOverlay`, `PaletteCommandItem` | `Ctrl+K` 键盘优先全局命令面板（内置 GBK 中文拼音首字母提取与多维模糊打分索引）。 |
-| `src/CompactHudWindow.cs` | `MiniHudWindow` | 桌面悬浮胶囊（`WS_EX_TOOLWINDOW` 不进 Alt+Tab）：本机工具 / 模型、有计时来源的请求均速、今日 API 估值；可拖动、锁定、调透明度。 |
+| `src/CompactHudWindow.cs` | `MiniHudWindow` | 桌面迷你胶囊（`WS_EX_TOOLWINDOW` 不进 Alt+Tab）：上下文小环 + 活动点、今日估值、近 1 小时 12 根微柱；悬停展开卡片（今日概况、近 2 小时柱状图、最近请求），空闲 5 分钟变淡，贴边吸附并把位置记在 `hud_position.txt`。数据来自 `HudTelemetry.FromScan`，只算本机。 |
 | `src/UsageTiming.cs` | `UsageTiming`, `HudTelemetry` | 请求计时来源判定与悬浮胶囊数据。 |
-| `src/SubscriptionCostsView.cs` | `SubscriptionCostsView` | 订阅与费用页：月度订阅支出、按「当前 / 待处理 / 历史」分组的订阅列表、两步登记弹窗、按模型来源的 API 参考估值。 |
+| `src/SubscriptionCostsView.cs` | `SubscriptionCostsView` | 订阅与费用页（可选功能，`show_subscriptions` 默认关闭）：月度订阅支出、下次续费、本周期回本比例（按 API 单价估算，`SubscriptionCatalog.UsageProvider` 对应用量），按「当前 / 待处理 / 历史」分组的订阅列表、两步登记弹窗。 |
 | `src/SubscriptionCatalog.cs` | `SubscriptionCatalog`, `SubscriptionOffer` | 订阅服务商与参考套餐目录（只作参考价，不推断用户已购）。 |
 | `src/UsageHeatmapView.cs` | `UsageHeatmapView` | 每日汇总页顶部的近 365 天每日用量日历。 |
 | `src/ProjectAttributionView.cs` | `ProjectAttributionView` | 按工作区统计本机用量（Claude Code 按 message.id + requestId 去重，与主扫描器口径一致）。 |
@@ -235,5 +235,5 @@ TokLens 在桌面交互层摒弃了传统工具软件堆叠挤压的「上下分
 4. **四大高阶生产力子系统**：
    - **`RequestInspectorPanel`（实时请求取证侧栏）**：点击任意实时请求即可在右侧 `300px` 抽屉透视双币种单次成本、Prompt Cache 省钱金额与比例、四维 Token 构成瀑布条、延迟档位与 `tok/s` 吞吐仪表，并支持一键导出取证 JSON。
    - **`CommandPaletteOverlay`（`Ctrl+K` 全局命令面板）**：支持中英文关键词、快捷键与中文拼音首字母（如输入 `tb` 匹配「同步」、`dc` 匹配「导出」）毫秒级模糊检索跳转。
-   - **`MiniHudWindow`（桌面悬浮胶囊，`src/CompactHudWindow.cs`）**：采用 `WS_EX_TOOLWINDOW` 扩展样式隐藏出 `Alt+Tab` 队列，常驻桌面一角显示本机工具 / 模型、有计时来源的请求均速与今日 API 估值，支持拖拽、位置锁定与透明度调节。
+   - **`MiniHudWindow`（桌面悬浮胶囊，`src/CompactHudWindow.cs`）**：采用 `WS_EX_TOOLWINDOW` 扩展样式隐藏出 `Alt+Tab` 队列，常驻桌面一角的迷你胶囊（约 170×32）：上下文小环、今日估值与近 1 小时微柱，单色设计，只有最新一根柱子用强调色；悬停卡片列出今日概况、近 2 小时与最近 5 次请求，有计时来源时才显示请求均速；支持拖拽吸附、位置记忆、锁定与透明度调节。
    - **`PricingStudioWindow`（模型定价工作台）** 与 **`ToastManager`（非模态通知栈）**：所有后台同步、复制与导出反馈均以右下角轻量滑入卡片呈现，彻底终结模态 `MessageBox` 对心流的打断。

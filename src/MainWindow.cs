@@ -593,6 +593,7 @@ namespace TokLens
         private List<RecordBucket> _latestSpecialistMachineRows = new List<RecordBucket>();
         private List<RecordBucket> _latestSpecialistActiveRows = new List<RecordBucket>();
         private List<RecordBucket> _latestFullHistoryMachineRows = new List<RecordBucket>();
+        private List<RecordBucket> _latestAllHistoryRows = new List<RecordBucket>();
         private List<RecordBucket> _latestFullHistoryScopedRows = new List<RecordBucket>();
         private List<string> _latestUniqueModelNames = new List<string>();
         private string _latestReferenceDate = "";
@@ -661,6 +662,7 @@ namespace TokLens
             UpdateFxUiState(_fxIsLive, false);
             UpdatePriceUiState(false);
             UpdateCloudStatusUi();
+            ApplySubscriptionFeature();
             SwitchActiveView(ViewOverview);
 
             if (!_skipAutoScan)
@@ -1475,6 +1477,10 @@ namespace TokLens
         internal void RunHeadlessUiSelfTest()
         {
             _configWritesSuppressed = true;
+            // 自测要覆盖全部页面：在内存里临时打开可选的订阅页（不写配置），结束时恢复
+            bool subscriptionsBefore = _syncCfg.ShowSubscriptions;
+            _syncCfg.ShowSubscriptions = true;
+            ApplySubscriptionFeature();
             TokenScanner scanner = new TokenScanner(_homeDir, false);
             _scanResult = scanner.Run();
             _localNode = SyncService.BuildLocalSnapshot(_scanResult, _syncCfg);
@@ -1620,6 +1626,8 @@ namespace TokLens
                 throw new InvalidOperationException("Layout jump detected after theme toggle & budget alert badge!");
             }
 
+            _syncCfg.ShowSubscriptions = subscriptionsBefore;
+            ApplySubscriptionFeature();
         }
 
         // =================================================================================================
@@ -2535,16 +2543,15 @@ namespace TokLens
             _pageToolbar.Visibility = settingsGroup ? Visibility.Collapsed : Visibility.Visible;
             if (settingsGroup) return;
 
-            // 项目页读取本机工作区全部历史；订阅页在页面内自选时间范围。它们不跟随顶部时间筛选，
+            // 项目页读取本机工作区全部历史；订阅按账户记实付，与设备和时间范围都无关。它们不跟随顶部筛选，
             // 所以不显示时间范围和导出（导出内容按时间筛选生成，放在这里会让人误以为导出的是本页数据）。
             bool ownScope = (v == ViewProjects || v == ViewInsights);
-            _deviceSelectorBtn.Visibility = (v == ViewProjects) ? Visibility.Collapsed : Visibility.Visible;
+            _deviceSelectorBtn.Visibility = ownScope ? Visibility.Collapsed : Visibility.Visible;
             _rangeContainer.Visibility = ownScope ? Visibility.Collapsed : Visibility.Visible;
             _exportMenuBtn.Visibility = ownScope ? Visibility.Collapsed : Visibility.Visible;
 
             string scope = "";
             if (v == ViewProjects) scope = "范围：本机工作区 · 全部历史";
-            else if (v == ViewInsights) scope = "时间范围在页面内选择";
             _pageScopeText.Text = scope;
             _pageScopeText.Visibility = string.IsNullOrEmpty(scope) ? Visibility.Collapsed : Visibility.Visible;
         }
@@ -4202,6 +4209,11 @@ namespace TokLens
                 RefreshDashboardView();
             };
 
+            callbacks.OnFeaturesChanged = delegate()
+            {
+                ApplySubscriptionFeature();
+            };
+
             callbacks.OnHomeDirectoryChanged = delegate(string newHomeDir)
             {
                 if (!string.IsNullOrWhiteSpace(newHomeDir) && Directory.Exists(newHomeDir))
@@ -4704,6 +4716,8 @@ namespace TokLens
         {
             if (viewIdx < 0 || viewIdx >= TotalViewCount)
                 viewIdx = ViewOverview;
+            if (viewIdx == ViewInsights && !SubscriptionsEnabled)
+                viewIdx = ViewOverview;
 
             _activeView = viewIdx;
 
@@ -4797,6 +4811,25 @@ namespace TokLens
                 bar.Visibility = highlight ? Visibility.Visible : Visibility.Hidden;
         }
 
+        private bool SubscriptionsEnabled
+        {
+            get { return _syncCfg != null && _syncCfg.ShowSubscriptions; }
+        }
+
+        // 订阅记账与回本比例是可选功能（同步与偏好 → 扫描与偏好），默认关闭：
+        // 关闭时侧栏、命令面板和 Ctrl+5 都不出现该页，已登记的订阅记录保留。
+        private void ApplySubscriptionFeature()
+        {
+            int idx = Array.IndexOf(NavTopViews, ViewInsights);
+            if (_navItemBorders != null && idx >= 0 && idx < _navItemBorders.Length && _navItemBorders[idx] != null)
+                _navItemBorders[idx].Visibility = SubscriptionsEnabled ? Visibility.Visible : Visibility.Collapsed;
+            if (_activeView == ViewInsights)
+            {
+                if (SubscriptionsEnabled) RefreshDashboardView();
+                else SwitchActiveView(ViewOverview);
+            }
+        }
+
         private void ApplyPreferencesFromConfig()
         {
             if (_syncCfg == null) return;
@@ -4826,6 +4859,7 @@ namespace TokLens
             ModernControlsFactory.UpdateSegmentedGroup(_chartTypeBtns, _chartLineMode ? 0 : 1);
             UpdateNavVisuals();
             UpdateCloudStatusUi();
+            ApplySubscriptionFeature();
 
             if (_trayMinimizeToggleItem != null)
                 _trayMinimizeToggleItem.Checked = _syncCfg.MinimizeToTray;
@@ -4979,7 +5013,7 @@ namespace TokLens
             string sub = "";
             if (_activeView == ViewInsights)
             {
-                sub = "订阅按实付记录，API 估值仅作参考";
+                sub = "按实际付款记录，回本比例为估算";
             }
             else if (_activeView != ViewSettings && _activeView != ViewDoctor && _activeView != ViewProjects)
             {
@@ -5720,6 +5754,7 @@ namespace TokLens
                     fullHistoryScopedRows.Add(rb);
             }
             _latestFullHistoryMachineRows = fullHistoryMachineRows;
+            _latestAllHistoryRows = allRecords;
             _latestFullHistoryScopedRows = fullHistoryScopedRows;
             _latestSpecialistMachineRows = machineFiltered;
             _latestSpecialistActiveRows = activeRows;
@@ -6947,8 +6982,7 @@ namespace TokLens
                 }
                 else if (_activeView == ViewInsights && _subscriptionView != null)
                 {
-                    List<RecordBucket> subscriptionRows = _latestFullHistoryMachineRows ?? machineRows;
-                    _subscriptionView.Render(subscriptionRows, _isCny, _usdToCny, _isDark, DateTime.Today);
+                    _subscriptionView.Render(_latestAllHistoryRows, _isCny, _usdToCny, _isDark, DateTime.Today);
                 }
                 else if (_activeView == ViewDailyExport && _heatmapView != null)
                 {
@@ -6992,7 +7026,8 @@ namespace TokLens
             items.Add(new PaletteCommandItem("nav-live", "视图导航", "用量 / 请求明细", "逐笔查看请求用量、耗时与单笔账单", "Ctrl+2", UiIcons.Activity, delegate() { SwitchActiveView(ViewLiveStream); }));
             items.Add(new PaletteCommandItem("nav-models", "视图导航", "用量 / 模型与工具", "按模型和工具汇总，查看单价与账单占比", "Ctrl+3", UiIcons.Models, delegate() { SwitchActiveView(ViewModels); }));
             items.Add(new PaletteCommandItem("nav-projects", "视图导航", "用量 / 项目", "本机各代码仓库与工作区的用量归因", "Ctrl+4", UiIcons.Folder, delegate() { SwitchActiveView(ViewProjects); }));
-            items.Add(new PaletteCommandItem("nav-insights", "视图导航", "订阅与费用", "订阅记录、到期续费与 API 参考估值", "Ctrl+5", UiIcons.Sparkles, delegate() { SwitchActiveView(ViewInsights); }));
+            if (SubscriptionsEnabled)
+                items.Add(new PaletteCommandItem("nav-insights", "视图导航", "订阅与费用", "订阅记录、到期续费与回本比例", "Ctrl+5", UiIcons.Sparkles, delegate() { SwitchActiveView(ViewInsights); }));
             items.Add(new PaletteCommandItem("nav-bloat", "视图导航", "用量 / 会话分析", "长对话上下文膨胀与缓存命中异常的会话", "Ctrl+7", UiIcons.Layers, delegate() { SwitchActiveView(ViewBloat); }));
             items.Add(new PaletteCommandItem("nav-devices", "视图导航", "设备", "各台电脑与 Linux / macOS 节点的状态与账单", "Ctrl+8", UiIcons.Devices, delegate() { SwitchActiveView(ViewDevices); }));
             items.Add(new PaletteCommandItem("nav-daily", "视图导航", "用量 / 每日汇总", "按日汇总的用量与费用（导出在工具条右侧）", "Ctrl+9", UiIcons.Calendar, delegate() { SwitchActiveView(ViewDailyExport); }));
@@ -7000,7 +7035,7 @@ namespace TokLens
             items.Add(new PaletteCommandItem("nav-settings", "视图导航", "设置 / 同步与偏好", "Gist / WebDAV 同步、配对码、扫描与显示偏好", "Ctrl+,", UiIcons.Settings, delegate() { SwitchActiveView(ViewSettings); }));
 
             // 2. 效率工具与工作台
-            items.Add(new PaletteCommandItem("tool-hud", "桌面工作台", "显示 / 隐藏桌面置顶微胶囊 HUD", "Dynamic Island 风格高颜值置顶悬浮窗，穿透与透明度可调", "Ctrl+M", UiIcons.Capsule, delegate() { ToggleMiniHudWindow(); }));
+            items.Add(new PaletteCommandItem("tool-hud", "桌面工作台", "显示 / 隐藏桌面悬浮条", "迷你胶囊：今日估值、上下文与近 1 小时，悬停看详情", "Ctrl+M", UiIcons.Capsule, delegate() { ToggleMiniHudWindow(); }));
             items.Add(new PaletteCommandItem("tool-pricing", "桌面工作台", "设置 / 计价规则", "浏览模型单价，或配置私有中转的自定义费率", "", UiIcons.Models, delegate() { OpenPricingStudioDialog(null); }));
             items.Add(new PaletteCommandItem("tool-token-guide", "帮助与排障", "为什么家里和单位自动读取的 gh 令牌不一样？", "深度图解 GitHub 设备独立 OAuth 令牌 (gho_...) 与同账号 Gist 汇聚原理", "F1", UiIcons.Key, delegate() { OpenShortcutAndGuideDialog(1); }));
             items.Add(new PaletteCommandItem("tool-shortcuts", "帮助与排障", "打开全局键盘快捷键速查表", "双列键盘速查矩阵，支持全键盘流极速操控", "F1", UiIcons.Help, delegate() { OpenShortcutAndGuideDialog(0); }));
@@ -7489,7 +7524,7 @@ namespace TokLens
                 if (e.Key == Key.D2 || e.Key == Key.NumPad2) { e.Handled = true; SwitchActiveView(ViewLiveStream); return; }
                 if (e.Key == Key.D3 || e.Key == Key.NumPad3) { e.Handled = true; SwitchActiveView(ViewModels); return; }
                 if (e.Key == Key.D4 || e.Key == Key.NumPad4) { e.Handled = true; SwitchActiveView(ViewProjects); return; }
-                if (e.Key == Key.D5 || e.Key == Key.NumPad5) { e.Handled = true; SwitchActiveView(ViewInsights); return; }
+                if (e.Key == Key.D5 || e.Key == Key.NumPad5) { e.Handled = true; if (SubscriptionsEnabled) SwitchActiveView(ViewInsights); return; }
                 if (e.Key == Key.D7 || e.Key == Key.NumPad7) { e.Handled = true; SwitchActiveView(ViewBloat); return; }
                 if (e.Key == Key.D8 || e.Key == Key.NumPad8) { e.Handled = true; SwitchActiveView(ViewDevices); return; }
                 if (e.Key == Key.D9 || e.Key == Key.NumPad9) { e.Handled = true; SwitchActiveView(ViewDailyExport); return; }

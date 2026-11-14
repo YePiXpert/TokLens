@@ -557,8 +557,8 @@ namespace TokLens
                 true));
 
             rightStack.Children.Add(BuildShortcutRow(
-                "开启/隐藏桌面置顶悬浮胶囊 HUD",
-                "轻量化置顶胶囊窗，沉浸编码时实时盯盘费用",
+                "显示 / 隐藏桌面悬浮条",
+                "迷你胶囊，悬停看今日概况与最近请求",
                 new string[][] { new string[] { "Ctrl", "M" } },
                 false));
 

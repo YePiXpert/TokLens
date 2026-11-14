@@ -865,6 +865,8 @@ namespace TokLens
         public bool IsDarkTheme = true;
         public bool PreferCny = true;
         public bool MinimizeToTray = false;
+        // 可选功能：订阅记账与回本比例，默认关闭
+        public bool ShowSubscriptions = false;
         public Dictionary<string, string> NodeAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public bool SubscriptionsCustomized = false;
         public List<SubscriptionPlanConfig> Subscriptions = new List<SubscriptionPlanConfig>();
@@ -902,6 +904,7 @@ namespace TokLens
             IsDarkTheme = other.IsDarkTheme;
             PreferCny = other.PreferCny;
             MinimizeToTray = other.MinimizeToTray;
+            ShowSubscriptions = other.ShowSubscriptions;
             NodeAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             if (other.NodeAliases != null)
             {
@@ -1937,8 +1940,7 @@ namespace TokLens
         {
             get
             {
-                string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-                return Path.Combine(appData, "TokLens", "fx_cache.json");
+                return Path.Combine(SyncService.AppConfigDir, "fx_cache.json");
             }
         }
 

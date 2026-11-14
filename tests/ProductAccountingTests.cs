@@ -44,8 +44,10 @@ internal static class ProductAccountingTests
         HashSet<string> ids=new HashSet<string>();bool glm=false,kimi=false,ali=false,mini=false;
         foreach(SubscriptionOffer o in SubscriptionCatalog.Offers){Check(ids.Add(o.Id),"unique stable offer ID "+o.Id);Check(o.Months>0&&(!o.Amount.HasValue||SubscriptionCatalog.ValidAmount(o.Amount.Value)),"valid catalogue amount "+o.Id);glm|=o.ProviderId=="glm";kimi|=o.ProviderId=="kimi";ali|=o.ProviderId=="aliyun";mini|=o.ProviderId=="minimax";}
         Check(glm&&kimi&&ali&&mini,"domestic providers are independently selectable");
-        Check(SubscriptionCatalog.ModelOrigin("glm-5.3-flash")=="智谱 GLM"&&SubscriptionCatalog.ModelOrigin("kimi-k2.5")=="Kimi / Moonshot"&&SubscriptionCatalog.ModelOrigin("qwen3.5")=="通义 Qwen"&&SubscriptionCatalog.ModelOrigin("minimax-m3")=="MiniMax","domestic models stay separate regardless of client tool");
-        Check(SubscriptionCatalog.ModelOrigin("mystery-router-model")=="来源待识别","unknown model cannot be assigned to a provider by client name");
+        Check(SubscriptionCatalog.UsageProvider("Cursor","claude-opus-5-5")=="cursor"&&SubscriptionCatalog.UsageProvider("Claude Code","claude-opus-5-5")=="claude","payback: requests inside a subscribed tool belong to that tool, others to the model vendor");
+        Check(SubscriptionCatalog.UsageProvider("Claude Code","glm-5.3")=="glm"&&SubscriptionCatalog.UsageProvider("OpenAI Codex","gpt-6-astra")=="openai","payback: model vendor decides, not the client tool");
+        Check(SubscriptionCatalog.UsageProvider("OpenCode","mystery-router-model")==null&&!SubscriptionCatalog.CoversUsage("other")&&SubscriptionCatalog.CoversUsage("kimi"),"payback: unknown models and custom providers are not matched");
+        Check(!new SyncConfig().ShowSubscriptions,"subscriptions and payback are off by default");
     }
     private static void Timing(string root)
     {
@@ -69,6 +71,8 @@ internal static class ProductAccountingTests
         ScanResult cached=LocalUsageStore.TryLoadInstantSnapshot(home);Check(cached!=null&&cached.RecentRequests.Count==2,"request timings survive snapshot reload");
         DateTime now=new DateTime(2026,11,14,10,0,21,DateTimeKind.Utc);HudTelemetry h=HudTelemetry.FromScan(scan,now,false,7);
         Check(h.Model=="glm-5.3"&&Math.Abs(h.Tps-82.4)<1e-9,"HUD chooses latest local request, independently of dashboard filters");
+        Check(h.ContextTokens==100&&h.Latest.Count==2&&h.Latest[0].TimestampMs>h.Latest[1].TimestampMs,"HUD keeps recent requests newest first with the latest context size");
+        Check(Math.Abs(h.SparkHour[29]-h.LastHourUsd)<1e-9&&Math.Abs(h.SparkTwoHours[23]-h.LastHourUsd)<1e-9&&Math.Abs(h.Last15Usd-h.LastHourUsd)<1e-9&&h.TodayRequests>=2,"HUD spend curves bucket requests by age");
         Check(h.IsRecent(now)&&!h.IsRecent(now.AddMinutes(6)),"finished request expires to idle instead of pretending to stream");
         h.TimingSource="";Check(h.Tps==0,"HUD refuses unverified timing even if a duration exists");
         scan.Records.Add(new RecordBucket {Date=now.ToString("yyyy-MM-dd"),Model="unknown",Turns=3,RateLabel="未定价"});

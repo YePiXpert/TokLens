@@ -20,6 +20,7 @@ namespace TokLens
     {
         public Action<SyncOutcome> OnSynced;
         public Action OnThemeOrCurrencyChanged;
+        public Action OnFeaturesChanged;
         public Action<string> OnHomeDirectoryChanged;
         public Action OnForceRefreshPricing;
         public Action OnForceRefreshFx;
@@ -245,6 +246,7 @@ namespace TokLens
         private TextBlock _homeDirPathText;
         private CheckBox _wslSwitch;
         private CheckBox _minToTraySwitch;
+        private CheckBox _subsSwitch;
         private Button[] _themeSegBtns;
         private Button[] _currencySegBtns;
 
@@ -328,6 +330,7 @@ namespace TokLens
 
                 _wslSwitch.IsChecked = _liveCfg.ScanLocalWsl;
                 _minToTraySwitch.IsChecked = _liveCfg.MinimizeToTray;
+                _subsSwitch.IsChecked = _liveCfg.ShowSubscriptions;
 
                 ModernControlsFactory.UpdateSegmentedGroup(_themeSegBtns, _liveCfg.IsDarkTheme ? 0 : 1);
                 ModernControlsFactory.UpdateSegmentedGroup(_currencySegBtns, _liveCfg.PreferCny ? 0 : 1);
@@ -1360,6 +1363,20 @@ namespace TokLens
                 "点击右上角关闭按钮时不退出进程，保持后台日志监听与 5 分钟云端自动同步"));
             rowTray.Child = trayDock;
             sp.Children.Add(rowTray);
+
+            // 可选功能：订阅记账与回本比例（默认关闭）
+            Border rowSubs = MakeSettingRowContainer(true);
+            DockPanel subsDock = new DockPanel();
+            _subsSwitch = ModernControlsFactory.CreateToggleSwitch("");
+            _subsSwitch.VerticalAlignment = VerticalAlignment.Center;
+            DockPanel.SetDock(_subsSwitch, Dock.Right);
+            _subsSwitch.Click += OnSubscriptionsToggleChanged;
+            subsDock.Children.Add(_subsSwitch);
+            subsDock.Children.Add(MakeRowTitleAndDesc(
+                "订阅记账与回本比例",
+                "在侧栏显示「订阅与费用」：登记订阅实付，并按 API 单价估算本周期回本比例（估算，不是账单）"));
+            rowSubs.Child = subsDock;
+            sp.Children.Add(rowSubs);
 
             // Row 4: Theme & Default Currency
             Border rowAppearance = MakeSettingRowContainer(true);
@@ -2403,6 +2420,21 @@ namespace TokLens
             NotifyUser(
                 on ? "已开启关闭最小化到系统托盘" : "已恢复点击关闭直接退出",
                 on ? "点击主窗口右上角关闭时将静默驻留至右下角系统托盘。" : "点击右上角关闭按钮将直接退出程序。",
+                "accent");
+        }
+
+        private void OnSubscriptionsToggleChanged(object sender, RoutedEventArgs e)
+        {
+            if (_suppressUiEvents) return;
+            bool on = _subsSwitch.IsChecked == true;
+            _liveCfg.ShowSubscriptions = on;
+            _workingCfg.ShowSubscriptions = on;
+            SyncService.SaveConfig(_liveCfg);
+            if (_callbacks.OnFeaturesChanged != null)
+                _callbacks.OnFeaturesChanged();
+            NotifyUser(
+                on ? "已开启订阅记账与回本比例" : "已关闭订阅记账与回本比例",
+                on ? "侧栏已显示「订阅与费用」。" : "侧栏不再显示「订阅与费用」，已登记的订阅记录会保留。",
                 "accent");
         }
 

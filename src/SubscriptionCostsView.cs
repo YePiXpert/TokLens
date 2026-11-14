@@ -13,7 +13,8 @@ using System.Windows.Media;
 namespace TokLens
 {
     /// <summary>
-    /// 订阅与费用页：顶部三项概要、按状态分组的订阅列表、按模型来源的 API 参考估值。
+    /// 订阅与费用页（可选功能，默认关闭）：本月支出、下次续费、本周期回本比例三项概要，按状态分组的订阅列表。
+    /// 回本比例 = 周期内能对应到该服务商的用量按 API 单价折算的价值 ÷ 本周期实付，只作参考。
     /// 登记 / 核对 / 续订都走两步弹窗：先选服务商和套餐，再填实付。
     /// 订阅按账户记录一次，与设备无关；不会根据用量推测用户买了哪个套餐。
     /// </summary>
@@ -27,23 +28,20 @@ namespace TokLens
 
         private SyncConfig _config;
         private Action<SyncConfig> _save;
-        private bool _dark = true, _cny = true, _month;
+        private bool _dark = true, _cny = true;
         private double _rate = ExchangeRateService.DefaultRate;
         private DateTime _date = DateTime.Today;
-        private List<RecordBucket> _records = new List<RecordBucket>();
+        private List<RecordBucket> _usage = new List<RecordBucket>();
         private int _tab = -1; // -1：按内容自动选择（有当前订阅看当前，否则看待处理）
 
         private readonly TextBlock _spendValue;
         private readonly TextBlock _spendSub;
         private readonly TextBlock _renewValue;
         private readonly TextBlock _renewSub;
-        private readonly TextBlock _apiValue;
-        private readonly TextBlock _apiSub;
+        private readonly TextBlock _paybackValue;
+        private readonly TextBlock _paybackSub;
         private readonly Button[] _tabBtns = new Button[3];
         private readonly StackPanel _rows = new StackPanel();
-        private readonly StackPanel _origins = new StackPanel();
-        private readonly TextBlock _usageSummary;
-        private readonly Button[] _rangeBtns = new Button[2];
 
         private sealed class Entry
         {
@@ -57,6 +55,10 @@ namespace TokLens
             public bool HasDates;
             public DateTime Start;
             public DateTime End;
+            public bool HasPayback;
+            public double ValueUsd;
+            public double PaidUsd;
+            public string PaybackNote;
         }
 
         /// <summary>可切换选中态的卡片按钮（服务商、套餐选择用）。</summary>
@@ -131,11 +133,11 @@ namespace TokLens
             head.Children.Add(intro);
             root.Children.Add(head);
 
-            // 概要：本月订阅支出 / 下次续费 / API 参考估值
+            // 概要：本月订阅支出 / 下次续费 / 本周期回本
             UniformGrid kpis = new UniformGrid { Columns = 3, Margin = new Thickness(0, 0, 0, 16) };
             kpis.Children.Add(Kpi("本月订阅支出（已核对）", new Thickness(0, 0, 10, 0), out _spendValue, out _spendSub));
             kpis.Children.Add(Kpi("下次续费", new Thickness(0, 0, 10, 0), out _renewValue, out _renewSub));
-            kpis.Children.Add(Kpi("API 参考估值", new Thickness(0), out _apiValue, out _apiSub));
+            kpis.Children.Add(Kpi("本周期回本（估算）", new Thickness(0), out _paybackValue, out _paybackSub));
             root.Children.Add(kpis);
 
             // 我的订阅：当前 / 待处理 / 历史
@@ -164,37 +166,11 @@ namespace TokLens
 
             Border table = ModernControlsFactory.CreateCard(new Thickness(0));
             table.Child = _rows;
-            table.Margin = new Thickness(0, 0, 0, 20);
             root.Children.Add(table);
 
-            // API 参考估值（按模型来源）
-            DockPanel usageHead = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
-            Border range = ModernControlsFactory.CreateSegmentedContainer();
-            Panel rangePanel = (Panel)range.Child;
-            string[] rangeNames = { "近 30 天", "本月" };
-            for (int i = 0; i < 2; i++)
-            {
-                bool month = i == 1;
-                Button b = ModernControlsFactory.CreateSegmentedItem(rangeNames[i]);
-                b.Click += delegate { _month = month; RenderUsage(); RenderRegistered(); };
-                _rangeBtns[i] = b;
-                rangePanel.Children.Add(b);
-            }
-            DockPanel.SetDock(range, Dock.Right);
-            usageHead.Children.Add(range);
-            TextBlock usageTitle = Text("API 参考估值 · 按模型来源", DesignSystem.TextTitle, "FgPrimary");
-            usageTitle.FontWeight = FontWeights.SemiBold;
-            usageTitle.VerticalAlignment = VerticalAlignment.Center;
-            usageHead.Children.Add(usageTitle);
-            root.Children.Add(usageHead);
-
-            _usageSummary = Text("", DesignSystem.TextBody, "FgSecondary");
-            root.Children.Add(_usageSummary);
-            Border usageCard = ModernControlsFactory.CreateCard(new Thickness(16, 12, 16, 12));
-            usageCard.Margin = new Thickness(0, 8, 0, 6);
-            usageCard.Child = _origins;
-            root.Children.Add(usageCard);
-            root.Children.Add(Text("模型来源不代表付费渠道；工具名也不能证明用的是哪个订阅，所以这里不与订阅费用相减。按顶部所选设备统计。", DesignSystem.TextCaption, "FgMuted"));
+            TextBlock note = Text("回本比例 = 本周期内对应用量按 API 单价折算的价值 ÷ 本周期实付。Cursor、Copilot 等工具里的请求算给该工具，其余按模型厂商对应；模型来源不能证明付费渠道，用 API Key 按量付费的请求也会算进去，只作参考。", DesignSystem.TextCaption, "FgMuted");
+            note.Margin = new Thickness(0, 8, 0, 0);
+            root.Children.Add(note);
         }
 
         // ------------------------------------------------------------------ 公共接口
@@ -206,14 +182,14 @@ namespace TokLens
             RenderRegistered();
         }
 
-        public void Render(List<RecordBucket> records, bool cny, double rate, bool dark, DateTime date)
+        /// <param name="usage">全部设备的全部历史用量：订阅按账户计，与设备无关。</param>
+        public void Render(List<RecordBucket> usage, bool cny, double rate, bool dark, DateTime date)
         {
-            _records = records ?? new List<RecordBucket>();
+            _usage = usage ?? new List<RecordBucket>();
             _cny = cny;
             _rate = rate > 0.1 && !double.IsNaN(rate) && !double.IsInfinity(rate) ? rate : ExchangeRateService.DefaultRate;
             _dark = dark;
             _date = date.Date;
-            RenderUsage();
             RenderRegistered();
         }
 
@@ -279,7 +255,49 @@ namespace TokLens
                 }
                 list.Add(e);
             }
+            ComputePayback(list);
             return list;
+        }
+
+        // 回本比例：周期内能对应到该服务商的用量按 API 单价折算的价值 ÷ 本周期实付。
+        // 同服务商多个账户的周期重叠时用量平分，因为无法区分是哪个账户产生的。
+        private void ComputePayback(List<Entry> list)
+        {
+            foreach (Entry e in list)
+            {
+                e.HasPayback = false;
+                e.PaybackNote = null;
+                if (e.Legacy || !e.HasDates || e.Conflict) continue;
+                if (e.Start > _date) { e.PaybackNote = "未开始"; continue; }
+                e.PaidUsd = e.Plan.Currency == "CNY" ? e.Plan.Amount / _rate : e.Plan.Amount;
+                if (!SubscriptionCatalog.CoversUsage(e.Plan.EcoId)) { e.PaybackNote = "无法对应用量"; continue; }
+                if (e.PaidUsd <= 0) { e.PaybackNote = "免费套餐"; continue; }
+
+                DateTime last = e.End < _date ? e.End : _date;
+                double value = 0;
+                foreach (RecordBucket r in _usage)
+                {
+                    DateTime day;
+                    if (r == null || r.CostUsd <= 0 || !SubscriptionCatalog.ValidAmount(r.CostUsd)) continue;
+                    if (!DateTime.TryParseExact(r.Date, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out day) || day < e.Start || day > last) continue;
+                    if (SubscriptionCatalog.UsageProvider(r.Tool, r.Model) == e.Plan.EcoId) value += r.CostUsd;
+                }
+
+                int sharing = 1;
+                foreach (Entry o in list)
+                {
+                    if (object.ReferenceEquals(o, e) || o.Legacy || !o.HasDates || o.Conflict || o.Plan.EcoId != e.Plan.EcoId) continue;
+                    if (o.Start <= last && e.Start <= o.End) sharing++;
+                }
+                e.ValueUsd = value / sharing;
+                e.HasPayback = true;
+                if (sharing > 1) e.PaybackNote = "与同服务商另外 " + (sharing - 1) + " 个账户平分用量";
+            }
+        }
+
+        private static string Percent(double ratio)
+        {
+            return (ratio * 100).ToString("N0", CultureInfo.InvariantCulture) + "%";
         }
 
         private static bool HasLaterRecord(SubscriptionPlanConfig s, DateTime end, List<SubscriptionPlanConfig> subs)
@@ -331,6 +349,27 @@ namespace TokLens
                 _renewSub.Text = "登记或核对订阅后显示到期日";
                 _renewSub.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             }
+
+            double value = 0, paid = 0;
+            foreach (Entry e in entries)
+            {
+                if (!e.Active || e.Conflict || e.Legacy || !e.HasPayback) continue;
+                value += e.ValueUsd;
+                paid += e.PaidUsd;
+            }
+            if (paid > 0)
+            {
+                double ratio = value / paid;
+                _paybackValue.Text = Percent(ratio);
+                _paybackValue.SetResourceReference(TextBlock.ForegroundProperty, ratio >= 1 ? "SemanticSuccess" : "FgPrimary");
+                _paybackSub.Text = "API 等值 " + FormatterUtil.FormatMoney(value, _cny, _rate) + " / 实付 " + FormatterUtil.FormatMoney(paid, _cny, _rate);
+            }
+            else
+            {
+                _paybackValue.Text = "—";
+                _paybackValue.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+                _paybackSub.Text = "有可对应用量的当前订阅后显示";
+            }
         }
 
         // ------------------------------------------------------------------ 订阅列表
@@ -380,6 +419,7 @@ namespace TokLens
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star), MinWidth = 180 });
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(200) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(120) });
             g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(176) });
             return g;
         }
@@ -388,7 +428,7 @@ namespace TokLens
         {
             Grid g = RowGrid();
             g.Margin = new Thickness(16, 10, 16, 6);
-            string[] heads = { "服务商 · 套餐", "周期费用", "周期", "" };
+            string[] heads = { "服务商 · 套餐", "周期费用", "周期", "回本", "" };
             for (int i = 0; i < heads.Length; i++)
             {
                 TextBlock t = Text(heads[i], DesignSystem.TextCaption, "FgMuted");
@@ -475,6 +515,35 @@ namespace TokLens
             Grid.SetColumn(period, 2);
             g.Children.Add(period);
 
+            // 列 4：本周期回本比例（估算）
+            StackPanel pay = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 8, 0) };
+            if (e.HasPayback)
+            {
+                double ratio = e.ValueUsd / e.PaidUsd;
+                TextBlock pct = Text(Percent(ratio), DesignSystem.TextLabel, ratio >= 1 ? "SemanticSuccess" : "FgPrimary");
+                pct.FontWeight = FontWeights.SemiBold;
+                pct.TextWrapping = TextWrapping.NoWrap;
+                ModernControlsFactory.EnableTabularNumbers(pct, false);
+                pay.Children.Add(pct);
+                TextBlock eq = Text("等值 " + FormatterUtil.FormatMoney(e.ValueUsd, _cny, _rate), DesignSystem.TextCaption, "FgMuted");
+                eq.TextWrapping = TextWrapping.NoWrap;
+                eq.TextTrimming = TextTrimming.CharacterEllipsis;
+                pay.Children.Add(eq);
+                DateTime last = e.End < _date ? e.End : _date;
+                pay.ToolTip = e.Start.ToString("MM-dd", CultureInfo.InvariantCulture) + " 至 " + last.ToString("MM-dd", CultureInfo.InvariantCulture)
+                    + " 的对应用量按 API 单价折算 " + FormatterUtil.FormatMoney(e.ValueUsd, _cny, _rate)
+                    + "，本周期实付 " + FormatterUtil.FormatMoney(e.PaidUsd, _cny, _rate)
+                    + (e.PaybackNote != null ? "；" + e.PaybackNote : "");
+            }
+            else
+            {
+                pay.Children.Add(Text("—", DesignSystem.TextLabel, "FgMuted"));
+                string why = e.Legacy ? "核对后计算" : (e.PaybackNote ?? (e.Conflict ? "周期重叠" : "缺少起止日期"));
+                pay.Children.Add(Text(why, DesignSystem.TextCaption, "FgMuted"));
+            }
+            Grid.SetColumn(pay, 3);
+            g.Children.Add(pay);
+
             // 列 4：操作
             StackPanel actions = new StackPanel { Orientation = Orientation.Horizontal, HorizontalAlignment = HorizontalAlignment.Right, VerticalAlignment = VerticalAlignment.Center };
             if (e.Legacy)
@@ -490,7 +559,7 @@ namespace TokLens
                     actions.Children.Add(SmallButton("续订", "secondary", delegate { EditSubscription(null, s); }));
                 actions.Children.Add(MoreButton(s));
             }
-            Grid.SetColumn(actions, 3);
+            Grid.SetColumn(actions, 4);
             g.Children.Add(actions);
             return row;
         }
@@ -606,74 +675,6 @@ namespace TokLens
             dlg.Content = shell;
             dlg.ShowDialog();
             return result;
-        }
-
-        // ------------------------------------------------------------------ API 参考估值
-
-        private void RenderUsage()
-        {
-            ModernControlsFactory.UpdateSegmentedGroup(_rangeBtns, _month ? 1 : 0);
-            _origins.Children.Clear();
-            DateTime start = _month ? new DateTime(_date.Year, _date.Month, 1) : _date.AddDays(-29);
-            Dictionary<string, double> costs = new Dictionary<string, double>();
-            Dictionary<string, long> tokens = new Dictionary<string, long>();
-            Dictionary<string, long> unpriced = new Dictionary<string, long>();
-            double total = 0;
-            long missing = 0;
-            foreach (RecordBucket r in _records)
-            {
-                DateTime day;
-                if (r == null || !DateTime.TryParseExact(r.Date, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out day) || day < start || day > _date) continue;
-                string key = SubscriptionCatalog.ModelOrigin(r.Model);
-                if (!costs.ContainsKey(key)) { costs[key] = 0; tokens[key] = 0; unpriced[key] = 0; }
-                if (SubscriptionCatalog.ValidAmount(r.CostUsd)) { costs[key] += r.CostUsd; total += r.CostUsd; }
-                tokens[key] += r.TotalTokens;
-                if (r.CostUsd <= 0 && r.RateLabel == "未定价") { long count = Math.Max(1, r.Turns); unpriced[key] += count; missing += count; }
-            }
-
-            string rangeText = start.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture) + " — " + _date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-            _usageSummary.Text = rangeText + " · 合计 " + FormatterUtil.FormatMoney(total, _cny, _rate) + "（按 API 单价估算，不是账单）"
-                + (missing > 0 ? " · 另有 " + missing + " 次未定价请求未计入，不能视为免费" : "");
-            _apiValue.Text = FormatterUtil.FormatMoney(total, _cny, _rate);
-            _apiSub.Text = (_month ? "本月" : "近 30 天") + " · 按用量估算，不是账单";
-
-            List<string> names = new List<string>(costs.Keys);
-            names.Sort(delegate(string a, string b) { return costs[b].CompareTo(costs[a]); });
-            double max = 0;
-            foreach (string n in names) max = Math.Max(max, costs[n]);
-            foreach (string name in names)
-            {
-                Grid row = new Grid { Margin = new Thickness(0, 4, 0, 4) };
-                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(120) });
-                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-                row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(200) });
-
-                TextBlock label = Text(name, DesignSystem.TextBody, "FgSecondary");
-                label.VerticalAlignment = VerticalAlignment.Center;
-                row.Children.Add(label);
-
-                double share = max > 0 ? costs[name] / max : 0;
-                Grid bar = new Grid { Height = 8, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(0, 0, 12, 0) };
-                bar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0.0001, share), GridUnitType.Star) });
-                bar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0.0001, 1 - share), GridUnitType.Star) });
-                Border fill = new Border { CornerRadius = new CornerRadius(4), MinWidth = costs[name] > 0 ? 2 : 0 };
-                fill.SetResourceReference(Border.BackgroundProperty, "ChartBarFill");
-                bar.Children.Add(fill);
-                Grid.SetColumn(bar, 1);
-                row.Children.Add(bar);
-
-                string costText = costs[name] == 0 && unpriced[name] > 0
-                    ? "未定价"
-                    : FormatterUtil.FormatMoney(costs[name], _cny, _rate) + (unpriced[name] > 0 ? " + 未定价" : "");
-                TextBlock value = Text(costText + "  ·  " + FormatterUtil.FormatTokens(tokens[name]) + " tok", DesignSystem.TextBody, "FgPrimary");
-                value.HorizontalAlignment = HorizontalAlignment.Right;
-                value.VerticalAlignment = VerticalAlignment.Center;
-                ModernControlsFactory.EnableTabularNumbers(value, false);
-                Grid.SetColumn(value, 2);
-                row.Children.Add(value);
-                _origins.Children.Add(row);
-            }
-            if (names.Count == 0) _origins.Children.Add(Text("这个区间没有用量记录", DesignSystem.TextBody, "FgSecondary"));
         }
 
         // ------------------------------------------------------------------ 登记 / 核对 / 续订弹窗

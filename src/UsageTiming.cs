@@ -35,18 +35,45 @@ namespace TokLens
         public long TimestampMs, Output, UnpricedRequests;
         public int DurationMs;
         public string TimingSource="";
+        // 悬浮条用的数值（美元口径，显示时按 Cny / Rate 换算）
+        public bool Cny;
+        public double Rate=ExchangeRateService.DefaultRate;
+        public double TodayUsd, LastHourUsd, Last15Usd, LastCostUsd;
+        public double CacheHitRate=-1;
+        public long TodayTokens, TodayRequests, ContextTokens;
+        public double[] SparkHour=new double[30];      // 近 60 分钟，每 2 分钟一格
+        public double[] SparkTwoHours=new double[24];  // 近 2 小时，每 5 分钟一格
+        public List<RecentRequestRecord> Latest=new List<RecentRequestRecord>(); // 最近 5 次请求，新的在前
         public double Tps { get { return UsageTiming.IsMeasured(TimingSource)?FormatterUtil.ComputeTps(Output,DurationMs):0; } }
         public static HudTelemetry FromScan(ScanResult result,DateTime now,bool cny,double rate)
         {
-            HudTelemetry h=new HudTelemetry(); if(result==null)return h;
-            double cost=0;long tokens=0;string today=now.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture);
-            if(result.Records!=null)foreach(RecordBucket r in result.Records)if(r!=null&&r.Date==today){cost+=r.CostUsd;tokens+=r.TotalTokens;if(r.CostUsd<=0&&r.RateLabel=="未定价")h.UnpricedRequests+=Math.Max(1,r.Turns);}
+            HudTelemetry h=new HudTelemetry(); h.Cny=cny; h.Rate=rate>0&&!double.IsNaN(rate)&&!double.IsInfinity(rate)?rate:ExchangeRateService.DefaultRate; if(result==null)return h;
+            double cost=0;long tokens=0,fresh=0,cacheRead=0,cacheWrite=0,turns=0;string today=now.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture);
+            if(result.Records!=null)foreach(RecordBucket r in result.Records)if(r!=null&&r.Date==today){
+                cost+=r.CostUsd;tokens+=r.TotalTokens;fresh+=r.FreshInput;cacheRead+=r.CacheRead;cacheWrite+=r.CacheWrite;turns+=Math.Max(0,r.Turns);
+                if(r.CostUsd<=0&&r.RateLabel=="未定价")h.UnpricedRequests+=Math.Max(1,r.Turns);}
             h.Cost=FormatterUtil.FormatMoney(cost,cny,rate);h.Tokens=FormatterUtil.FormatTokens(tokens);
+            h.TodayUsd=cost;h.TodayTokens=tokens;h.TodayRequests=turns;
+            long prompt=fresh+cacheRead+cacheWrite;h.CacheHitRate=prompt>0?(double)cacheRead/prompt:-1;
             RecentRequestRecord latest=null;
+            List<RecentRequestRecord> recent=new List<RecentRequestRecord>();
             long nowMs=(long)(now.ToUniversalTime()-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;
             if(result.RecentRequests!=null)foreach(RecentRequestRecord r in result.RecentRequests)
-                if(r!=null&&r.TimestampMs>0&&r.TimestampMs<=nowMs+1000&&(latest==null||r.TimestampMs>latest.TimestampMs))latest=r;
-            if(latest!=null){h.Tool=latest.Tool;h.Model=latest.Model;h.TimestampMs=latest.TimestampMs;h.Output=latest.Output;h.DurationMs=latest.DurationMs;h.TimingSource=latest.TimingSource;}
+            {
+                if(r==null||r.TimestampMs<=0||r.TimestampMs>nowMs+1000)continue;
+                recent.Add(r);
+                if(latest==null||r.TimestampMs>latest.TimestampMs)latest=r;
+                long age=Math.Max(0,nowMs-r.TimestampMs);
+                double c=r.CostUsd>0&&!double.IsNaN(r.CostUsd)&&!double.IsInfinity(r.CostUsd)?r.CostUsd:0;
+                if(age<3600000L){h.LastHourUsd+=c;h.SparkHour[29-(int)(age/120000L)]+=c;}
+                if(age<900000L)h.Last15Usd+=c;
+                if(age<7200000L)h.SparkTwoHours[23-(int)(age/300000L)]+=c;
+            }
+            if(latest!=null){h.Tool=latest.Tool;h.Model=latest.Model;h.TimestampMs=latest.TimestampMs;h.Output=latest.Output;h.DurationMs=latest.DurationMs;h.TimingSource=latest.TimingSource;
+                h.ContextTokens=latest.FreshInput+latest.CacheRead+latest.CacheWrite;h.LastCostUsd=latest.CostUsd>0?latest.CostUsd:0;}
+            recent.Sort(delegate(RecentRequestRecord a,RecentRequestRecord b){return b.TimestampMs.CompareTo(a.TimestampMs);});
+            if(recent.Count>5)recent.RemoveRange(5,recent.Count-5);
+            h.Latest=recent;
             return h;
         }
         public bool IsRecent(DateTime utcNow)
