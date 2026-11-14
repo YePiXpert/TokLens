@@ -27,8 +27,6 @@ namespace TokLens
         private const int ERROR_ACCESS_DENIED = 5;
         private const int PROCESS_SYSTEM_DPI_AWARE = 1;
         private const int PROCESS_PER_MONITOR_DPI_AWARE = 2;
-        private const uint MONITOR_DEFAULTTONEAREST = 0x00000002;
-        private const int SW_RESTORE = 9;
 
         // DPI_AWARENESS_CONTEXT 伪句柄常量（指针宽度兼容 x86 / x64）
         private static readonly IntPtr DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE = new IntPtr(-3);
@@ -43,63 +41,9 @@ namespace TokLens
         [DllImport("shcore.dll")]
         private static extern int SetProcessDpiAwareness(int awareness);
 
-        [DllImport("shcore.dll")]
-        private static extern int GetDpiForMonitor(IntPtr hmonitor, int dpiType, out uint dpiX, out uint dpiY);
-
         [DllImport("user32.dll")]
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool SetProcessDPIAware();
-
-        [DllImport("user32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool SetForegroundWindow(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-
-        [DllImport("user32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool IsIconic(IntPtr hWnd);
-
-        [DllImport("user32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GetCursorPos(out POINT lpPoint);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr MonitorFromWindow(IntPtr hwnd, uint dwFlags);
-
-        [DllImport("user32.dll")]
-        private static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
-
-        [DllImport("user32.dll", CharSet = CharSet.Auto)]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        private static extern bool GetMonitorInfo(IntPtr hMonitor, ref MONITORINFO lpmi);
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct POINT
-        {
-            public int X;
-            public int Y;
-        }
-
-        [StructLayout(LayoutKind.Sequential)]
-        private struct RECT
-        {
-            public int Left;
-            public int Top;
-            public int Right;
-            public int Bottom;
-        }
-
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
-        private struct MONITORINFO
-        {
-            public int cbSize;
-            public RECT rcMonitor;
-            public RECT rcWork;
-            public uint dwFlags;
-        }
 
         #endregion
 
@@ -174,34 +118,6 @@ namespace TokLens
             }
             string sanitized = exePath.Trim().Replace("\"", string.Empty);
             return "\"" + sanitized + "\" " + MinimizedStartArgument;
-        }
-
-        /// <summary>
-        /// 判断启动参数中是否包含静默最小化驻留标记（支持 --minimized / -minimized / /minimized）。
-        /// </summary>
-        public static bool HasMinimizedStartArgument(string[] args)
-        {
-            if (args == null || args.Length == 0)
-            {
-                return false;
-            }
-            for (int i = 0; i < args.Length; i++)
-            {
-                string arg = args[i];
-                if (string.IsNullOrWhiteSpace(arg))
-                {
-                    continue;
-                }
-                string trimmed = arg.Trim();
-                if (string.Equals(trimmed, "--minimized", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(trimmed, "-minimized", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(trimmed, "/minimized", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(trimmed, "--background", StringComparison.OrdinalIgnoreCase))
-                {
-                    return true;
-                }
-            }
-            return false;
         }
 
         /// <summary>
@@ -489,148 +405,6 @@ namespace TokLens
             }
         }
 
-        /// <summary>
-        /// 获取指定窗口当前所在显示器的高 DPI 缩放倍率（例如 1.0、1.25、1.5、2.0）。
-        /// </summary>
-        public static double GetWindowDpiScale(Visual visual)
-        {
-            if (visual == null)
-            {
-                return 1.0;
-            }
-            try
-            {
-                PresentationSource source = PresentationSource.FromVisual(visual);
-                if (source != null && source.CompositionTarget != null)
-                {
-                    Matrix m = source.CompositionTarget.TransformToDevice;
-                    if (m.M11 > 0.1)
-                    {
-                        return m.M11;
-                    }
-                }
-            }
-            catch
-            {
-            }
-            return 1.0;
-        }
-
-        /// <summary>
-        /// 获取鼠标指针或目标窗口所在显示器的工作区（自动换算为 WPF 逻辑 DIP 坐标，便于悬浮窗多屏精准定位）。
-        /// </summary>
-        public static Rect GetActiveMonitorWorkAreaDip(Window referenceWindow)
-        {
-            try
-            {
-                IntPtr hMonitor = IntPtr.Zero;
-                POINT cursorPt;
-                if (GetCursorPos(out cursorPt))
-                {
-                    hMonitor = MonitorFromPoint(cursorPt, MONITOR_DEFAULTTONEAREST);
-                }
-                else if (referenceWindow != null)
-                {
-                    IntPtr hwnd = new WindowInteropHelper(referenceWindow).Handle;
-                    if (hwnd != IntPtr.Zero)
-                    {
-                        hMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-                    }
-                }
-
-                if (hMonitor != IntPtr.Zero)
-                {
-                    MONITORINFO info = new MONITORINFO();
-                    info.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
-                    if (GetMonitorInfo(hMonitor, ref info))
-                    {
-                        double scaleX = 1.0;
-                        double scaleY = 1.0;
-                        bool gotMonitorDpi = false;
-                        try
-                        {
-                            uint dpiX;
-                            uint dpiY;
-                            if (GetDpiForMonitor(hMonitor, 0, out dpiX, out dpiY) == 0 && dpiX > 0u && dpiY > 0u)
-                            {
-                                scaleX = (double)dpiX / 96.0;
-                                scaleY = (double)dpiY / 96.0;
-                                gotMonitorDpi = true;
-                            }
-                        }
-                        catch
-                        {
-                        }
-
-                        if (!gotMonitorDpi && referenceWindow != null)
-                        {
-                            PresentationSource src = PresentationSource.FromVisual(referenceWindow);
-                            if (src != null && src.CompositionTarget != null)
-                            {
-                                Matrix toDevice = src.CompositionTarget.TransformToDevice;
-                                if (toDevice.M11 > 0.1) scaleX = toDevice.M11;
-                                if (toDevice.M22 > 0.1) scaleY = toDevice.M22;
-                            }
-                        }
-
-                        double left = info.rcWork.Left / scaleX;
-                        double top = info.rcWork.Top / scaleY;
-                        double width = Math.Max(0.0, (info.rcWork.Right - info.rcWork.Left) / scaleX);
-                        double height = Math.Max(0.0, (info.rcWork.Bottom - info.rcWork.Top) / scaleY);
-                        if (width > 0.0 && height > 0.0)
-                        {
-                            return new Rect(left, top, width, height);
-                        }
-                    }
-                }
-            }
-            catch
-            {
-            }
-
-            return SystemParameters.WorkArea;
-        }
-
-        /// <summary>
-        /// 丝滑唤醒并将目标 WPF 窗口置于前台（兼容最小化还原、托盘隐藏恢复与跨应用焦点抢占）。
-        /// </summary>
-        public static void ActivateAndRestoreWindow(Window window)
-        {
-            if (window == null)
-            {
-                return;
-            }
-
-            try
-            {
-                if (!window.IsVisible)
-                {
-                    window.Show();
-                }
-
-                if (window.WindowState == WindowState.Minimized)
-                {
-                    window.WindowState = WindowState.Normal;
-                }
-
-                IntPtr hwnd = new WindowInteropHelper(window).Handle;
-                if (hwnd != IntPtr.Zero)
-                {
-                    if (IsIconic(hwnd))
-                    {
-                        ShowWindow(hwnd, SW_RESTORE);
-                    }
-                    SetForegroundWindow(hwnd);
-                }
-
-                window.Activate();
-                window.Focus();
-            }
-            catch
-            {
-            }
-        }
-
         #endregion
 
         #region 3. 安全打开路径与定位文件助手（防命令注入）
@@ -861,28 +635,6 @@ namespace TokLens
             }
 
             InitializeAndRegister();
-        }
-
-        /// <summary>
-        /// 若运行时外部占用释放，可手动重试注册全局快捷键。
-        /// </summary>
-        public bool TryReRegister()
-        {
-            if (_disposed)
-            {
-                return false;
-            }
-
-            UnregisterHotkeyInternal();
-
-            if (_hwndSource != null && _hwndSource.Handle != IntPtr.Zero)
-            {
-                RegisterWithFallback(_hwndSource.Handle);
-                return IsRegistered;
-            }
-
-            InitializeAndRegister();
-            return IsRegistered;
         }
 
         private void InitializeAndRegister()

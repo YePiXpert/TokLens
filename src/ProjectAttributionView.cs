@@ -72,6 +72,20 @@ namespace TokLens
         private static readonly Regex RxUsageCw = new Regex(
             "\"cache_creation_input_tokens\"\\s*:\\s*([0-9]{1,15})",
             RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        private static readonly Regex RxMessageId = new Regex(
+            "\"message\"\\s*:\\s*\\{\\s*\"id\"\\s*:\\s*\"([^\"]+)\"",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        private static readonly Regex RxRequestId = new Regex(
+            "\"requestId\"\\s*:\\s*\"([^\"]+)\"",
+            RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+        // Claude Code 的一次回复会按内容块写多行日志，每行都带同一份 usage。
+        // 与主扫描器一致：按 message.id + requestId 去重，同一请求保留用量最大的一行。
+        private sealed class ClaudeRequestUsage
+        {
+            public long Fi, Cr, Cw, Out;
+            public string Model;
+        }
 
         private string _homeDir;
         private readonly Action<string, string, string> _toastCallback;
@@ -165,9 +179,9 @@ namespace TokLens
             StackPanel titleRow = new StackPanel { Orientation = Orientation.Horizontal };
             TextBlock titleTb = new TextBlock
             {
-                Text = "项目与代码仓库成本归因",
+                Text = "按工作区统计用量",
                 FontFamily = DesignSystem.FontDisplay,
-                FontSize = 15,
+                FontSize = DesignSystem.TextTitle,
                 FontWeight = FontWeights.SemiBold,
                 VerticalAlignment = VerticalAlignment.Center
             };
@@ -186,9 +200,9 @@ namespace TokLens
             privBadge.SetResourceReference(Border.BorderBrushProperty, "SemanticSuccessBorder");
             TextBlock privTb = new TextBlock
             {
-                Text = "零代码/Prompt 读取 · 仅目录元数据",
+                Text = "只读取目录路径，不读对话内容",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 10.5,
+                FontSize = DesignSystem.TextCaption,
                 FontWeight = FontWeights.Medium
             };
             privTb.SetResourceReference(TextBlock.ForegroundProperty, "SemanticSuccess");
@@ -198,9 +212,9 @@ namespace TokLens
 
             TextBlock subTb = new TextBlock
             {
-                Text = "自动聚合 Claude Code、Codex CLI 与 Cursor 本地工作区会话路径，精准识别最耗算力的工程目录与缓存命中短板。",
+                Text = "汇总 Claude Code、Codex CLI 与 Cursor 在本机各工作区的用量，同一请求只计一次。",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.5,
+                FontSize = DesignSystem.TextCaption,
                 Margin = new Thickness(0, 4, 12, 0),
                 TextWrapping = TextWrapping.Wrap
             };
@@ -236,10 +250,10 @@ namespace TokLens
                 BorderThickness = new Thickness(0),
                 Background = Brushes.Transparent,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.5,
+                FontSize = DesignSystem.TextCaption,
                 VerticalContentAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(6, 0, 0, 0),
-                ToolTip = "按仓库名、路径关键字或工具名过滤"
+                ToolTip = "按工作区名、路径或工具过滤"
             };
             _searchBox.SetResourceReference(Control.ForegroundProperty, "FgPrimary");
             _searchBox.TextChanged += delegate(object s, TextChangedEventArgs e)
@@ -251,7 +265,7 @@ namespace TokLens
             searchWrap.Child = searchDock;
             toolRow.Children.Add(searchWrap);
 
-            Button rescanBtn = ModernControlsFactory.CreateButton("重新归因扫描", "secondary");
+            Button rescanBtn = ModernControlsFactory.CreateButton("重新扫描", "secondary");
             rescanBtn.Click += delegate(object s, RoutedEventArgs e)
             {
                 _lastScanUtc = DateTime.MinValue;
@@ -261,7 +275,7 @@ namespace TokLens
                 RenderEntries();
                 if (_toastCallback != null)
                 {
-                    _toastCallback("项目归因已刷新", "已完成本地工作区路径与会话元数据重扫。", "success");
+                    _toastCallback("工作区用量已刷新", "已完成本地工作区路径与会话元数据重扫。", "success");
                 }
             };
             toolRow.Children.Add(rescanBtn);
@@ -278,10 +292,10 @@ namespace TokLens
                 Rows = 1,
                 Margin = new Thickness(0, 0, 0, 12)
             };
-            kpiGrid.Children.Add(CreateKpiCard("已识别本地仓库", out _kpiRepoCountVal, out _kpiRepoCountSub, new Thickness(0, 0, 8, 0)));
-            kpiGrid.Children.Add(CreateKpiCard("榜首高消耗项目", out _kpiTopRepoVal, out _kpiTopRepoSub, new Thickness(0, 0, 8, 0)));
-            kpiGrid.Children.Add(CreateKpiCard("工作区直归因花费", out _kpiAttrCostVal, out _kpiAttrCostSub, new Thickness(0, 0, 8, 0)));
-            kpiGrid.Children.Add(CreateKpiCard("最佳缓存复用仓库", out _kpiBestCacheVal, out _kpiBestCacheSub, new Thickness(0)));
+            kpiGrid.Children.Add(CreateKpiCard("工作区", out _kpiRepoCountVal, out _kpiRepoCountSub, new Thickness(0, 0, 8, 0)));
+            kpiGrid.Children.Add(CreateKpiCard("用量最多", out _kpiTopRepoVal, out _kpiTopRepoSub, new Thickness(0, 0, 8, 0)));
+            kpiGrid.Children.Add(CreateKpiCard("可归到工作区的费用", out _kpiAttrCostVal, out _kpiAttrCostSub, new Thickness(0, 0, 8, 0)));
+            kpiGrid.Children.Add(CreateKpiCard("缓存命中最高", out _kpiBestCacheVal, out _kpiBestCacheSub, new Thickness(0)));
             root.Children.Add(kpiGrid);
 
             // 3. 仓库归因排行列表卡片
@@ -294,9 +308,9 @@ namespace TokLens
 
             TextBlock listTitle = new TextBlock
             {
-                Text = "工程目录算力账单排行（按估算成本降序）",
+                Text = "工作区用量排行（按估算费用）",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12.5,
+                FontSize = DesignSystem.TextLabel,
                 FontWeight = FontWeights.SemiBold
             };
             listTitle.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
@@ -307,7 +321,7 @@ namespace TokLens
             {
                 Text = "",
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 11,
+                FontSize = DesignSystem.TextCaption,
                 VerticalAlignment = VerticalAlignment.Center
             };
             _footerNoteText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -348,7 +362,7 @@ namespace TokLens
             {
                 Text = label,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11,
+                FontSize = DesignSystem.TextCaption,
                 FontWeight = FontWeights.Medium
             };
             lbl.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
@@ -358,7 +372,7 @@ namespace TokLens
             {
                 Text = "—",
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 18,
+                FontSize = DesignSystem.TextHeading,
                 FontWeight = FontWeights.Bold,
                 Margin = new Thickness(0, 6, 0, 4),
                 TextTrimming = TextTrimming.CharacterEllipsis
@@ -370,7 +384,7 @@ namespace TokLens
             {
                 Text = "等待扫描",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11,
+                FontSize = DesignSystem.TextCaption,
                 TextTrimming = TextTrimming.CharacterEllipsis
             };
             subTb.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -378,6 +392,69 @@ namespace TokLens
 
             bd.Child = sp;
             return bd;
+        }
+
+        private const string ScratchGroupName = "临时工作区";
+
+        private static bool IsScratchWorkspace(ProjectCostEntry e)
+        {
+            return e != null && !e.IsUnattributedBucket && e.ProjectName != null && e.FullPath != null &&
+                e.ProjectName.StartsWith("scratch-", StringComparison.OrdinalIgnoreCase) &&
+                e.FullPath.IndexOf("scratch-workspaces", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsScratchGroup(ProjectCostEntry e)
+        {
+            return e != null && e.ProjectName != null && e.ProjectName.StartsWith(ScratchGroupName, StringComparison.Ordinal);
+        }
+
+        /// <summary>
+        /// Claude Desktop 每次新对话都会生成一个 scratch-日期-哈希 临时目录，单独列出会挤满排行榜，
+        /// 这里合并成一行「临时工作区（N 个）」；定位目录打开它们共同的 scratch-workspaces 父目录。
+        /// </summary>
+        private static List<ProjectCostEntry> GroupScratchWorkspaces(List<ProjectCostEntry> source)
+        {
+            List<ProjectCostEntry> result = new List<ProjectCostEntry>();
+            ProjectCostEntry group = null;
+            int scratchCount = 0;
+            Dictionary<string, int> toolVotes = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            foreach (ProjectCostEntry e in source)
+            {
+                if (!IsScratchWorkspace(e)) { result.Add(e); continue; }
+                scratchCount++;
+                if (group == null)
+                {
+                    group = new ProjectCostEntry();
+                    int cut = e.FullPath.IndexOf("scratch-workspaces", StringComparison.OrdinalIgnoreCase);
+                    group.FullPath = e.FullPath.Substring(0, cut + "scratch-workspaces".Length);
+                    group.LastActiveLocal = e.LastActiveLocal;
+                }
+                group.SessionCount += e.SessionCount;
+                group.Turns += e.Turns;
+                group.FreshInput += e.FreshInput;
+                group.CacheRead += e.CacheRead;
+                group.CacheWrite += e.CacheWrite;
+                group.Output += e.Output;
+                group.CostUsd += e.CostUsd;
+                if (e.LastActiveLocal > group.LastActiveLocal) group.LastActiveLocal = e.LastActiveLocal;
+                foreach (string t in e.Tools) if (!group.Tools.Contains(t)) group.Tools.Add(t);
+                string primary = e.PrimaryTool ?? "";
+                int votes;
+                toolVotes.TryGetValue(primary, out votes);
+                toolVotes[primary] = votes + 1;
+            }
+            if (group != null)
+            {
+                group.ProjectName = ScratchGroupName + "（" + scratchCount.ToString(CultureInfo.InvariantCulture) + " 个）";
+                int best = -1;
+                foreach (KeyValuePair<string, int> kv in toolVotes)
+                {
+                    if (kv.Value > best) { best = kv.Value; group.PrimaryTool = kv.Key; }
+                }
+                result.Add(group);
+                result.Sort(delegate(ProjectCostEntry a, ProjectCostEntry b) { return b.CostUsd.CompareTo(a.CostUsd); });
+            }
+            return result;
         }
 
         private void RenderEntries()
@@ -403,10 +480,11 @@ namespace TokLens
             double attrUsd = 0.0;
             long attrTokens = 0L;
             ProjectCostEntry bestCacheEntry = null;
+            List<ProjectCostEntry> projects = GroupScratchWorkspaces(_cachedProjects);
 
-            for (int i = 0; i < _cachedProjects.Count; i++)
+            for (int i = 0; i < projects.Count; i++)
             {
-                ProjectCostEntry e = _cachedProjects[i];
+                ProjectCostEntry e = projects[i];
                 attrUsd += e.CostUsd;
                 attrTokens += e.TotalTokens;
                 if (e.TotalTokens >= 10000L && (bestCacheEntry == null || e.CacheHitRatio > bestCacheEntry.CacheHitRatio))
@@ -419,8 +497,8 @@ namespace TokLens
             if (globalLedgerUsd > attrUsd + 0.02 || globalTokens > attrTokens + 5000L)
             {
                 ProjectCostEntry unattr = new ProjectCostEntry();
-                unattr.ProjectName = "全局对话 / 远端同步节点 / 未绑定目录会话";
-                unattr.FullPath = "包含跨设备云端汇总账单、纯聊天窗口及不含 cwd 字段的工具日志";
+                unattr.ProjectName = "未绑定目录的会话";
+                unattr.FullPath = "本机纯聊天窗口，以及日志里不含工作目录字段的工具";
                 unattr.PrimaryTool = "Multi-Source";
                 unattr.Tools.Add("全局与云端汇总");
                 unattr.CostUsd = Math.Max(0.0, globalLedgerUsd - attrUsd);
@@ -429,25 +507,31 @@ namespace TokLens
                 working.Add(unattr);
             }
 
-            int realRepoCount = _cachedProjects.Count;
+            int realRepoCount = 0;
+            for (int i = 0; i < projects.Count; i++) if (!IsScratchGroup(projects[i])) realRepoCount++;
             _kpiRepoCountVal.Text = realRepoCount.ToString(CultureInfo.InvariantCulture) + " 个";
-            _kpiRepoCountSub.Text = "覆盖 Claude / Codex / Cursor 工作区";
+            _kpiRepoCountSub.Text = "不含临时工作区";
 
-            if (_cachedProjects.Count > 0)
+            if (projects.Count > 0)
             {
-                ProjectCostEntry top = _cachedProjects[0];
+                // 榜首取真实项目；只有临时工作区时才显示临时工作区
+                ProjectCostEntry top = projects[0];
+                for (int i = 0; i < projects.Count; i++)
+                {
+                    if (!IsScratchGroup(projects[i])) { top = projects[i]; break; }
+                }
                 _kpiTopRepoVal.Text = top.ProjectName;
                 _kpiTopRepoSub.Text = FormatMoney(top.CostUsd) + " · " + FormatterUtil.FormatTokens(top.TotalTokens) + " tok";
             }
             else
             {
-                _kpiTopRepoVal.Text = "暂无仓库记录";
+                _kpiTopRepoVal.Text = "暂无工作区记录";
                 _kpiTopRepoSub.Text = "当前主目录下未检出带路径会话";
             }
 
             _kpiAttrCostVal.Text = FormatMoney(attrUsd);
             double pctOfGlobal = globalLedgerUsd > 0.0001 ? Math.Min(100.0, attrUsd * 100.0 / globalLedgerUsd) : (attrUsd > 0 ? 100.0 : 0.0);
-            _kpiAttrCostSub.Text = string.Format(CultureInfo.InvariantCulture, "直归因占比 {0:0.0}% · {1} tok", pctOfGlobal, FormatterUtil.FormatTokens(attrTokens));
+            _kpiAttrCostSub.Text = string.Format(CultureInfo.InvariantCulture, "占本机账单 {0:0.0}% · {1} tok", pctOfGlobal, FormatterUtil.FormatTokens(attrTokens));
 
             if (bestCacheEntry != null)
             {
@@ -490,9 +574,9 @@ namespace TokLens
                 {
                     Text = string.IsNullOrEmpty(_searchQuery)
                         ? "当前扫描主目录下暂未发现包含工作区路径元数据的本地会话记录。"
-                        : "未找到匹配「" + _searchQuery + "」的工程目录，请尝试清空右上角过滤词。",
+                        : "未找到匹配「" + _searchQuery + "」的工作区，清空过滤词后重试。",
                     FontFamily = DesignSystem.FontUi,
-                    FontSize = 12,
+                    FontSize = DesignSystem.TextBody,
                     HorizontalAlignment = HorizontalAlignment.Center
                 };
                 emptyTb.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -550,7 +634,7 @@ namespace TokLens
             {
                 Text = entry.IsUnattributedBucket ? "Σ" : ("#" + rank.ToString(CultureInfo.InvariantCulture)),
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 11,
+                FontSize = DesignSystem.TextCaption,
                 FontWeight = FontWeights.SemiBold,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center
@@ -567,7 +651,7 @@ namespace TokLens
             {
                 Text = entry.ProjectName,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 13,
+                FontSize = DesignSystem.TextLabel,
                 FontWeight = FontWeights.SemiBold,
                 Margin = new Thickness(0, 0, 8, 0),
                 VerticalAlignment = VerticalAlignment.Center
@@ -593,7 +677,7 @@ namespace TokLens
                 {
                     Text = toolName,
                     FontFamily = DesignSystem.FontMono,
-                    FontSize = 10,
+                    FontSize = DesignSystem.TextCaption,
                     Foreground = DesignSystem.BrushHex(hex)
                 };
                 toolPill.Child = toolTb;
@@ -605,7 +689,7 @@ namespace TokLens
             {
                 Text = entry.FullPath,
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 10.5,
+                FontSize = DesignSystem.TextCaption,
                 Margin = new Thickness(0, 3, 0, 5),
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 ToolTip = entry.FullPath
@@ -643,7 +727,7 @@ namespace TokLens
             {
                 Text = FormatterUtil.FormatTokens(entry.TotalTokens) + " tok",
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 12,
+                FontSize = DesignSystem.TextBody,
                 FontWeight = FontWeights.SemiBold
             };
             tokMain.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
@@ -656,7 +740,7 @@ namespace TokLens
             {
                 Text = subMeta,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 10.5,
+                FontSize = DesignSystem.TextCaption,
                 Margin = new Thickness(0, 2, 0, 0)
             };
             tokSub.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -670,7 +754,7 @@ namespace TokLens
             {
                 Text = FormatMoney(entry.CostUsd),
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 13.5,
+                FontSize = DesignSystem.TextLabel,
                 FontWeight = FontWeights.Bold,
                 HorizontalAlignment = HorizontalAlignment.Right
             };
@@ -683,7 +767,7 @@ namespace TokLens
                 {
                     Text = entry.LastActiveLocal.ToString("MM-dd HH:mm", CultureInfo.InvariantCulture),
                     FontFamily = DesignSystem.FontMono,
-                    FontSize = 10,
+                    FontSize = DesignSystem.TextCaption,
                     HorizontalAlignment = HorizontalAlignment.Right,
                     Margin = new Thickness(0, 2, 0, 0)
                 };
@@ -772,13 +856,30 @@ namespace TokLens
                             long fi = 0L, cr = 0L, cw = 0L, outTok = 0L, turns = 0L;
                             double costUsd = 0.0;
                             DateTime lastWrite = DateTime.MinValue;
+                            Dictionary<string, ClaudeRequestUsage> requests = new Dictionary<string, ClaudeRequestUsage>(StringComparer.Ordinal);
 
                             for (int f = 0; f < jsonlFiles.Length; f++)
                             {
                                 string fp = jsonlFiles[f];
                                 FileInfo fiInfo = new FileInfo(fp);
                                 if (fiInfo.LastWriteTime > lastWrite) lastWrite = fiInfo.LastWriteTime;
-                                ScanClaudeFileMetadata(fp, pricing, ref resolvedCwd, ref fi, ref cr, ref cw, ref outTok, ref turns, ref costUsd);
+                                ScanClaudeFileMetadata(fp, ref resolvedCwd, requests);
+                            }
+
+                            foreach (ClaudeRequestUsage u in requests.Values)
+                            {
+                                fi += u.Fi; cr += u.Cr; cw += u.Cw; outTok += u.Out; turns += 1L;
+                                if (pricing != null)
+                                {
+                                    double actualUsd, baseUsd;
+                                    ModelRate rateObj;
+                                    pricing.ComputeCost(u.Model, u.Fi, u.Out, u.Cr, u.Cw, 0.0, out actualUsd, out baseUsd, out rateObj);
+                                    costUsd += actualUsd;
+                                }
+                                else
+                                {
+                                    costUsd += (u.Fi * 3.0 + u.Cr * 0.3 + u.Cw * 3.75 + u.Out * 15.0) / 1000000.0;
+                                }
                             }
 
                             if (string.IsNullOrEmpty(resolvedCwd))
@@ -865,14 +966,8 @@ namespace TokLens
 
         private static void ScanClaudeFileMetadata(
             string filePath,
-            PricingEngine pricing,
             ref string resolvedCwd,
-            ref long totalFi,
-            ref long totalCr,
-            ref long totalCw,
-            ref long totalOut,
-            ref long totalTurns,
-            ref double totalCostUsd)
+            Dictionary<string, ClaudeRequestUsage> requests)
         {
             using (FileStream fs = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
             using (StreamReader sr = new StreamReader(fs, Encoding.UTF8, true, 16384))
@@ -909,23 +1004,18 @@ namespace TokLens
                         model = mm.Groups[1].Value;
                     }
 
-                    totalFi += fi;
-                    totalCr += cr;
-                    totalCw += cw;
-                    totalOut += outTok;
-                    totalTurns += 1L;
+                    Match mid = RxMessageId.Match(line);
+                    Match rid = RxRequestId.Match(line);
+                    string key;
+                    if (mid.Success && rid.Success) key = mid.Groups[1].Value + ":" + rid.Groups[1].Value;
+                    else if (mid.Success) key = "m:" + mid.Groups[1].Value;
+                    else if (rid.Success) key = "r:" + rid.Groups[1].Value;
+                    else key = filePath + ":" + lineCount.ToString(CultureInfo.InvariantCulture);
 
-                    if (pricing != null)
-                    {
-                        double actualUsd, baseUsd;
-                        ModelRate rateObj;
-                        pricing.ComputeCost(model, fi, outTok, cr, cw, 0.0, out actualUsd, out baseUsd, out rateObj);
-                        totalCostUsd += actualUsd;
-                    }
-                    else
-                    {
-                        totalCostUsd += (fi * 3.0 + cr * 0.3 + cw * 3.75 + outTok * 15.0) / 1000000.0;
-                    }
+                    // 与主扫描器相同：同一请求保留用量合计最大的一行（流式过程中前几行可能是部分用量）
+                    ClaudeRequestUsage prev;
+                    if (!requests.TryGetValue(key, out prev) || fi + cr + cw + outTok >= prev.Fi + prev.Cr + prev.Cw + prev.Out)
+                        requests[key] = new ClaudeRequestUsage { Fi = fi, Cr = cr, Cw = cw, Out = outTok, Model = model };
                 }
             }
         }

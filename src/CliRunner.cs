@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -1290,8 +1290,12 @@ namespace TokLens
                     rqd["cache_write"] = rq.CacheWrite;
                     rqd["output"] = rq.Output;
                     rqd["total_tokens"] = rq.TotalTokens;
-                    rqd["duration_ms"] = rq.DurationMs;
-                    rqd["tps"] = Math.Round(FormatterUtil.ComputeTps(rq.Output, rq.DurationMs), 1);
+                    int measuredDuration=UsageTiming.IsMeasured(rq.TimingSource)?rq.DurationMs:0;
+                    double requestTps=FormatterUtil.ComputeTps(rq.Output,measuredDuration);
+                    rqd["duration_ms"] = measuredDuration;
+                    rqd["tps"] = requestTps;
+                    rqd["timing_source"] = rq.TimingSource;
+                    rqd["tps_kind"] = requestTps > 0 ? "request_average" : "unavailable";
                     rqd["cost_usd"] = Math.Round(SafeDouble(rq.CostUsd), 6);
                     recentSample.Add(rqd);
                 }

@@ -220,6 +220,7 @@ namespace TokLens
             // ==================== 1. 原生桌面 / CLI 探针 (12 项) ====================
             TryAddProbe(probes, delegate() { return ProbeClaudeCode(home); });
             TryAddProbe(probes, delegate() { return ProbeClaudeDesktop(home, roaming, localApp); });
+            NoteDesktopSessionsUnderClaudeCode(probes);
             TryAddProbe(probes, delegate() { return ProbeCodexCli(home); });
             TryAddProbe(probes, delegate() { return ProbeGeminiCli(home); });
             TryAddProbe(probes, delegate() { return ProbeKimiCode(home); });
@@ -351,6 +352,18 @@ namespace TokLens
                 "通过字节偏移游标 (Seek Cursor) 增量捕获 projects/*.jsonl，按 requestId 自动去重并还原耗时",
                 "已检测到 ~/.claude 配置目录，尚未产生 projects/*.jsonl 本地对话日志",
                 "未检测到 ~/.claude 目录；安装 @anthropic-ai/claude-code 并执行对话后将自动纳入统计");
+        }
+
+        // 在桌面端里运行的 Claude Code 会话写在 ~/.claude，界面里按「Claude Desktop」显示，但文件由 Claude Code 一行统计。
+        // 桌面端自有目录为空时说明数据去向，避免与请求明细里的 Claude Desktop 记录互相矛盾。
+        private static void NoteDesktopSessionsUnderClaudeCode(List<DataSourceProbeItem> probes)
+        {
+            DataSourceProbeItem code = probes.Find(delegate(DataSourceProbeItem p) { return p != null && p.Name == "Claude Code"; });
+            DataSourceProbeItem desk = probes.Find(delegate(DataSourceProbeItem p) { return p != null && p.Name == "Claude Desktop"; });
+            if (code == null || desk == null) return;
+            if (code.Status != DataSourceProbeItem.StatusActive || desk.Status != DataSourceProbeItem.StatusInstalledEmpty) return;
+            desk.StatusLabel = "并入 Claude Code";
+            desk.DiagnosticHint = "桌面端里运行的 Claude Code 会话写在 ~/.claude，已由上方 Claude Code 一行统计，请求明细中显示为 Claude Desktop；桌面端自有目录暂无本地会话";
         }
 
         private static DataSourceProbeItem ProbeClaudeDesktop(string home, string roaming, string localApp)
@@ -1301,7 +1314,7 @@ namespace TokLens
             {
                 item.Status = DataSourceProbeItem.StatusWarning;
                 item.StatusLabel = "需关注 (校验异常)";
-                item.DiagnosticHint = "账本数据库当前被独占锁定或结构待自愈；下次增量扫描时 LocalUsageStore 将自动备份并重建健康库";
+                item.DiagnosticHint = "账本数据库当前被独占锁定或校验失败；为保护历史已停止覆盖，可稍后重试或从时光机备份恢复";
             }
 
             return item;
@@ -1511,7 +1524,7 @@ namespace TokLens
 
             DataSourceProbeItem item = new DataSourceProbeItem();
             item.Category = DataSourceProbeItem.CategoryCloudStore;
-            item.Name = "GitHub CLI 与环境变量体检";
+            item.Name = "GitHub CLI 与环境变量";
             item.TargetPath = targetPath;
 
             long cfgSz;
@@ -1545,7 +1558,7 @@ namespace TokLens
                 }
                 else
                 {
-                    item.StatusLabel = "凭据健康 (@" + report.GhActiveAccount + ")";
+                    item.StatusLabel = "凭据健康";
                     item.DiagnosticHint = string.Format(
                         CultureInfo.InvariantCulture,
                         "gh CLI 登录正常 (@{0}) 且无 GH_TOKEN 环境变量劫持；注：不同电脑签发的 gho_ 设备令牌字面不同属正常安全机制，同 GitHub 账号天然互通",
@@ -2120,11 +2133,11 @@ namespace TokLens
         public static string BuildSanitizedDiagnosticSummary(SystemHealthReport report)
         {
             if (report == null)
-                return "[知微 · TokLens 环境体检报告] 暂无体检数据";
+                return "[知微 · TokLens 环境检查] 暂无检查数据";
 
             StringBuilder sb = new StringBuilder(2048);
             sb.AppendLine("============================================================");
-            sb.AppendLine(AppConstants.ProductTitle + " · 环境体检与数据源诊断摘要 (已脱敏)");
+            sb.AppendLine(AppConstants.ProductTitle + " · 环境检查摘要（已脱敏）");
             sb.AppendLine("============================================================");
             sb.AppendFormat(CultureInfo.InvariantCulture, "生成时间   : {0}\r\n", report.GeneratedAt);
             sb.AppendFormat(CultureInfo.InvariantCulture, "操作系统   : {0} ({1}-bit)\r\n", Environment.OSVersion.VersionString, Environment.Is64BitOperatingSystem ? "64" : "32");
@@ -2435,18 +2448,18 @@ namespace TokLens
             titleStack.VerticalAlignment = VerticalAlignment.Center;
 
             _bannerHeadlineText = new TextBlock();
-            _bannerHeadlineText.Text = "本机 AI 环境体检与数据源诊断中心";
+            _bannerHeadlineText.Text = "环境检查";
             _bannerHeadlineText.FontFamily = DesignSystem.FontUi;
-            _bannerHeadlineText.FontSize = 13.5;
+            _bannerHeadlineText.FontSize = DesignSystem.TextLabel;
             _bannerHeadlineText.FontWeight = FontWeights.SemiBold;
             _bannerHeadlineText.TextTrimming = TextTrimming.CharacterEllipsis;
             _bannerHeadlineText.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
             titleStack.Children.Add(_bannerHeadlineText);
 
             _bannerSubText = new TextBlock();
-            _bannerSubText.Text = "正在等待首次探测：自动核查 24+ AI 工具日志目录、WSL2 跨子系统挂载、本地 SQLite 账本与 GitHub CLI 环境变量...";
+            _bannerSubText.Text = "尚未检查。会检查本机 AI 工具日志目录、WSL2、本地账本与 GitHub CLI 环境变量。";
             _bannerSubText.FontFamily = DesignSystem.FontUi;
-            _bannerSubText.FontSize = 11.5;
+            _bannerSubText.FontSize = DesignSystem.TextCaption;
             _bannerSubText.Margin = new Thickness(0, 2, 0, 0);
             _bannerSubText.TextTrimming = TextTrimming.CharacterEllipsis;
             _bannerSubText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
@@ -2473,14 +2486,14 @@ namespace TokLens
 
             _bannerElapsedText = new TextBlock();
             _bannerElapsedText.Text = "耗时 — ms";
-            _bannerElapsedText.FontSize = 11;
+            _bannerElapsedText.FontSize = DesignSystem.TextCaption;
             _bannerElapsedText.VerticalAlignment = VerticalAlignment.Center;
             ModernControlsFactory.EnableTabularNumbers(_bannerElapsedText, true);
             _bannerElapsedText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
             _bannerElapsedPill.Child = _bannerElapsedText;
             rightBadges.Children.Add(_bannerElapsedPill);
 
-            _bannerStatusBadge = ModernControlsFactory.CreateStatusBadge("待体检", "success", out _bannerStatusText, out _bannerStatusDot);
+            _bannerStatusBadge = ModernControlsFactory.CreateStatusBadge("未检查", "neutral", out _bannerStatusText, out _bannerStatusDot);
             rightBadges.Children.Add(_bannerStatusBadge);
 
             Grid.SetColumn(rightBadges, 2);
@@ -2526,7 +2539,7 @@ namespace TokLens
             // 卡片 3：本地 SQLite 账本引擎（带「打开配置目录」快捷按钮）
             _openConfigDirBtn = ModernControlsFactory.CreateButton("打开配置目录", "secondary");
             _openConfigDirBtn.Height = 22;
-            _openConfigDirBtn.FontSize = 11;
+            _openConfigDirBtn.FontSize = DesignSystem.TextCaption;
             _openConfigDirBtn.Padding = new Thickness(7, 0, 7, 0);
             _openConfigDirBtn.ToolTip = "在资源管理器中打开 TokLens 本地账本与配置目录 (%APPDATA%\\TokLens)";
             _openConfigDirBtn.Click += delegate(object s, RoutedEventArgs e)
@@ -2587,7 +2600,7 @@ namespace TokLens
             TextBlock titleTb = new TextBlock();
             titleTb.Text = title;
             titleTb.FontFamily = DesignSystem.FontUi;
-            titleTb.FontSize = 11.5;
+            titleTb.FontSize = DesignSystem.TextCaption;
             titleTb.FontWeight = FontWeights.Medium;
             titleTb.VerticalAlignment = VerticalAlignment.Center;
             titleTb.TextTrimming = TextTrimming.CharacterEllipsis;
@@ -2604,7 +2617,7 @@ namespace TokLens
             sp.Children.Add(headerRow);
 
             mainValueOut = new TextBlock();
-            mainValueOut.FontSize = 16;
+            mainValueOut.FontSize = DesignSystem.TextTitle;
             mainValueOut.FontWeight = FontWeights.Bold;
             mainValueOut.Margin = new Thickness(0, 7, 0, 3);
             mainValueOut.TextTrimming = TextTrimming.CharacterEllipsis;
@@ -2614,7 +2627,7 @@ namespace TokLens
 
             subHintOut = new TextBlock();
             subHintOut.FontFamily = DesignSystem.FontUi;
-            subHintOut.FontSize = 11;
+            subHintOut.FontSize = DesignSystem.TextCaption;
             subHintOut.TextTrimming = TextTrimming.CharacterEllipsis;
             subHintOut.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             sp.Children.Add(subHintOut);
@@ -2679,7 +2692,7 @@ namespace TokLens
             _searchWatermarkText = new TextBlock();
             _searchWatermarkText.Text = "搜索工具名、路径、排障说明...";
             _searchWatermarkText.FontFamily = DesignSystem.FontUi;
-            _searchWatermarkText.FontSize = 11.5;
+            _searchWatermarkText.FontSize = DesignSystem.TextCaption;
             _searchWatermarkText.Margin = new Thickness(28, 0, 24, 0);
             _searchWatermarkText.VerticalAlignment = VerticalAlignment.Center;
             _searchWatermarkText.IsHitTestVisible = false;
@@ -2709,18 +2722,18 @@ namespace TokLens
             _matchCountText = new TextBlock();
             _matchCountText.Text = "共 0 项探针";
             _matchCountText.FontFamily = DesignSystem.FontUi;
-            _matchCountText.FontSize = 11.5;
+            _matchCountText.FontSize = DesignSystem.TextCaption;
             _matchCountText.Margin = new Thickness(0, 0, 12, 0);
             _matchCountText.VerticalAlignment = VerticalAlignment.Center;
             _matchCountText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             actionStack.Children.Add(_matchCountText);
 
-            _refreshBtn = ModernControlsFactory.CreateButton("", "secondary");
+            _refreshBtn = ModernControlsFactory.CreateButton("", "primary");
             StackPanel refContent = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             WpfPath refIcon = UiIcons.CreateIcon(UiIcons.Refresh, 13, null);
             refIcon.Margin = new Thickness(0, 0, 6, 0);
             refContent.Children.Add(refIcon);
-            _refreshBtnText = new TextBlock { Text = "重新体检", VerticalAlignment = VerticalAlignment.Center };
+            _refreshBtnText = new TextBlock { Text = "重新检查", VerticalAlignment = VerticalAlignment.Center };
             refContent.Children.Add(_refreshBtnText);
             _refreshBtn.Content = refContent;
             _refreshBtn.Margin = new Thickness(0, 0, 8, 0);
@@ -2731,7 +2744,7 @@ namespace TokLens
             };
             actionStack.Children.Add(_refreshBtn);
 
-            _copySummaryBtn = ModernControlsFactory.CreateButton("", "primary");
+            _copySummaryBtn = ModernControlsFactory.CreateButton("", "secondary");
             StackPanel copyContent = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             _copyBtnIcon = UiIcons.CreateIcon(UiIcons.Copy, 13, null);
             _copyBtnIcon.Margin = new Thickness(0, 0, 6, 0);
@@ -2739,7 +2752,7 @@ namespace TokLens
             _copyBtnText = new TextBlock { Text = "复制诊断摘要", VerticalAlignment = VerticalAlignment.Center };
             copyContent.Children.Add(_copyBtnText);
             _copySummaryBtn.Content = copyContent;
-            _copySummaryBtn.ToolTip = "复制已自动隐藏 Windows 用户名与敏感令牌的纯文本体检报告";
+            _copySummaryBtn.ToolTip = "复制检查结果（已隐藏用户名与令牌）";
             _copySummaryBtn.Click += OnCopySummaryClicked;
             actionStack.Children.Add(_copySummaryBtn);
 
@@ -2831,7 +2844,7 @@ namespace TokLens
             _emptyFilterHintText = new TextBlock();
             _emptyFilterHintText.Text = "当前筛选条件下没有匹配的数据源探针";
             _emptyFilterHintText.FontFamily = DesignSystem.FontUi;
-            _emptyFilterHintText.FontSize = 12.5;
+            _emptyFilterHintText.FontSize = DesignSystem.TextLabel;
             _emptyFilterHintText.HorizontalAlignment = HorizontalAlignment.Center;
             _emptyFilterHintText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             emptySp.Children.Add(_emptyFilterHintText);
@@ -3034,6 +3047,27 @@ namespace TokLens
         {
             if (r == null) return;
 
+            // 空报告（尚未跑过体检，或体检过程抛错）不能显示成「健康就绪」，否则用户会把没检查当成检查通过。
+            // 真实体检至少会探测一个数据源，所以 TotalSourceCount == 0 即视为未运行。
+            if (r.TotalSourceCount == 0)
+            {
+                _bannerElapsedText.Text = "未运行";
+                _bannerIconBox.SetResourceReference(Border.BackgroundProperty, "BgSurface");
+                _bannerIconBox.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
+                _bannerIconPath.Data = Geometry.Parse(UiIcons.Doctor);
+                _bannerIconPath.SetResourceReference(Shape.StrokeProperty, "FgMuted");
+
+                _bannerStatusBadge.SetResourceReference(Border.BackgroundProperty, "BgSurface");
+                _bannerStatusBadge.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
+                _bannerStatusDot.SetResourceReference(Shape.FillProperty, "FgMuted");
+                _bannerStatusText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+                _bannerStatusText.Text = _isRefreshingFlag != 0 ? "检查中" : "未检查";
+
+                _bannerHeadlineText.Text = "尚未完成环境检查";
+                _bannerSubText.Text = "点击「重新检查」扫描本机 AI 工具日志、WSL2 与 GitHub CLI 状态";
+                return;
+            }
+
             _bannerElapsedText.Text = string.Format(CultureInfo.InvariantCulture, "耗时 {0} ms", r.ScanElapsedMs);
 
             if (r.WarningCount > 0)
@@ -3051,7 +3085,7 @@ namespace TokLens
 
                 _bannerHeadlineText.Text = string.Format(
                     CultureInfo.InvariantCulture,
-                    "环境体检完成 · 发现 {0} 项配置或凭据建议",
+                    "检查完成 · {0} 项需要处理",
                     r.WarningCount);
 
                 if (!string.IsNullOrEmpty(r.GhEnvOverrideWarning))
@@ -3079,16 +3113,16 @@ namespace TokLens
                 _bannerStatusBadge.SetResourceReference(Border.BorderBrushProperty, "SemanticSuccessBorder");
                 _bannerStatusDot.SetResourceReference(Shape.FillProperty, "SemanticSuccess");
                 _bannerStatusText.SetResourceReference(TextBlock.ForegroundProperty, "SemanticSuccess");
-                _bannerStatusText.Text = "健康就绪";
+                _bannerStatusText.Text = "正常";
 
                 _bannerHeadlineText.Text = string.Format(
                     CultureInfo.InvariantCulture,
-                    "本机 AI 遥测环境健康 · {0} 个活跃数据源实时追踪中",
+                    "环境正常 · {0} 个数据源在监听",
                     r.ActiveSourceCount);
 
                 _bannerSubText.Text = string.Format(
                     CultureInfo.InvariantCulture,
-                    "最近体检：{0} · 日志文件与状态库读取权限正常，SQLite 增量账本无锁运行，未发现环境变量冲突",
+                    "最近检查：{0} · 日志读取权限正常，本地账本可用，未发现环境变量冲突",
                     r.GeneratedAt);
             }
         }
@@ -3301,7 +3335,10 @@ namespace TokLens
             if (_refreshBtn != null)
                 _refreshBtn.IsEnabled = !refreshing;
             if (_refreshBtnText != null)
-                _refreshBtnText.Text = refreshing ? "体检中..." : "重新体检";
+                _refreshBtnText.Text = refreshing ? "检查中…" : "重新检查";
+            if (refreshing && _bannerStatusText != null &&
+                (_currentReport == null || _currentReport.TotalSourceCount == 0))
+                _bannerStatusText.Text = "检查中";
         }
 
         private void OnCopySummaryClicked(object sender, RoutedEventArgs e)

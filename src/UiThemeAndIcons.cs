@@ -27,6 +27,14 @@ namespace TokLens
         public static readonly FontFamily FontDisplay = new FontFamily("Segoe UI Variable Display, Segoe UI, Microsoft YaHei UI, sans-serif");
         public static readonly FontFamily FontMono = new FontFamily("Cascadia Mono, JetBrains Mono, Consolas, Microsoft YaHei UI, monospace");
 
+        // 字号：全应用只用这 6 档，新代码不要再写小数字号
+        public const double TextCaption = 11;   // 说明、辅助信息、徽章、表格次要列
+        public const double TextBody = 12;      // 正文、表格、按钮、输入框
+        public const double TextLabel = 13;     // 小标题、表头强调、列表主文字
+        public const double TextTitle = 15;     // 卡片标题、页面标题
+        public const double TextHeading = 20;   // 次级大数值、分区大标题
+        public const double TextDisplay = 28;   // KPI 主数字
+
         public static readonly string[] PaletteDark = new string[]
         {
             "#818CF8", "#38BDF8", "#34D399", "#A78BFA",
@@ -42,6 +50,149 @@ namespace TokLens
         private static readonly object BrushCacheLock = new object();
         private static readonly Dictionary<string, SolidColorBrush> BrushCache = new Dictionary<string, SolidColorBrush>(StringComparer.OrdinalIgnoreCase);
         private static ResourceDictionary _sharedControlTemplates;
+
+        // 主题色：深浅两套，键名即 DynamicResource 资源键。界面代码一律按键取色，不再写十六进制。
+        private static readonly Dictionary<string, string> DarkTokens = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            { "BgWindow", "#09090B" },
+            { "BgTitleBar", "#0C0C0E" },
+            { "BgSidebar", "#121215" },
+            { "BgCard", "#16161A" },
+            { "BgSurface", "#111114" },
+            { "BgInput", "#111114" },
+            { "BgElevated", "#1F1F25" },
+            { "BgSegActive", "#26262E" },
+            { "BgHover", "#1C1C22" },
+            { "BgSidebarHover", "#1C1C22" },
+            { "BgHoverStrong", "#27272F" },
+            { "BgSelected", "#1D1E30" },
+            { "ToggleOffBg", "#27272F" },
+            { "BorderSubtle", "#1E1E24" },
+            { "BorderCard", "#232329" },
+            { "BorderStrong", "#32323B" },
+            { "BorderFocus", "#6366F1" },
+            { "FgPrimary", "#F4F4F6" },
+            { "FgSecondary", "#A1A1AA" },
+            { "FgMuted", "#71717A" },
+            { "AccentPrimary", "#6366F1" },
+            { "AccentText", "#818CF8" },
+            { "AccentSubtleBg", "#191B2E" },
+            { "AccentSubtleBorder", "#2E3259" },
+            { "BtnPrimaryBg", "#5E6AD2" },
+            { "BtnPrimaryHover", "#6E7AE2" },
+            { "BtnPrimaryPressed", "#4E5AC0" },
+            { "BtnPrimaryBorder", "#7884E6" },
+            { "BtnDangerHoverBg", "#3A1A1E" },
+            { "BtnDangerPressedBg", "#481F24" },
+            { "SemanticSuccess", "#34D399" },
+            { "SemanticSuccessBg", "#10261E" },
+            { "SemanticSuccessBorder", "#1B4334" },
+            { "SemanticWarning", "#FBBF24" },
+            { "SemanticWarningBg", "#281E0D" },
+            { "SemanticWarningBorder", "#4E3915" },
+            { "SemanticDanger", "#F87171" },
+            { "SemanticDangerBg", "#2A1416" },
+            { "SemanticDangerBorder", "#542125" },
+            { "ChartBarFill", "#5E6AD2" },
+            { "ChartBarHover", "#818CF8" },
+            { "ScrollThumb", "#3F3F46" },
+            { "ScrollThumbHover", "#52525B" },
+            { "ScrollThumbActive", "#71717A" },
+            { "ChartFresh", "#38BDF8" },
+            { "ChartCacheRead", "#34D399" },
+            { "ChartCacheWrite", "#FBBF24" },
+            { "ChartOutput", "#818CF8" },
+            { "ChartOther", "#52525B" },
+            { "BgScrim", "#88000000" },
+        };
+
+        private static readonly Dictionary<string, string> LightTokens = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            { "BgWindow", "#F8F9FA" },
+            { "BgTitleBar", "#F8F9FA" },
+            { "BgSidebar", "#F3F4F6" },
+            { "BgCard", "#FFFFFF" },
+            { "BgSurface", "#F1F2F4" },
+            { "BgInput", "#FFFFFF" },
+            { "BgElevated", "#FFFFFF" },
+            { "BgSegActive", "#FFFFFF" },
+            { "BgHover", "#F4F4F5" },
+            // 侧栏底色 #F3F4F6 与 BgHover 几乎相同，侧栏行悬停单独加深一档
+            { "BgSidebarHover", "#E7E8EC" },
+            { "BgHoverStrong", "#EAEAEE" },
+            { "BgSelected", "#EEF2FF" },
+            { "ToggleOffBg", "#D4D4D8" },
+            { "BorderSubtle", "#F1F1F4" },
+            { "BorderCard", "#E4E4E7" },
+            { "BorderStrong", "#D4D4D8" },
+            { "BorderFocus", "#4F46E5" },
+            { "FgPrimary", "#09090B" },
+            { "FgSecondary", "#52525B" },
+            { "FgMuted", "#71717A" },
+            { "AccentPrimary", "#4F46E5" },
+            { "AccentText", "#4F46E5" },
+            { "AccentSubtleBg", "#EEF2FF" },
+            { "AccentSubtleBorder", "#C7D2FE" },
+            { "BtnPrimaryBg", "#4F46E5" },
+            { "BtnPrimaryHover", "#4338CA" },
+            { "BtnPrimaryPressed", "#3730A3" },
+            { "BtnPrimaryBorder", "#4338CA" },
+            { "BtnDangerHoverBg", "#FEE2E2" },
+            { "BtnDangerPressedBg", "#FECACA" },
+            { "SemanticSuccess", "#047857" },
+            { "SemanticSuccessBg", "#ECFDF5" },
+            { "SemanticSuccessBorder", "#A7F3D0" },
+            { "SemanticWarning", "#B45309" },
+            { "SemanticWarningBg", "#FFFBEB" },
+            { "SemanticWarningBorder", "#FDE68A" },
+            { "SemanticDanger", "#DC2626" },
+            { "SemanticDangerBg", "#FEF2F2" },
+            { "SemanticDangerBorder", "#FECACA" },
+            { "ChartBarFill", "#4F46E5" },
+            { "ChartBarHover", "#6366F1" },
+            { "ScrollThumb", "#D4D4D8" },
+            { "ScrollThumbHover", "#A1A1AA" },
+            { "ScrollThumbActive", "#71717A" },
+            { "ChartFresh", "#0284C7" },
+            { "ChartCacheRead", "#059669" },
+            { "ChartCacheWrite", "#D97706" },
+            { "ChartOutput", "#4F46E5" },
+            { "ChartOther", "#A1A1AA" },
+            { "BgScrim", "#55000000" },
+        };
+
+        // 近 365 天日历的 5 级色阶（0 = 无数据）
+        private static readonly string[] HeatIndigoDark = { "#16161B", "#1E2148", "#313882", "#525CE0", "#818CF8" };
+        private static readonly string[] HeatIndigoLight = { "#ECEEF2", "#E0E7FF", "#A5B4FC", "#6366F1", "#3730A3" };
+        private static readonly string[] HeatEmeraldDark = { "#16161B", "#0E3226", "#115D43", "#109668", "#34D399" };
+        private static readonly string[] HeatEmeraldLight = { "#ECEEF2", "#D1FAE5", "#6EE7B7", "#10B981", "#047857" };
+
+        /// <summary>按主题取一个主题色（用于在代码里直接绘制图表、不经过资源查找的场景）。</summary>
+        public static SolidColorBrush ThemeBrush(string key, bool isDark)
+        {
+            string hex;
+            return (isDark ? DarkTokens : LightTokens).TryGetValue(key, out hex) ? BrushHex(hex) : Brushes.Transparent;
+        }
+
+        public static Color ThemeColor(string key, bool isDark)
+        {
+            return ThemeBrush(key, isDark).Color;
+        }
+
+        /// <summary>给仍以十六进制字符串作参数的旧绘制代码使用。</summary>
+        public static string ThemeHex(string key, bool isDark)
+        {
+            string hex;
+            return (isDark ? DarkTokens : LightTokens).TryGetValue(key, out hex) ? hex : "#00000000";
+        }
+
+        public static SolidColorBrush[] HeatmapScale(bool isDark, bool emerald)
+        {
+            string[] hex = emerald ? (isDark ? HeatEmeraldDark : HeatEmeraldLight) : (isDark ? HeatIndigoDark : HeatIndigoLight);
+            SolidColorBrush[] brushes = new SolidColorBrush[hex.Length];
+            for (int i = 0; i < hex.Length; i++) brushes[i] = BrushHex(hex[i]);
+            return brushes;
+        }
 
         public static SolidColorBrush BrushHex(string hex)
         {
@@ -184,118 +335,8 @@ namespace TokLens
             res["FontDisplay"] = FontDisplay;
             res["FontMono"] = FontMono;
 
-            if (isDark)
-            {
-                res["BgWindow"]              = BrushHex("#09090B");
-                res["BgTitleBar"]            = BrushHex("#0C0C0E");
-                res["BgSidebar"]             = BrushHex("#121215");
-                res["BgCard"]                = BrushHex("#16161A");
-                res["BgSurface"]             = BrushHex("#111114");
-                res["BgInput"]               = BrushHex("#111114");
-                res["BgElevated"]            = BrushHex("#1F1F25");
-                res["BgSegActive"]           = BrushHex("#26262E");
-                res["BgHover"]               = BrushHex("#1C1C22");
-                res["BgHoverStrong"]         = BrushHex("#27272F");
-                res["BgSelected"]            = BrushHex("#1D1E30");
-                res["ToggleOffBg"]           = BrushHex("#27272F");
-
-                res["BorderSubtle"]          = BrushHex("#1E1E24");
-                res["BorderCard"]            = BrushHex("#232329");
-                res["BorderStrong"]          = BrushHex("#32323B");
-                res["BorderFocus"]           = BrushHex("#6366F1");
-
-                res["FgPrimary"]             = BrushHex("#F4F4F6");
-                res["FgSecondary"]           = BrushHex("#A1A1AA");
-                res["FgMuted"]               = BrushHex("#71717A");
-
-                res["AccentPrimary"]         = BrushHex("#6366F1");
-                res["AccentText"]            = BrushHex("#818CF8");
-                res["AccentSubtleBg"]        = BrushHex("#191B2E");
-                res["AccentSubtleBorder"]    = BrushHex("#2E3259");
-
-                res["BtnPrimaryBg"]          = BrushHex("#5E6AD2");
-                res["BtnPrimaryHover"]       = BrushHex("#6E7AE2");
-                res["BtnPrimaryPressed"]     = BrushHex("#4E5AC0");
-                res["BtnPrimaryBorder"]      = BrushHex("#7884E6");
-
-                res["BtnDangerHoverBg"]      = BrushHex("#3A1A1E");
-                res["BtnDangerPressedBg"]    = BrushHex("#481F24");
-
-                res["SemanticSuccess"]       = BrushHex("#34D399");
-                res["SemanticSuccessBg"]     = BrushHex("#10261E");
-                res["SemanticSuccessBorder"] = BrushHex("#1B4334");
-
-                res["SemanticWarning"]       = BrushHex("#FBBF24");
-                res["SemanticWarningBg"]     = BrushHex("#281E0D");
-                res["SemanticWarningBorder"] = BrushHex("#4E3915");
-
-                res["SemanticDanger"]        = BrushHex("#F87171");
-                res["SemanticDangerBg"]      = BrushHex("#2A1416");
-                res["SemanticDangerBorder"]  = BrushHex("#542125");
-
-                res["ChartBarFill"]          = BrushHex("#5E6AD2");
-                res["ChartBarHover"]         = BrushHex("#818CF8");
-
-                res["ScrollThumb"]           = BrushHex("#3F3F46");
-                res["ScrollThumbHover"]      = BrushHex("#52525B");
-                res["ScrollThumbActive"]     = BrushHex("#71717A");
-            }
-            else
-            {
-                res["BgWindow"]              = BrushHex("#F8F9FA");
-                res["BgTitleBar"]            = BrushHex("#F8F9FA");
-                res["BgSidebar"]             = BrushHex("#F3F4F6");
-                res["BgCard"]                = BrushHex("#FFFFFF");
-                res["BgSurface"]             = BrushHex("#F1F2F4");
-                res["BgInput"]               = BrushHex("#FFFFFF");
-                res["BgElevated"]            = BrushHex("#FFFFFF");
-                res["BgSegActive"]           = BrushHex("#FFFFFF");
-                res["BgHover"]               = BrushHex("#F4F4F5");
-                res["BgHoverStrong"]         = BrushHex("#EAEAEE");
-                res["BgSelected"]            = BrushHex("#EEF2FF");
-                res["ToggleOffBg"]           = BrushHex("#D4D4D8");
-
-                res["BorderSubtle"]          = BrushHex("#F1F1F4");
-                res["BorderCard"]            = BrushHex("#E4E4E7");
-                res["BorderStrong"]          = BrushHex("#D4D4D8");
-                res["BorderFocus"]           = BrushHex("#4F46E5");
-
-                res["FgPrimary"]             = BrushHex("#09090B");
-                res["FgSecondary"]           = BrushHex("#52525B");
-                res["FgMuted"]               = BrushHex("#71717A");
-
-                res["AccentPrimary"]         = BrushHex("#4F46E5");
-                res["AccentText"]            = BrushHex("#4F46E5");
-                res["AccentSubtleBg"]        = BrushHex("#EEF2FF");
-                res["AccentSubtleBorder"]    = BrushHex("#C7D2FE");
-
-                res["BtnPrimaryBg"]          = BrushHex("#4F46E5");
-                res["BtnPrimaryHover"]       = BrushHex("#4338CA");
-                res["BtnPrimaryPressed"]     = BrushHex("#3730A3");
-                res["BtnPrimaryBorder"]      = BrushHex("#4338CA");
-
-                res["BtnDangerHoverBg"]      = BrushHex("#FEE2E2");
-                res["BtnDangerPressedBg"]    = BrushHex("#FECACA");
-
-                res["SemanticSuccess"]       = BrushHex("#047857");
-                res["SemanticSuccessBg"]     = BrushHex("#ECFDF5");
-                res["SemanticSuccessBorder"] = BrushHex("#A7F3D0");
-
-                res["SemanticWarning"]       = BrushHex("#B45309");
-                res["SemanticWarningBg"]     = BrushHex("#FFFBEB");
-                res["SemanticWarningBorder"] = BrushHex("#FDE68A");
-
-                res["SemanticDanger"]        = BrushHex("#DC2626");
-                res["SemanticDangerBg"]      = BrushHex("#FEF2F2");
-                res["SemanticDangerBorder"]  = BrushHex("#FECACA");
-
-                res["ChartBarFill"]          = BrushHex("#4F46E5");
-                res["ChartBarHover"]         = BrushHex("#6366F1");
-
-                res["ScrollThumb"]           = BrushHex("#D4D4D8");
-                res["ScrollThumbHover"]      = BrushHex("#A1A1AA");
-                res["ScrollThumbActive"]     = BrushHex("#71717A");
-            }
+            foreach (KeyValuePair<string, string> kv in (isDark ? DarkTokens : LightTokens))
+                res[kv.Key] = BrushHex(kv.Value);
 
             // 旧资源键平滑兼容别名
             res["AccentBlue"]    = res["AccentText"];
@@ -699,6 +740,29 @@ namespace TokLens
             };
         }
 
+        [DllImport("user32.dll")]
+        private static extern int GetWindowLong(IntPtr hwnd, int index);
+
+        [DllImport("user32.dll")]
+        private static extern int SetWindowLong(IntPtr hwnd, int index, int value);
+
+        /// <summary>模态对话框：标题栏跟随主题，去掉最小化 / 最大化按钮。</summary>
+        public static void PrepareDialog(Window dialog, bool isDark)
+        {
+            if (dialog == null) return;
+            dialog.SourceInitialized += delegate(object s, EventArgs e)
+            {
+                SyncDwmTheme(dialog, isDark);
+                try
+                {
+                    IntPtr hwnd = new WindowInteropHelper(dialog).Handle;
+                    const int GWL_STYLE = -16, WS_MAXIMIZEBOX = 0x10000, WS_MINIMIZEBOX = 0x20000;
+                    SetWindowLong(hwnd, GWL_STYLE, GetWindowLong(hwnd, GWL_STYLE) & ~(WS_MAXIMIZEBOX | WS_MINIMIZEBOX));
+                }
+                catch { }
+            };
+        }
+
         public static void SyncDwmTheme(Window win, bool isDark)
         {
             if (win == null) return;
@@ -982,7 +1046,7 @@ namespace TokLens
             Button btn = new Button();
             btn.Content = text;
             btn.FontFamily = DesignSystem.FontUi;
-            btn.FontSize = 12;
+            btn.FontSize = DesignSystem.TextBody;
             btn.FontWeight = FontWeights.Medium;
             btn.Height = 28;
             btn.Padding = new Thickness(12, 0, 12, 0);
@@ -1143,7 +1207,7 @@ namespace TokLens
             btn.Content = text;
             btn.Height = 22;
             btn.FontFamily = DesignSystem.FontUi;
-            btn.FontSize = 12;
+            btn.FontSize = DesignSystem.TextBody;
             btn.FontWeight = FontWeights.Medium;
             btn.Padding = new Thickness(10, 0, 10, 0);
             btn.Cursor = Cursors.Hand;
@@ -1161,11 +1225,22 @@ namespace TokLens
             bd.SetValue(Border.BorderThicknessProperty, new Thickness(1));
             bd.SetValue(Border.PaddingProperty, new TemplateBindingExtension(Control.PaddingProperty));
 
-            FrameworkElementFactory cp = new FrameworkElementFactory(typeof(ContentPresenter));
+            FrameworkElementFactory cp = new FrameworkElementFactory(typeof(ContentPresenter), "SegCp");
             cp.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
             cp.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
             bd.AppendChild(cp);
             tpl.VisualTree = bd;
+
+            Trigger hover = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+            hover.Setters.Add(new Setter(TextElement.ForegroundProperty, new DynamicResourceExtension("FgPrimary"), "SegCp"));
+            tpl.Triggers.Add(hover);
+
+            // 只给未选中的项加悬停底色（未选中项的背景是 Brushes.Transparent 这个共享实例）
+            MultiTrigger idleHover = new MultiTrigger();
+            idleHover.Conditions.Add(new Condition(UIElement.IsMouseOverProperty, true));
+            idleHover.Conditions.Add(new Condition(Control.BackgroundProperty, Brushes.Transparent));
+            idleHover.Setters.Add(new Setter(Border.BackgroundProperty, new DynamicResourceExtension("BgHoverStrong"), "SegBd"));
+            tpl.Triggers.Add(idleHover);
 
             btn.Template = tpl;
             return btn;
@@ -1200,7 +1275,7 @@ namespace TokLens
             tb.Text = initialText ?? "";
             tb.Height = height > 0 ? height : 30;
             tb.FontFamily = DesignSystem.FontUi;
-            tb.FontSize = 12;
+            tb.FontSize = DesignSystem.TextBody;
             tb.Padding = new Thickness(8, 0, 8, 0);
             tb.VerticalContentAlignment = VerticalAlignment.Center;
             tb.SetResourceReference(TextBox.ForegroundProperty, "FgPrimary");
@@ -1238,7 +1313,7 @@ namespace TokLens
             CheckBox chk = new CheckBox();
             chk.Content = labelText ?? "";
             chk.FontFamily = DesignSystem.FontUi;
-            chk.FontSize = 12;
+            chk.FontSize = DesignSystem.TextBody;
             chk.Cursor = Cursors.Hand;
             chk.FocusVisualStyle = null;
             chk.SetResourceReference(Control.ForegroundProperty, "FgSecondary");
@@ -1373,7 +1448,7 @@ namespace TokLens
             {
                 Text = initialText ?? "",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11,
+                FontSize = DesignSystem.TextCaption,
                 FontWeight = FontWeights.Medium,
                 VerticalAlignment = VerticalAlignment.Center
             };
@@ -1432,7 +1507,76 @@ namespace TokLens
             wrap.Children.Add(shell);
 
             pop.Child = wrap;
+            PlaceInsideWindow(pop, placementTarget, wrap);
+
+            // Esc 关闭：焦点在主窗口时经窗口预览事件，焦点在浮层内（如输入框）时经浮层自身
+            Window owner = Window.GetWindow(placementTarget);
+            KeyEventHandler escClose = delegate(object s, KeyEventArgs e)
+            {
+                if (e.Key == Key.Escape && pop.IsOpen)
+                {
+                    pop.IsOpen = false;
+                    e.Handled = true;
+                }
+            };
+            wrap.PreviewKeyDown += escClose;
+            pop.Opened += delegate(object s, EventArgs e) { if (owner != null) owner.PreviewKeyDown += escClose; };
+            pop.Closed += delegate(object s, EventArgs e) { if (owner != null) owner.PreviewKeyDown -= escClose; };
             return pop;
+        }
+
+        // 锚点在窗口右半边时浮层右对齐，锚点靠近窗口底部时向上弹出，避免浮层伸出窗口。
+        // WPF 定位时已扣除外层阴影留白，偏移量直接按可见卡片计算。
+        private static void PlaceInsideWindow(Popup pop, UIElement target, FrameworkElement wrap)
+        {
+            FrameworkElement anchor = target as FrameworkElement;
+            Window win = anchor != null ? Window.GetWindow(anchor) : null;
+            if (anchor == null || win == null || !anchor.IsVisible) return;
+            try
+            {
+                Point topLeft = anchor.TranslatePoint(new Point(0, 0), win);
+                wrap.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+                double cardWidth = wrap.DesiredSize.Width - wrap.Margin.Left - wrap.Margin.Right;
+                double cardHeight = wrap.DesiredSize.Height - wrap.Margin.Top - wrap.Margin.Bottom;
+                double winWidth = win.ActualWidth, winHeight = win.ActualHeight;
+
+                bool rightHalf = topLeft.X + anchor.ActualWidth / 2.0 > winWidth / 2.0;
+                if (rightHalf && cardWidth > anchor.ActualWidth)
+                    pop.HorizontalOffset = anchor.ActualWidth - cardWidth;
+
+                double spaceBelow = winHeight - (topLeft.Y + anchor.ActualHeight);
+                if (cardHeight > spaceBelow - 8 && topLeft.Y > spaceBelow)
+                {
+                    pop.Placement = PlacementMode.Top;
+                    pop.VerticalOffset = -4;
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>在按钮下方打开菜单；按钮靠近窗口右缘时让菜单右对齐，不伸出窗口。</summary>
+        public static void OpenMenuUnder(ContextMenu menu, FrameworkElement anchor)
+        {
+            if (menu == null || anchor == null) return;
+            menu.PlacementTarget = anchor;
+            menu.Placement = PlacementMode.Bottom;
+            menu.HorizontalOffset = 0;
+            menu.Opacity = 0;
+            RoutedEventHandler opened = null;
+            opened = delegate(object s, RoutedEventArgs e)
+            {
+                menu.Opened -= opened;
+                Window win = Window.GetWindow(anchor);
+                if (win != null)
+                {
+                    Point topLeft = anchor.TranslatePoint(new Point(0, 0), win);
+                    if (topLeft.X + menu.ActualWidth > win.ActualWidth - 8)
+                        menu.HorizontalOffset = anchor.ActualWidth - menu.ActualWidth;
+                }
+                menu.Opacity = 1;
+            };
+            menu.Opened += opened;
+            menu.IsOpen = true;
         }
     }
 
@@ -1560,7 +1704,7 @@ namespace TokLens
             dg.ColumnHeaderHeight = 32;
             dg.RowHeight = 34;
             dg.FontFamily = DesignSystem.FontUi;
-            dg.FontSize = 12;
+            dg.FontSize = DesignSystem.TextBody;
             dg.EnableRowVirtualization = true;
             ScrollViewer.SetCanContentScroll(dg, true);
 
@@ -2041,7 +2185,7 @@ namespace TokLens
             {
                 Text = title ?? "",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12,
+                FontSize = DesignSystem.TextBody,
                 FontWeight = FontWeights.SemiBold,
                 TextWrapping = TextWrapping.Wrap
             };
@@ -2054,7 +2198,7 @@ namespace TokLens
                 {
                     Text = detail,
                     FontFamily = DesignSystem.FontUi,
-                    FontSize = 11,
+                    FontSize = DesignSystem.TextCaption,
                     Margin = new Thickness(0, 2, 0, 0),
                     TextWrapping = TextWrapping.Wrap
                 };
@@ -2100,7 +2244,7 @@ namespace TokLens
             {
                 Button actBtn = ModernControlsFactory.CreateButton(actionText, "secondary");
                 actBtn.Height = 24;
-                actBtn.FontSize = 11;
+                actBtn.FontSize = DesignSystem.TextCaption;
                 actBtn.Padding = new Thickness(8, 0, 8, 0);
                 actBtn.Margin = new Thickness(0, 0, 4, 0);
                 actBtn.Click += delegate(object s, RoutedEventArgs e)

@@ -1,4 +1,6 @@
-# 知微 · TokLens v2.2
+﻿# 知微 · TokLens v2.3.0
+
+用量核算修订版（scanner rev 29）：以原始请求和实际后台模型为准，保留有独立生成记录的上下文压缩调用，修正模型档位、请求去重和历史账本回灌。升级前自动备份本地 SQLite；能从源记录核实的历史按分区重算，已丢失源记录的历史不会凭比例补造。Windows 与 VPS / macOS 探针需分别更新；旧版远端节点的汇总无法在本机凭空校正。
 
 **跨 Windows、macOS、WSL2 与 Linux VPS 的全场景 AI Token 实时遥测与 FinOps 智算账单透镜（绿色单文件旗舰版）**
 
@@ -20,38 +22,50 @@
    - 某台电脑早期登录 `gh` 时未包含 `gist` 权限（执行 `gh auth refresh -h github.com -s gist` 即可秒级补齐）；
    - 本地残留已失效的旧 `Gist ID` 返回 `404`（v2.2 已支持自动清空失效 ID 并重新寻回/重建私有 Gist）。
 
-> 在软件内任意界面按 **`F1`** 切换到「跨设备同步与令牌原理解析」标签页，或进入 **「AI 环境体检医生 (`Ctrl+0`)」** 即可实时核验本机令牌指纹、归属账号与 `gist` 权限。
+> 在软件内任意界面按 **`F1`** 切换到「跨设备同步与令牌原理解析」标签页，或进入 **「设置 › 环境检查 (`Ctrl+0`)」** 即可核验本机令牌指纹、归属账号与 `gist` 权限。
 
 ---
 
-## v2.2 全方位重构亮点
+## v2.3 界面与费用口径
 
-### 1. Obsidian / Paper Zinc 旗舰级工作台（11 大全高视图 · `0.0px` 零跳动）
-对标 **Linear、Vercel Geist、OpenRouter Activity、Helicone 与 OrbStack** 的现代开发者工具审美：
-- **一体化无边框窗口外壳**：原生支持 Windows 11 Snap Layouts 贴靠布局、DWM 沉浸式暗黑/纸白双主题联动、Per-Monitor V2 跨屏高分屏矢量渲染、可折叠侧边导航栏（`200px` 展开 / `58px` 图标态）与严格锁定 `48px` 的全局上下文顶栏。
-- **11 大全高专业视图**：
-  1. **概览看板 (`Ctrl+1`)**：四维 Bento KPI（含日预算进度与 30 天滚动预测）、工具/设备排行、十字准星平滑面积趋势图（支持点击单日钻取）与实时流快览。
-  2. **实时请求流 (`Ctrl+2`)**：免代理捕获单笔请求耗时与生成速率（`tok/s`），单击任意请求即可滑出右侧 **单笔账单四维计费瀑布流透视抽屉 (`RequestInspectorPanel`)**。
-  3. **模型与工具 (`Ctrl+3`)**：多色堆叠占比条、百万输入单价精准排序，内置 **模型单价浏览器与私有中转自定义费率工作台 (`PricingStudioWindow`)**。
-  4. **项目归因 (`Ctrl+4`)**：100% 本机离线解析 Claude Code、Codex、Cursor 等工作区与代码仓库算力投入，支持一键在资源管理器定位仓库（云端同步零路径泄露）。
-  5. **智算洞察 (`Ctrl+5`)**：2026 主流订阅（Claude Pro/Max、ChatGPT Plus/Pro、Cursor Pro/Ultra）回本等效评估矩阵、GitHub 风格 365 天算力热力图与 24 小时昼夜节律分析。
-  6. **平替模拟器 (`Ctrl+6`)**：基于本机真实历史四维 Token 画像（新增输入 / 缓存读 / 缓存写 / 输出），交互式推演跨模型迁移后的真实账单差价与省钱幅度。
-  7. **会话显微镜 (`Ctrl+7`)**：自动聚类识别长对话上下文「滚雪球膨胀」与低缓存命中异常会话，给出精准开新会话优化建议。
-  8. **设备与集群 (`Ctrl+8`)**：OrbStack 风格多设备状态卡片与跨 Windows / Linux VPS / macOS 集群对比表，支持设备本地备注名与离线节点清理。
-  9. **每日流水与导出 (`Ctrl+9`)**：补齐 `缓存写入 (CacheWrite)` 对账列的完整日流水，集成 **7 种专业报表与社交战报导出**。
-  10. **环境体检医生 (`Ctrl+0`)**：一键巡检 26 项本地 AI 客户端、IDE 数据库、WSL2 发行版与 GitHub CLI 令牌健康度。
-  11. **同步与设置 (`Ctrl+,`)**：GitHub Gist / WebDAV 多端同步、一键加密配对码、Linux/macOS 部署脚本生成、**时光机本地备份恢复** 与 **Windows 登录静默自启**。
+### 导航
 
-### 2. 全局命令面板 (`Ctrl+K`) + 桌面置顶微胶囊 (`Ctrl+M` / `Ctrl+Alt+T`)
-- **全局命令面板 (`CommandPaletteOverlay`)**：支持中文、英文及**中文拼音首字母**极速模糊检索（如输入 `pt` 秒跳「平替模拟器」、输入 `gh` 秒开令牌排障指南）。
-- **Dynamic Island 风格桌面微胶囊 (`MiniHudWindow`)**：无焦点抢占置顶悬浮展示「今日花费 · 今日 Token · 最新模型与 TPS」，支持三档透明度与「锁定位置 + 鼠标穿透」模式，写代码全屏盯盘零遮挡。
+左侧 5 个入口，「用量」和「设置」的子页面直接列在侧栏里：
+
+- **概览**（`Ctrl+1`）：用量、缓存、工具和设备汇总。时间范围选「今日」时，趋势图显示近 14 天作参照。
+- **用量**：请求明细（`Ctrl+2`）、模型与工具（`Ctrl+3`）、项目（`Ctrl+4`）、会话分析（`Ctrl+7`）、每日汇总（`Ctrl+9`，含近 365 天每日用量日历）。
+- **订阅与费用**（`Ctrl+5`）：登记实际订阅、查看到期与续费，按模型来源查看 API 参考估值。
+- **设备**（`Ctrl+8`）：本机与 VPS / 其他设备的用量记录。
+- **设置**（`Ctrl+,`）：同步与偏好、环境检查（`Ctrl+0`）、计价规则。
+
+设备、时间范围、币种和导出放在页面顶部的工具条里，只出现在受它们影响的页面：项目页固定统计本机全部历史，订阅页在页面内选择时间范围，设置页没有工具条。窗口窄于 1100px 时侧栏自动收成图标。
+
+已删除：平替模拟器（`Ctrl+6`）、每日预算提醒、SVG 分享海报、README 徽章、剪贴板战报卡。
+
+### 轻量胶囊与 TPS
+
+`Ctrl+M` 切换悬浮条：显示本机工具 / 模型、独立的 TPS、今日 API 估值。单击查看完整模型名、输出量、计时口径和时间；拖动移动，右键锁定或调整透明度，双击打开主窗口。深浅主题同步。
+
+TPS 只使用日志明确提供的请求耗时或同一请求的起止时间，分子仅为输出 Token，不计输入或缓存；显示的是**请求均速**，可能包含等待，不能冒充流式实时生成速度。缺少可靠计时显示 `—`，超过五分钟的记录进入空闲状态。旧缓存未记录计时来源的值不会被升级为可靠 TPS。首次升级会备份 SQLite 并重新解析仍存在的日志。
+
+### 订阅记录与价格
+
+登记分两步：先选服务商和套餐，再填实付金额与周期，到期日自动计算。旧版记录放在「待处理」，核对补全后才计入月度合计。目录快照核验于 **2026-11-14**，每个服务商可打开官方价格来源。月付、季付、年付分开记录，金额用原币种，年付填全年扣款总额；地区、促销、税费和团队席位按实际订单填写。每个账户跨设备只登记一次，重叠周期会阻止重复保存；续订新增记录，目录更新不覆盖历史实付。
+
+旧版自动推荐的套餐不作为已购订阅，旧人工配置保留为待核对记录；旧“国产 Coding Plan”必须选定具体服务商后才能计入费用。API 参考估值与订阅费用分开，不再显示“净赚 / 回本率”，也不拿 API 单价推算套餐剩余额度。模型来源与计费渠道分别看待：Claude Code 中的 GLM 仍归为智谱模型，不能证明购买了哪家平台的订阅。
+
+已核验预设来源：[OpenAI](https://learn.chatgpt.com/docs/pricing)、[Claude](https://claude.com/pricing)、[Google AI 美国区](https://gemini.google/us/subscriptions/?hl=en)、[智谱 GLM](https://www.bigmodel.cn/glm-coding)、[Kimi](https://www.kimi.com/help/membership/membership-pricing)、[阿里云 Token Plan](https://help.aliyun.com/zh/model-studio/token-plan-personal-overview)、[MiniMax M Plan](https://www.minimax.cn/m-plan)、[Cursor](https://cursor.com/pricing)、[Devin / Windsurf](https://devin.ai/pricing)、[GitHub Copilot](https://github.com/features/copilot/plans)、[TRAE](https://www.trae.ai/pricing)、[Zed](https://zed.dev/pricing)、[腾讯云 Token Plan](https://cloud.tencent.com/document/product/1823/130060/)、[CodeBuddy 中国版](https://www.codebuddy.cn/pricing/)、[百度千帆](https://cloud.baidu.com/doc/qianfan/s/Dmrabu8b6)。火山方舟的动态价格本次未能核实，保留套餐名称和官方入口，按订单填写金额。其他平台、地区或历史方案支持自定义登记，不预填未核实价格。
+
+### 全局命令面板
+
+`Ctrl+K` 支持中文、英文及拼音首字母搜索。计价规则入口位于“设置”，保留用量行的价格编辑快捷入口。
 
 ### 3. 全覆盖 26+ AI 工具生态 + 双层高水位防清理账本 + 时光机备份
 - **免代理全量采集**：原生支持 Claude Code、Claude Desktop、OpenAI Codex、Google Antigravity、Gemini CLI、Cursor、Windsurf、VS Code (Cline / Roo Code / Kilo Code / Continue)、ZCode、Kimi Code、WorkBuddy / CodeBuddy、OpenClaw、Qwen Code、Factory Droid、Sourcegraph Amp、Goose、Crush、Aider、OpenCode、Zed，以及本机 **WSL2** 与 **Remote SSH** 会话。
 - **永不归零的高水位账本 + 时光机**：本地 SQLite 游标库 + 云端 `MAX(...)` 高水位无损合并 + 每日自动生成 `.toklens.gz` 时光机压缩快照（自动保留最近 10 份），清空日志或重装系统均不丢失历史账单。
 
-### 4. 七维 FinOps 财务与极客分享导出体系
-支持一键导出：**交互式离线 HTML 看板**、**GitHub GFM Markdown 深度战报（含 ASCII 趋势图）**、**UTF-8 BOM Excel 财务对账 CSV**、**840×460 高清矢量 Bento 极客分享海报 (`.svg`)**、**GitHub 个人主页 README 动态徽章 (`.svg`)**、**飞书/企微纯文本战报卡（剪贴板）** 与 **100% 脱敏 JSON 汇总快照**。
+### 4. 导出
+支持导出：**离线 HTML 看板**、**Markdown 报告（含趋势摘要）**、**Excel 可直接打开的 CSV 对账明细** 与 **只含聚合数据的 JSON 汇总快照**。导出入口在页面工具条右侧的「导出」。
 
 ---
 
@@ -72,7 +86,7 @@
 | 快捷键 | 功能说明 |
 | :--- | :--- |
 | `Ctrl+K` | 唤起全局命令面板（支持中文 / 拼音首字母 / 英文极速检索） |
-| `Ctrl+1` ~ `Ctrl+9`, `Ctrl+0` | 秒切左侧 10 大业务与诊断视图 |
+| `Ctrl+1` ~ `Ctrl+5`、`Ctrl+7` ~ `Ctrl+9`、`Ctrl+0` | 切换对应页面；`Ctrl+6` 已移除 |
 | `Ctrl+,` | 打开「同步与设置」视图 |
 | `Ctrl+M` | 显示 / 隐藏桌面置顶微胶囊悬浮窗 (`MiniHudWindow`) |
 | `Ctrl+Alt+T` | 系统级全局热键：从后台/托盘唤起主窗口或切换桌面微胶囊 |
@@ -91,14 +105,8 @@
 ```powershell
 .\TokLens.exe --help                         # 查看完整 CLI 命令帮助
 .\TokLens.exe --version                      # 查看版本号与运行环境信息
-.\TokLens.exe --today                        # 终端彩色卡片展示今日实时算力账单
 .\TokLens.exe --summary --days 30            # 展示最近 30 天工具与设备消耗对齐表
-.\TokLens.exe --models --days 7              # 查看最近 7 天模型细粒度消耗排行
 .\TokLens.exe --status                       # 单行极简今日花费输出（适合嵌入 Prompt / 状态栏）
-.\TokLens.exe --doctor                       # 在终端运行本机 AI 工具链与 gh 令牌健康巡检
 .\TokLens.exe --sync-now                     # 无头触发本地增量扫描与 Gist / WebDAV 双向同步
-.\TokLens.exe --export-md   FinOps.md        # 导出 GitHub GFM Markdown 深度战报
-.\TokLens.exe --export-svg  Poster.svg       # 导出 840x460 矢量极客算力海报
-.\TokLens.exe --export-badge badge.svg       # 导出 GitHub README 个人主页算力徽章
 .\TokLens.exe --export-html Report.html      # 导出独立单文件交互式网页看板
 ```

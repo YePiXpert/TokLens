@@ -54,6 +54,8 @@ namespace TokLens
         public string StartTimeText { get; set; }
         public string EndTimeText { get; set; }
         public string TimeRangeText { get; set; }
+        /// <summary>表格用的短格式：开始时间 · 时长（完整起止时间放在 TimeRangeText）。</summary>
+        public string StartAndDurationText { get; set; }
         public int Turns { get; set; }
         public string TurnsText { get; set; }
         public long StartContextTokens { get; set; }
@@ -96,6 +98,7 @@ namespace TokLens
             StartTimeText = "";
             EndTimeText = "";
             TimeRangeText = "";
+            StartAndDurationText = "";
             TurnsText = "";
             StartContextText = "0";
             PeakContextText = "0";
@@ -104,7 +107,7 @@ namespace TokLens
             BloatMultiplierText = "1.0x";
             AvgCacheHitText = "0.0%";
             FormattedCost = "$0.0000";
-            SnowballRating = "健康紧凑";
+            SnowballRating = "正常";
             SnowballVariant = "success";
             SavingsState = "none";
             FormattedCompactSavings = "—";
@@ -661,9 +664,7 @@ namespace TokLens
             RecentRequestRecord first = cluster[0];
             RecentRequestRecord last = cluster[n - 1];
             s.Tool = string.IsNullOrWhiteSpace(first.Tool) ? "未知工具" : first.Tool.Trim();
-            s.ToolDisplayText = (string.IsNullOrEmpty(machineName) || string.Equals(machineName, "本机", StringComparison.Ordinal))
-                ? s.Tool
-                : (s.Tool + " (" + machineName + ")");
+            s.ToolDisplayText = s.Tool;
 
             s.StartTimestampMs = first.TimestampMs;
             s.EndTimestampMs = last.TimestampMs;
@@ -683,6 +684,7 @@ namespace TokLens
             s.StartTimeText = startTxt;
             s.EndTimeText = endTxt;
             s.TimeRangeText = rangeTxt;
+            s.StartAndDurationText = string.IsNullOrEmpty(startTxt) ? rangeTxt : startTxt + " · " + FormatDurationShort(s.DurationMinutes);
 
             PricingEngine pricing = GetPricingEngine();
             Dictionary<string, long> modelWeights = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
@@ -834,19 +836,19 @@ namespace TokLens
             if (multiTurnSnowball)
             {
                 s.SnowballLevel = 2;
-                s.SnowballRating = "雪球预警";
+                s.SnowballRating = "过长";
                 s.SnowballVariant = "danger";
             }
             else if (peakCtx >= CompactRecommendTokens)
             {
                 s.SnowballLevel = 1;
-                s.SnowballRating = "中度膨胀";
+                s.SnowballRating = "偏长";
                 s.SnowballVariant = "warning";
             }
             else
             {
                 s.SnowballLevel = 0;
-                s.SnowballRating = "健康紧凑";
+                s.SnowballRating = "正常";
                 s.SnowballVariant = "success";
             }
 
@@ -971,6 +973,15 @@ namespace TokLens
             return rq.TimeLabel ?? "";
         }
 
+        private static string FormatDurationShort(double minutes)
+        {
+            if (double.IsNaN(minutes) || minutes < 1.0) return "<1分";
+            int total = (int)Math.Round(minutes);
+            if (total < 60) return total.ToString(CultureInfo.InvariantCulture) + "分";
+            int h = total / 60, m = total % 60;
+            return h.ToString(CultureInfo.InvariantCulture) + "小时" + (m > 0 ? m.ToString(CultureInfo.InvariantCulture) + "分" : "");
+        }
+
         private static void FormatBurstTimeLabels(
             RecentRequestRecord first,
             RecentRequestRecord last,
@@ -1067,8 +1078,6 @@ namespace TokLens
         private int _activeFilterMode; // 0=全部, 1=膨胀关注(>=60K), 2=雪球预警(>=120K)
         private DataGrid _burstGrid;
         private StackPanel _gridEmptyOverlay;
-        private Border[] _tipCards;
-        private Border[] _tipHighlightPills;
 
         // 视图运行时状态
         private ContextBloatReport _currentReport;
@@ -1123,7 +1132,6 @@ namespace TokLens
             UpdateToolEfficiencyPanel(_currentReport);
             UpdateFilterButtonLabels(_currentReport);
             ApplyBurstFilterAndRefreshGrid(true);
-            UpdateOptimizationTipsHighlight(_currentReport);
         }
 
         private void BuildViewLayout()
@@ -1132,7 +1140,6 @@ namespace TokLens
             rootGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             rootGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             rootGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star), MinHeight = 185 });
-            rootGrid.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
 
             UIElement topBento = BuildTopBentoRow();
             Grid.SetRow(topBento, 0);
@@ -1145,10 +1152,6 @@ namespace TokLens
             UIElement bottomTable = BuildBottomBurstTableCard();
             Grid.SetRow(bottomTable, 2);
             rootGrid.Children.Add(bottomTable);
-
-            UIElement tipsStrip = BuildOptimizationTipsBar();
-            Grid.SetRow(tipsStrip, 3);
-            rootGrid.Children.Add(tipsStrip);
 
             Child = rootGrid;
         }
@@ -1172,7 +1175,7 @@ namespace TokLens
                 out _kpiPeakPill,
                 out _kpiPeakPillText,
                 out _kpiPeakPillDot);
-            card1.ToolTip = "单次请求向大模型发送的最大完整上下文体积（纯新增输入 + 缓存读取 + 缓存写入）。超过 100K 极易产生滚雪球账单。";
+            card1.ToolTip = "单次请求发送给模型的最大上下文（新增输入 + 缓存读取 + 缓存写入）。超过 100K 后每轮费用会快速上升。";
             Grid.SetColumn(card1, 0);
             bento.Children.Add(card1);
 
@@ -1191,7 +1194,7 @@ namespace TokLens
 
             Border card3 = CreateBentoKpiCard(
                 UiIcons.Shield,
-                "雪球会话与预计 /compact 可省",
+                "长会话与压缩可省",
                 "健康",
                 out _kpiSavingsValue,
                 out _kpiSavingsSub,
@@ -1239,7 +1242,7 @@ namespace TokLens
             {
                 Text = title,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12,
+                FontSize = DesignSystem.TextBody,
                 FontWeight = FontWeights.Medium,
                 VerticalAlignment = VerticalAlignment.Center,
                 TextTrimming = TextTrimming.CharacterEllipsis
@@ -1253,7 +1256,7 @@ namespace TokLens
             valueTb = new TextBlock
             {
                 Text = "—",
-                FontSize = 22,
+                FontSize = DesignSystem.TextHeading,
                 FontWeight = FontWeights.Bold,
                 Margin = new Thickness(0, 0, 0, 3),
                 TextTrimming = TextTrimming.CharacterEllipsis
@@ -1266,7 +1269,7 @@ namespace TokLens
             {
                 Text = "等待扫描数据...",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11,
+                FontSize = DesignSystem.TextCaption,
                 TextTrimming = TextTrimming.CharacterEllipsis
             };
             subTb.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -1314,7 +1317,7 @@ namespace TokLens
             {
                 Text = "选中会话上下文爬坡曲线",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 13,
+                FontSize = DesignSystem.TextLabel,
                 FontWeight = FontWeights.SemiBold,
                 VerticalAlignment = VerticalAlignment.Center
             };
@@ -1329,7 +1332,7 @@ namespace TokLens
             {
                 Text = "",
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 11,
+                FontSize = DesignSystem.TextCaption,
                 VerticalAlignment = VerticalAlignment.Center,
                 TextTrimming = TextTrimming.CharacterEllipsis
             };
@@ -1371,7 +1374,7 @@ namespace TokLens
             {
                 Text = "暂无带实时时间戳的连续会话轨迹",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12,
+                FontSize = DesignSystem.TextBody,
                 FontWeight = FontWeights.Medium,
                 HorizontalAlignment = HorizontalAlignment.Center
             };
@@ -1380,9 +1383,9 @@ namespace TokLens
 
             TextBlock emptyDesc = new TextBlock
             {
-                Text = "当扫描到单轮 AI 编程请求后，点击下方任意会话即可透视逐轮上下文滚雪球爬坡轨迹；右侧已基于全量归档生成读写效率诊断。",
+                Text = "有带时间戳的请求后，点下方任意会话即可查看每一轮上下文的增长；右侧按全部历史统计各工具的读写比。",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11,
+                FontSize = DesignSystem.TextCaption,
                 Margin = new Thickness(24, 3, 24, 0),
                 TextWrapping = TextWrapping.Wrap,
                 TextAlignment = TextAlignment.Center,
@@ -1421,9 +1424,9 @@ namespace TokLens
 
             _toolDiagSummaryBadge = new TextBlock
             {
-                Text = "全量归档",
+                Text = "全部历史",
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 10.5,
+                FontSize = DesignSystem.TextCaption,
                 VerticalAlignment = VerticalAlignment.Center
             };
             _toolDiagSummaryBadge.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -1435,7 +1438,7 @@ namespace TokLens
             {
                 Text = "工具上下文放大与裸读占比",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 13,
+                FontSize = DesignSystem.TextLabel,
                 FontWeight = FontWeights.SemiBold,
                 VerticalAlignment = VerticalAlignment.Center,
                 TextTrimming = TextTrimming.CharacterEllipsis
@@ -1496,7 +1499,7 @@ namespace TokLens
             {
                 Text = text,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11,
+                FontSize = DesignSystem.TextCaption,
                 VerticalAlignment = VerticalAlignment.Center
             };
             tb.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -1542,7 +1545,7 @@ namespace TokLens
             _chartHoverTitle = new TextBlock
             {
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 11,
+                FontSize = DesignSystem.TextCaption,
                 FontWeight = FontWeights.SemiBold,
                 Margin = new Thickness(0, 0, 0, 2)
             };
@@ -1552,7 +1555,7 @@ namespace TokLens
             _chartHoverBody = new TextBlock
             {
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 10.5,
+                FontSize = DesignSystem.TextCaption,
                 LineHeight = 15
             };
             _chartHoverBody.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
@@ -1584,7 +1587,7 @@ namespace TokLens
             StackPanel segPanel = (StackPanel)segContainer.Child;
             Button btnAll = ModernControlsFactory.CreateSegmentedItem("全部会话");
             Button btnElevated = ModernControlsFactory.CreateSegmentedItem("膨胀 ≥60K");
-            Button btnSnowball = ModernControlsFactory.CreateSegmentedItem("雪球预警 ≥120K");
+            Button btnSnowball = ModernControlsFactory.CreateSegmentedItem("过长 ≥120K");
 
             _filterButtons = new Button[] { btnAll, btnElevated, btnSnowball };
             for (int i = 0; i < _filterButtons.Length; i++)
@@ -1616,7 +1619,7 @@ namespace TokLens
             {
                 Text = "连续编码会话簇排行",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 13,
+                FontSize = DesignSystem.TextLabel,
                 FontWeight = FontWeights.SemiBold,
                 VerticalAlignment = VerticalAlignment.Center
             };
@@ -1627,7 +1630,7 @@ namespace TokLens
             {
                 Text = "间隔 ≤25 分钟自动聚类 · 点击任意行检视上下文爬坡曲线",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.5,
+                FontSize = DesignSystem.TextCaption,
                 Margin = new Thickness(10, 0, 0, 0),
                 VerticalAlignment = VerticalAlignment.Center,
                 TextTrimming = TextTrimming.CharacterEllipsis
@@ -1647,26 +1650,26 @@ namespace TokLens
 
             _burstGrid.Columns.Add(MakeSnowballStatusColumn());
             _burstGrid.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(
-                _burstGrid, "会话时段", "TimeRangeText", "StartTimestampMs",
-                new DataGridLength(1.25, DataGridLengthUnitType.Star), false, true, false));
+                _burstGrid, "开始 · 时长", "StartAndDurationText", "StartTimestampMs",
+                new DataGridLength(206), false, true, false));
             _burstGrid.Columns.Add(ModernDataGridFactory.MakeBadgeColumn(
                 "AI 工具", "ToolDisplayText", "Tool",
-                new DataGridLength(0.95, DataGridLengthUnitType.Star)));
+                new DataGridLength(126)));
             _burstGrid.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(
                 _burstGrid, "主力模型", "PrimaryModel", "PrimaryModel",
                 new DataGridLength(1.15, DataGridLengthUnitType.Star), false, false, false));
             _burstGrid.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(
                 _burstGrid, "轮次", "TurnsText", "Turns",
-                new DataGridLength(68), true, true, false));
+                new DataGridLength(78), true, true, false));
             _burstGrid.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(
-                _burstGrid, "首轮 → 峰值上下文", "ContextClimbText", "PeakContextTokens",
-                new DataGridLength(1.15, DataGridLengthUnitType.Star), true, true, true));
+                _burstGrid, "上下文 首轮→峰值", "ContextClimbText", "PeakContextTokens",
+                new DataGridLength(148), true, true, true));
             _burstGrid.Columns.Add(ModernDataGridFactory.MakeShareBarColumn(
                 "膨胀倍数", "BloatMultiplierText", "BloatBarRatio", "BloatMultiplier",
-                new DataGridLength(110)));
+                new DataGridLength(92)));
             _burstGrid.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(
-                _burstGrid, "平均缓存命中", "AvgCacheHitText", "AvgCacheHitRate",
-                new DataGridLength(96), true, true, false));
+                _burstGrid, "缓存命中", "AvgCacheHitText", "AvgCacheHitRate",
+                new DataGridLength(86), true, true, false));
             _burstGrid.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(
                 _burstGrid, "累计花费", "FormattedCost", "CostUsd",
                 new DataGridLength(96), true, true, true));
@@ -1697,7 +1700,7 @@ namespace TokLens
             {
                 Text = "当前筛选条件下没有匹配的连续编码会话簇",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12
+                FontSize = DesignSystem.TextBody
             };
             emptyGridTb.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             _gridEmptyOverlay.Children.Add(emptyGridTb);
@@ -1713,7 +1716,7 @@ namespace TokLens
         private static DataGridTemplateColumn MakeSnowballStatusColumn()
         {
             DataGridTemplateColumn col = new DataGridTemplateColumn();
-            col.Header = "雪球指数";
+            col.Header = "状态";
             col.SortMemberPath = "SnowballLevel";
             col.Width = new DataGridLength(96);
 
@@ -1776,7 +1779,7 @@ namespace TokLens
         private static DataGridTemplateColumn MakeCompactSavingsColumn(DataGrid dg)
         {
             DataGridTemplateColumn col = new DataGridTemplateColumn();
-            col.Header = "60K /compact 可省";
+            col.Header = "压缩后可省";
             col.SortMemberPath = "EstimatedCompactSavingsUsd";
             col.Width = new DataGridLength(122);
 
@@ -1808,114 +1811,6 @@ namespace TokLens
 
             col.CellTemplate = dt;
             return col;
-        }
-
-        private UIElement BuildOptimizationTipsBar()
-        {
-            Grid tipsGrid = new Grid();
-            tipsGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            tipsGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(10) });
-            tipsGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            tipsGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(10) });
-            tipsGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
-            _tipCards = new Border[3];
-            _tipHighlightPills = new Border[3];
-
-            _tipCards[0] = CreateTipCard(
-                "Claude Code · 60K /compact 黄金法则",
-                "单轮上下文破 60K 或完成子模块后主动执行 /compact 保留核心结论；避免思考停顿超 5 分钟后在 150K+ 体积下触发缓存重建，更避免破 200K 触发双倍阶梯单价。",
-                out _tipHighlightPills[0]);
-            Grid.SetColumn(_tipCards[0], 0);
-            tipsGrid.Children.Add(_tipCards[0]);
-
-            _tipCards[1] = CreateTipCard(
-                "OpenAI Codex · 跨任务果断新开会话",
-                "修完独立 Bug 或切换功能分支时立即执行 /new 开启干净上下文；避免超长编译报错与测试全量输出长期滞留，导致每轮推理承受数十倍读写放大。",
-                out _tipHighlightPills[1]);
-            Grid.SetColumn(_tipCards[1], 2);
-            tipsGrid.Children.Add(_tipCards[1]);
-
-            _tipCards[2] = CreateTipCard(
-                "Cursor / IDE · 精简 @codebase 全库引用",
-                "优先用精准的 @file 与 @symbol 替代宽泛的 @codebase 检索；及时新建 Composer 会话，并在忽略配置中排除构建产物、锁文件与巨型日志。",
-                out _tipHighlightPills[2]);
-            Grid.SetColumn(_tipCards[2], 4);
-            tipsGrid.Children.Add(_tipCards[2]);
-
-            return tipsGrid;
-        }
-
-        private static Border CreateTipCard(string title, string body, out Border highlightPill)
-        {
-            Border card = ModernControlsFactory.CreateCard(new Thickness(12, 9, 12, 9));
-
-            StackPanel sp = new StackPanel();
-            DockPanel hdr = new DockPanel();
-            hdr.Margin = new Thickness(0, 0, 0, 3);
-
-            highlightPill = new Border
-            {
-                CornerRadius = new CornerRadius(4),
-                Padding = new Thickness(5, 0, 5, 0),
-                Height = 17,
-                BorderThickness = new Thickness(1),
-                VerticalAlignment = VerticalAlignment.Center,
-                Visibility = Visibility.Collapsed
-            };
-            highlightPill.SetResourceReference(Border.BackgroundProperty, "AccentSubtleBg");
-            highlightPill.SetResourceReference(Border.BorderBrushProperty, "AccentSubtleBorder");
-
-            TextBlock pillTb = new TextBlock
-            {
-                Text = "当前高发",
-                FontFamily = DesignSystem.FontUi,
-                FontSize = 10,
-                FontWeight = FontWeights.Medium,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            pillTb.SetResourceReference(TextBlock.ForegroundProperty, "AccentText");
-            highlightPill.Child = pillTb;
-            DockPanel.SetDock(highlightPill, Dock.Right);
-            hdr.Children.Add(highlightPill);
-
-            StackPanel left = new StackPanel
-            {
-                Orientation = Orientation.Horizontal,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            Path icon = UiIcons.CreateIcon(UiIcons.Check, 12, "AccentText");
-            icon.Margin = new Thickness(0, 0, 5, 0);
-            left.Children.Add(icon);
-
-            TextBlock titleTb = new TextBlock
-            {
-                Text = title,
-                FontFamily = DesignSystem.FontUi,
-                FontSize = 11.5,
-                FontWeight = FontWeights.SemiBold,
-                VerticalAlignment = VerticalAlignment.Center,
-                TextTrimming = TextTrimming.CharacterEllipsis
-            };
-            titleTb.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
-            left.Children.Add(titleTb);
-            hdr.Children.Add(left);
-
-            sp.Children.Add(hdr);
-
-            TextBlock bodyTb = new TextBlock
-            {
-                Text = body,
-                FontFamily = DesignSystem.FontUi,
-                FontSize = 11,
-                LineHeight = 16,
-                TextWrapping = TextWrapping.Wrap
-            };
-            bodyTb.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-            sp.Children.Add(bodyTb);
-
-            card.Child = sp;
-            return card;
         }
 
         private static void ApplyBadgeVariant(Border pill, TextBlock label, Ellipse dot, string text, string variant)
@@ -2001,7 +1896,7 @@ namespace TokLens
             string savedMoney = FormatterUtil.FormatMoney(rep.TotalEstimatedCompactSavingsUsd, _isCny, _usdToCny);
             if (rep.TotalBurstCount > 0)
             {
-                _kpiSavingsValue.Text = rep.SnowballBurstCount.ToString(CultureInfo.InvariantCulture) + " 个雪球 · 省 " + savedMoney;
+                _kpiSavingsValue.Text = rep.SnowballBurstCount.ToString(CultureInfo.InvariantCulture) + " 个长会话 · 可省 " + savedMoney;
                 _kpiSavingsSub.Text = string.Format(
                     CultureInfo.InvariantCulture,
                     "共 {0} 个连续会话簇（{1} 个中度膨胀 ≥60K）· 60K 减半压缩模拟",
@@ -2013,7 +1908,7 @@ namespace TokLens
                 else if (rep.ModerateBurstCount > 0)
                     ApplyBadgeVariant(_kpiSavingsPill, _kpiSavingsPillText, _kpiSavingsPillDot, "存在优化空间", "warning");
                 else
-                    ApplyBadgeVariant(_kpiSavingsPill, _kpiSavingsPillText, _kpiSavingsPillDot, "零雪球浪费", "success");
+                    ApplyBadgeVariant(_kpiSavingsPill, _kpiSavingsPillText, _kpiSavingsPillDot, "无需压缩", "success");
             }
             else if (rep.IsSavingsFromArchiveFallback)
             {
@@ -2026,8 +1921,8 @@ namespace TokLens
             }
             else
             {
-                _kpiSavingsValue.Text = "0 个雪球 · " + savedMoney;
-                _kpiSavingsSub.Text = "暂未检测到超过 60K 的长上下文滚雪球会话";
+                _kpiSavingsValue.Text = "0 个长会话 · " + savedMoney;
+                _kpiSavingsSub.Text = "没有上下文超过 60K 的会话";
                 ApplyBadgeVariant(_kpiSavingsPill, _kpiSavingsPillText, _kpiSavingsPillDot, "健康", "success");
             }
         }
@@ -2043,7 +1938,7 @@ namespace TokLens
                 {
                     Text = "暂无各工具全局输入/输出效率统计",
                     FontFamily = DesignSystem.FontUi,
-                    FontSize = 11.5,
+                    FontSize = DesignSystem.TextCaption,
                     Margin = new Thickness(0, 28, 0, 0),
                     HorizontalAlignment = HorizontalAlignment.Center
                 };
@@ -2077,7 +1972,7 @@ namespace TokLens
                 {
                     Text = "读写比 " + row.AmplificationText,
                     FontFamily = DesignSystem.FontMono,
-                    FontSize = 11.5,
+                    FontSize = DesignSystem.TextCaption,
                     FontWeight = FontWeights.SemiBold,
                     VerticalAlignment = VerticalAlignment.Center
                 };
@@ -2109,7 +2004,7 @@ namespace TokLens
                 {
                     Text = row.Tool,
                     FontFamily = DesignSystem.FontUi,
-                    FontSize = 12,
+                    FontSize = DesignSystem.TextBody,
                     FontWeight = FontWeights.Medium,
                     VerticalAlignment = VerticalAlignment.Center,
                     TextTrimming = TextTrimming.CharacterEllipsis
@@ -2155,7 +2050,7 @@ namespace TokLens
                 {
                     Text = row.EfficiencyTag,
                     FontFamily = DesignSystem.FontUi,
-                    FontSize = 10.5,
+                    FontSize = DesignSystem.TextCaption,
                     VerticalAlignment = VerticalAlignment.Center
                 };
                 if (string.Equals(row.EfficiencyVariant, "danger", StringComparison.Ordinal))
@@ -2171,7 +2066,7 @@ namespace TokLens
                 {
                     Text = "裸输入 " + row.UncachedInputText + " · 均轮 " + FormatterUtil.FormatTokens(row.AvgContextPerTurn),
                     FontFamily = DesignSystem.FontMono,
-                    FontSize = 10.5,
+                    FontSize = DesignSystem.TextCaption,
                     VerticalAlignment = VerticalAlignment.Center,
                     TextTrimming = TextTrimming.CharacterEllipsis
                 };
@@ -2207,7 +2102,7 @@ namespace TokLens
 
             _filterButtons[0].Content = "全部会话 (" + allCnt.ToString(CultureInfo.InvariantCulture) + ")";
             _filterButtons[1].Content = "膨胀 ≥60K (" + elevCnt.ToString(CultureInfo.InvariantCulture) + ")";
-            _filterButtons[2].Content = "雪球预警 (" + snowCnt.ToString(CultureInfo.InvariantCulture) + ")";
+            _filterButtons[2].Content = "过长 ≥120K (" + snowCnt.ToString(CultureInfo.InvariantCulture) + ")";
         }
 
         private void ApplyBurstFilterAndRefreshGrid(bool keepScrollNearTop)
@@ -2279,46 +2174,6 @@ namespace TokLens
             RedrawSelectedBurstChart();
         }
 
-        private void UpdateOptimizationTipsHighlight(ContextBloatReport rep)
-        {
-            if (_tipCards == null || _tipHighlightPills == null) return;
-
-            bool focusClaude = false;
-            bool focusCodex = false;
-            bool focusCursor = false;
-
-            if (rep != null)
-            {
-                if (rep.Bursts != null)
-                {
-                    for (int i = 0; i < rep.Bursts.Count; i++)
-                    {
-                        SessionBurstSummary b = rep.Bursts[i];
-                        if (b.SnowballLevel < 1) continue;
-                        string t = (b.Tool ?? "").ToLowerInvariant();
-                        if (t.IndexOf("claude", StringComparison.Ordinal) >= 0) focusClaude = true;
-                        else if (t.IndexOf("codex", StringComparison.Ordinal) >= 0 || t.IndexOf("openai", StringComparison.Ordinal) >= 0) focusCodex = true;
-                        else if (t.IndexOf("cursor", StringComparison.Ordinal) >= 0 || t.IndexOf("windsurf", StringComparison.Ordinal) >= 0 || t.IndexOf("cline", StringComparison.Ordinal) >= 0) focusCursor = true;
-                    }
-                }
-
-                if (!focusClaude && !focusCodex && !focusCursor && rep.ToolDiagnostics != null && rep.ToolDiagnostics.Count > 0)
-                {
-                    string topTool = (rep.ToolDiagnostics[0].Tool ?? "").ToLowerInvariant();
-                    if (topTool.IndexOf("claude", StringComparison.Ordinal) >= 0) focusClaude = true;
-                    else if (topTool.IndexOf("codex", StringComparison.Ordinal) >= 0 || topTool.IndexOf("openai", StringComparison.Ordinal) >= 0) focusCodex = true;
-                    else if (topTool.IndexOf("cursor", StringComparison.Ordinal) >= 0) focusCursor = true;
-                }
-            }
-
-            bool[] flags = new bool[] { focusClaude, focusCodex, focusCursor };
-            for (int i = 0; i < 3; i++)
-            {
-                _tipHighlightPills[i].Visibility = flags[i] ? Visibility.Visible : Visibility.Collapsed;
-                _tipCards[i].SetResourceReference(Border.BorderBrushProperty, flags[i] ? "AccentSubtleBorder" : "BorderCard");
-            }
-        }
-
         private void RedrawSelectedBurstChart()
         {
             if (_chartCanvas == null) return;
@@ -2373,10 +2228,10 @@ namespace TokLens
             if (rawMax < 115000L) rawMax = 115000L;
             double maxTokens = ComputeNiceCeiling((double)rawMax * 1.10);
 
-            SolidColorBrush gridBrush = DesignSystem.BrushHex(_isDark ? "#23232B" : "#E4E4E7");
-            SolidColorBrush axisFg = DesignSystem.BrushHex(_isDark ? "#71717A" : "#71717A");
-            SolidColorBrush warnLineBrush = DesignSystem.BrushHex(_isDark ? "#F87171" : "#DC2626");
-            SolidColorBrush compactLineBrush = DesignSystem.BrushHex(_isDark ? "#34D399" : "#059669");
+            SolidColorBrush gridBrush = DesignSystem.ThemeBrush("BorderCard", _isDark);
+            SolidColorBrush axisFg = DesignSystem.ThemeBrush("FgMuted", _isDark);
+            SolidColorBrush warnLineBrush = DesignSystem.ThemeBrush("SemanticDanger", _isDark);
+            SolidColorBrush compactLineBrush = DesignSystem.ThemeBrush("ChartCacheRead", _isDark);
 
             // 1. 背景水平网格线与纵轴刻度（0、50%、100%）
             double[] gridLevels = new double[] { 0.0, maxTokens * 0.5, maxTokens };
@@ -2401,7 +2256,7 @@ namespace TokLens
                 {
                     Text = FormatterUtil.FormatTokens((long)Math.Round(val)),
                     FontFamily = DesignSystem.FontMono,
-                    FontSize = 10,
+                    FontSize = DesignSystem.TextCaption,
                     Foreground = axisFg,
                     Width = leftPad - 6.0,
                     TextAlignment = TextAlignment.Right
@@ -2421,9 +2276,9 @@ namespace TokLens
                     Y1 = y60k,
                     X2 = _plotRight,
                     Y2 = y60k,
-                    Stroke = DesignSystem.BrushHex(_isDark ? "#6E5620" : "#F59E0B"),
+                    Stroke = DesignSystem.ThemeBrush("SemanticWarning", _isDark),
                     StrokeThickness = 1.0,
-                    Opacity = _isDark ? 0.75 : 0.55,
+                    Opacity = _isDark ? 0.4 : 0.55,
                     StrokeDashArray = new DoubleCollection(new double[] { 2.5, 3.0 })
                 };
                 _chartCanvas.Children.Add(line60k);
@@ -2448,8 +2303,8 @@ namespace TokLens
             {
                 CornerRadius = new CornerRadius(3),
                 Padding = new Thickness(5, 1, 5, 1),
-                Background = DesignSystem.BrushHex(_isDark ? "#2A1416" : "#FEF2F2"),
-                BorderBrush = DesignSystem.BrushHex(_isDark ? "#542125" : "#FECACA"),
+                Background = DesignSystem.ThemeBrush("SemanticDangerBg", _isDark),
+                BorderBrush = DesignSystem.ThemeBrush("SemanticDangerBorder", _isDark),
                 BorderThickness = new Thickness(1),
                 IsHitTestVisible = false
             };
@@ -2457,7 +2312,7 @@ namespace TokLens
             {
                 Text = "100K 警戒线",
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 9.5,
+                FontSize = DesignSystem.TextCaption,
                 FontWeight = FontWeights.SemiBold,
                 Foreground = warnLineBrush
             };
@@ -2491,9 +2346,9 @@ namespace TokLens
 
             string mainColorHex;
             if (burst.SnowballLevel >= 2)
-                mainColorHex = _isDark ? "#F87171" : "#DC2626";
+                mainColorHex = DesignSystem.ThemeHex("SemanticDanger", _isDark);
             else if (burst.SnowballLevel == 1)
-                mainColorHex = _isDark ? "#FBBF24" : "#D97706";
+                mainColorHex = DesignSystem.ThemeHex("SemanticWarning", _isDark);
             else
                 mainColorHex = DesignSystem.GetProviderColorHex(burst.Tool, _isDark);
 
@@ -2618,7 +2473,7 @@ namespace TokLens
             int peakZeroIdx = burst.PeakTurnIndex - 1;
             if (peakZeroIdx < 0 || peakZeroIdx >= count) peakZeroIdx = count - 1;
 
-            SolidColorBrush cardBgBrush = DesignSystem.BrushHex(_isDark ? "#16161A" : "#FFFFFF");
+            SolidColorBrush cardBgBrush = DesignSystem.ThemeBrush("BgCard", _isDark);
             for (int i = 0; i < count; i++)
             {
                 bool isPeak = (i == peakZeroIdx);
@@ -2646,7 +2501,7 @@ namespace TokLens
             {
                 Text = "峰值 " + burst.PeakContextText + " (#" + burst.PeakTurnIndex.ToString(CultureInfo.InvariantCulture) + ")",
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 10,
+                FontSize = DesignSystem.TextCaption,
                 FontWeight = FontWeights.SemiBold,
                 Foreground = mainStrokeBrush,
                 IsHitTestVisible = false
@@ -2684,7 +2539,7 @@ namespace TokLens
                 {
                     Text = "第 1 轮 (" + pts[0].TimeLabel + ")",
                     FontFamily = DesignSystem.FontMono,
-                    FontSize = 10,
+                    FontSize = DesignSystem.TextCaption,
                     Foreground = axisFg,
                     IsHitTestVisible = false
                 };
@@ -2714,7 +2569,7 @@ namespace TokLens
                 {
                     Text = label,
                     FontFamily = DesignSystem.FontMono,
-                    FontSize = 10,
+                    FontSize = DesignSystem.TextCaption,
                     Foreground = axisFg,
                     IsHitTestVisible = false
                 };

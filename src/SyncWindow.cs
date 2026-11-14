@@ -56,7 +56,7 @@ namespace TokLens
 
                 _revealBtn = ModernControlsFactory.CreateButton("显示", "ghost");
                 _revealBtn.Height = 22;
-                _revealBtn.FontSize = 11;
+                _revealBtn.FontSize = DesignSystem.TextCaption;
                 _revealBtn.Padding = new Thickness(7, 0, 7, 0);
                 _revealBtn.Margin = new Thickness(6, 0, 0, 0);
                 DockPanel.SetDock(_revealBtn, Dock.Right);
@@ -67,7 +67,7 @@ namespace TokLens
 
                 _pwdBox = new PasswordBox();
                 _pwdBox.FontFamily = DesignSystem.FontMono;
-                _pwdBox.FontSize = 12;
+                _pwdBox.FontSize = DesignSystem.TextBody;
                 _pwdBox.BorderThickness = new Thickness(0);
                 _pwdBox.Background = Brushes.Transparent;
                 _pwdBox.VerticalAlignment = VerticalAlignment.Center;
@@ -79,7 +79,7 @@ namespace TokLens
 
                 _plainBox = new TextBox();
                 _plainBox.FontFamily = DesignSystem.FontMono;
-                _plainBox.FontSize = 12;
+                _plainBox.FontSize = DesignSystem.TextBody;
                 _plainBox.BorderThickness = new Thickness(0);
                 _plainBox.Background = Brushes.Transparent;
                 _plainBox.VerticalAlignment = VerticalAlignment.Center;
@@ -232,6 +232,7 @@ namespace TokLens
         private CheckBox _autoSyncSwitch;
         private Button _saveOnlyBtn;
         private Button _saveAndSyncBtn;
+        private StackPanel _headerActionsPanel;
 
         // Card 2: Second PC & Linux VPS Probe
         private TextBox _vpsNameBox;
@@ -240,13 +241,9 @@ namespace TokLens
         private Border _vpsOAuthNoticeBorder;
         private Button _copyVpsCmdBtn;
 
-        // Card 3: Local Scan, Daily Budget & Preferences
+        // Card 3: Local Scan & Preferences
         private TextBlock _homeDirPathText;
         private CheckBox _wslSwitch;
-        private CheckBox _budgetEnableSwitch;
-        private TextBlock _budgetCurrencyPrefix;
-        private TextBox _budgetAmountBox;
-        private Button _applyBudgetBtn;
         private CheckBox _minToTraySwitch;
         private Button[] _themeSegBtns;
         private Button[] _currencySegBtns;
@@ -335,7 +332,6 @@ namespace TokLens
                 ModernControlsFactory.UpdateSegmentedGroup(_themeSegBtns, _liveCfg.IsDarkTheme ? 0 : 1);
                 ModernControlsFactory.UpdateSegmentedGroup(_currencySegBtns, _liveCfg.PreferCny ? 0 : 1);
 
-                SyncBudgetInputsFromLiveConfig();
                 UpdateProviderModeVisuals();
                 UpdateLocalTokenPreviewLabels(_gistTokenField.Value);
                 RefreshTopologyPreviewUi();
@@ -533,7 +529,7 @@ namespace TokLens
 
             NotifyUser(
                 "已导入配对码凭据（待保存）",
-                "请确认「本机显示名称」（如：家里电脑），随后点击「保存并立即同步」即可生效。",
+                "请确认「本机显示名称」（如：家里电脑），随后点击右上角「保存并同步」即可生效。",
                 "success");
 
             if (!_isWebDav && !string.IsNullOrWhiteSpace(_workingCfg.GistToken))
@@ -542,9 +538,12 @@ namespace TokLens
             }
         }
 
-        public void TriggerSaveAndSyncNow()
+        /// <summary>在页面头部保存按钮左侧加入宿主提供的动作（例如「更多」菜单）。</summary>
+        public void AddHeaderAction(FrameworkElement action)
         {
-            ExecuteSaveAndSyncFlow();
+            if (action == null || _headerActionsPanel == null) return;
+            action.Margin = new Thickness(0, 0, 8, 0);
+            _headerActionsPanel.Children.Insert(0, action);
         }
 
         // -------------------- UI Construction --------------------
@@ -584,7 +583,7 @@ namespace TokLens
             _secOnboardCard.Margin = new Thickness(0, 0, 0, 16);
             centerCol.Children.Add(_secOnboardCard);
 
-            _secPrefsCard = BuildCard3PreferencesAndBudget();
+            _secPrefsCard = BuildCard3ScanAndPreferences();
             _secPrefsCard.Margin = new Thickness(0, 0, 0, 16);
             centerCol.Children.Add(_secPrefsCard);
 
@@ -610,31 +609,26 @@ namespace TokLens
 
             DockPanel dock = new DockPanel();
 
-            // Right quick pairing & sync actions
-            StackPanel rightActions = new StackPanel
+            // 右侧：整页唯一的保存入口（配对码复制 / 粘贴在「接入电脑 / VPS」卡片里，不在这里重复）
+            _headerActionsPanel = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
                 VerticalAlignment = VerticalAlignment.Center
             };
-            DockPanel.SetDock(rightActions, Dock.Right);
+            DockPanel.SetDock(_headerActionsPanel, Dock.Right);
 
-            Button copyPairBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Copy, "复制配对码", "secondary");
-            copyPairBtn.Margin = new Thickness(0, 0, 6, 0);
-            copyPairBtn.ToolTip = "将同步凭据打包为配对码（含私密凭据，请勿发至公开群聊）";
-            copyPairBtn.Click += delegate(object s, RoutedEventArgs e) { TriggerQuickPairCopy(); };
-            rightActions.Children.Add(copyPairBtn);
+            _saveOnlyBtn = ModernControlsFactory.CreateButton("仅保存", "secondary");
+            _saveOnlyBtn.Margin = new Thickness(0, 0, 8, 0);
+            _saveOnlyBtn.ToolTip = "保存本页设置，不立即同步";
+            _saveOnlyBtn.Click += delegate(object s, RoutedEventArgs e) { CommitSyncSettingsOnly(); };
+            _headerActionsPanel.Children.Add(_saveOnlyBtn);
 
-            Button pastePairBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Key, "粘贴配对码", "secondary");
-            pastePairBtn.Margin = new Thickness(0, 0, 8, 0);
-            pastePairBtn.ToolTip = "从剪贴板导入另一台电脑复制的配对码（不会覆盖本机名称与 ID）";
-            pastePairBtn.Click += delegate(object s, RoutedEventArgs e) { TriggerQuickPairPaste(); };
-            rightActions.Children.Add(pastePairBtn);
+            _saveAndSyncBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Refresh, "保存并同步", "primary");
+            _saveAndSyncBtn.ToolTip = "保存本页设置并立即与云端双向同步";
+            _saveAndSyncBtn.Click += delegate(object s, RoutedEventArgs e) { ExecuteSaveAndSyncFlow(); };
+            _headerActionsPanel.Children.Add(_saveAndSyncBtn);
 
-            Button quickSyncBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Refresh, "保存并同步", "primary");
-            quickSyncBtn.Click += delegate(object s, RoutedEventArgs e) { ExecuteSaveAndSyncFlow(); };
-            rightActions.Children.Add(quickSyncBtn);
-
-            dock.Children.Add(rightActions);
+            dock.Children.Add(_headerActionsPanel);
 
             // Left segmented section anchors
             Border anchorSeg = ModernControlsFactory.CreateSegmentedContainer();
@@ -645,7 +639,7 @@ namespace TokLens
             {
                 "云同步与身份",
                 "接入电脑 / VPS",
-                "扫描与预算偏好",
+                "扫描与偏好",
                 "归档健康与口径"
             };
             _sectionAnchorBtns = new Button[secTitles.Length];
@@ -701,7 +695,7 @@ namespace TokLens
             _inlineBannerText = new TextBlock
             {
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12,
+                FontSize = DesignSystem.TextBody,
                 TextWrapping = TextWrapping.Wrap,
                 VerticalAlignment = VerticalAlignment.Center
             };
@@ -818,7 +812,7 @@ namespace TokLens
             {
                 Text = "等待读取或输入 GitHub 访问令牌",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12.5,
+                FontSize = DesignSystem.TextLabel,
                 FontWeight = FontWeights.SemiBold,
                 VerticalAlignment = VerticalAlignment.Center,
                 TextTrimming = TextTrimming.CharacterEllipsis
@@ -853,7 +847,7 @@ namespace TokLens
             _ghFingerprintText = new TextBlock
             {
                 Text = "令牌指纹：—",
-                FontSize = 11.2,
+                FontSize = DesignSystem.TextCaption,
                 VerticalAlignment = VerticalAlignment.Center
             };
             ModernControlsFactory.EnableTabularNumbers(_ghFingerprintText, true);
@@ -865,7 +859,7 @@ namespace TokLens
             {
                 Text = "凭据类型：未配置",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.2,
+                FontSize = DesignSystem.TextCaption,
                 VerticalAlignment = VerticalAlignment.Center,
                 TextTrimming = TextTrimming.CharacterEllipsis
             };
@@ -887,7 +881,7 @@ namespace TokLens
             DockPanel scopeDock = new DockPanel();
             Button copyRefreshCmdBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Copy, "复制补权命令", "secondary");
             copyRefreshCmdBtn.Height = 24;
-            copyRefreshCmdBtn.FontSize = 11;
+            copyRefreshCmdBtn.FontSize = DesignSystem.TextCaption;
             copyRefreshCmdBtn.Padding = new Thickness(8, 0, 8, 0);
             copyRefreshCmdBtn.Margin = new Thickness(8, 0, 0, 0);
             DockPanel.SetDock(copyRefreshCmdBtn, Dock.Right);
@@ -903,7 +897,7 @@ namespace TokLens
             {
                 Text = "当前令牌缺少 gist 权限。请在终端执行 gh auth refresh -h github.com -s gist 一键补齐权限。",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.5,
+                FontSize = DesignSystem.TextCaption,
                 TextWrapping = TextWrapping.Wrap,
                 VerticalAlignment = VerticalAlignment.Center
             };
@@ -1005,7 +999,7 @@ namespace TokLens
             {
                 Text = "多端设备账本拓扑预览",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.5,
+                FontSize = DesignSystem.TextCaption,
                 FontWeight = FontWeights.Medium,
                 Margin = new Thickness(0, 12, 0, 6)
             };
@@ -1086,7 +1080,7 @@ namespace TokLens
             localIdGrid.Children.Add(nameCol);
 
             StackPanel idCol = new StackPanel();
-            idCol.Children.Add(MakeFieldLabel("本机唯一设备 ID（不同电脑须保持不同，改名将自动无损迁移本机高水位账本）"));
+            idCol.Children.Add(MakeFieldLabel("本机设备 ID（各电脑须不同，改名会自动迁移本机账本）"));
             _machineIdBox = ModernControlsFactory.CreateTextInput("", 32);
             _machineIdBox.FontFamily = DesignSystem.FontMono;
             idCol.Children.Add(_machineIdBox);
@@ -1094,7 +1088,7 @@ namespace TokLens
             localIdGrid.Children.Add(idCol);
             sp.Children.Add(localIdGrid);
 
-            // Footer inside Card 1: AutoSync toggle + Save / Sync buttons
+            // Footer inside Card 1: AutoSync toggle（保存按钮统一在页面头部）
             Border card1Footer = new Border
             {
                 BorderThickness = new Thickness(0, 1, 0, 0),
@@ -1103,26 +1097,6 @@ namespace TokLens
             card1Footer.SetResourceReference(Border.BorderBrushProperty, "BorderSubtle");
 
             DockPanel actDock = new DockPanel();
-            StackPanel saveBtns = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            DockPanel.SetDock(saveBtns, Dock.Right);
-
-            _saveOnlyBtn = ModernControlsFactory.CreateButton("仅保存设置", "secondary");
-            _saveOnlyBtn.Height = 30;
-            _saveOnlyBtn.Margin = new Thickness(0, 0, 8, 0);
-            _saveOnlyBtn.Click += delegate(object s, RoutedEventArgs e)
-            {
-                CommitSyncSettingsOnly();
-            };
-            saveBtns.Children.Add(_saveOnlyBtn);
-
-            _saveAndSyncBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Refresh, "保存并立即双向同步", "primary");
-            _saveAndSyncBtn.Height = 30;
-            _saveAndSyncBtn.Click += delegate(object s, RoutedEventArgs e)
-            {
-                ExecuteSaveAndSyncFlow();
-            };
-            saveBtns.Children.Add(_saveAndSyncBtn);
-            actDock.Children.Add(saveBtns);
 
             _autoSyncSwitch = ModernControlsFactory.CreateToggleSwitch("启用后台全自动同步（每 5 分钟及本机用量变化后静默合并）");
             _autoSyncSwitch.VerticalAlignment = VerticalAlignment.Center;
@@ -1182,7 +1156,7 @@ namespace TokLens
             {
                 Text = "方式 A：接入家里或单位的第二台 Windows 电脑",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12.5,
+                FontSize = DesignSystem.TextLabel,
                 FontWeight = FontWeights.SemiBold,
                 Margin = new Thickness(0, 0, 0, 4)
             };
@@ -1194,7 +1168,7 @@ namespace TokLens
                 Text = "1) 免配对码自动找回（推荐）：在新电脑登录同一 GitHub 账号的 gh CLI，点击上方「读取本机 gh 登录 -> 保存并同步」即可自动关联同一私有 Gist。\n" +
                        "2) 配对码秒导入：在本机点击「复制配对码」，发给自己的另一台电脑点击「粘贴配对码」。安全提醒：配对码内含云同步令牌，切勿发送至公开群聊。",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.5,
+                FontSize = DesignSystem.TextCaption,
                 LineHeight = 18,
                 TextWrapping = TextWrapping.Wrap
             };
@@ -1220,7 +1194,7 @@ namespace TokLens
             {
                 Text = "方式 B：接入 Linux VPS（零第三方依赖 Python 3 探针 + Crontab 定时上报）",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12.5,
+                FontSize = DesignSystem.TextLabel,
                 FontWeight = FontWeights.SemiBold,
                 Margin = new Thickness(0, 0, 0, 10)
             };
@@ -1257,7 +1231,7 @@ namespace TokLens
             Grid.SetColumn(viCol, 2);
             vpsCfgGrid.Children.Add(viCol);
 
-            _copyVpsCmdBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Terminal, "复制 SSH 一键部署命令", "primary");
+            _copyVpsCmdBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Terminal, "复制 SSH 一键部署命令", "secondary");
             _copyVpsCmdBtn.Height = 32;
             _copyVpsCmdBtn.VerticalAlignment = VerticalAlignment.Bottom;
             _copyVpsCmdBtn.Click += OnCopyVpsCommandClick;
@@ -1271,7 +1245,7 @@ namespace TokLens
             _vpsCmdPreviewBox.VerticalContentAlignment = VerticalAlignment.Top;
             _vpsCmdPreviewBox.Padding = new Thickness(10, 8, 10, 8);
             _vpsCmdPreviewBox.FontFamily = DesignSystem.FontMono;
-            _vpsCmdPreviewBox.FontSize = 11.2;
+            _vpsCmdPreviewBox.FontSize = DesignSystem.TextCaption;
             _vpsCmdPreviewBox.Margin = new Thickness(0, 10, 0, 8);
             vpsSp.Children.Add(_vpsCmdPreviewBox);
 
@@ -1296,7 +1270,7 @@ namespace TokLens
             {
                 Text = "探针内置 ~/.toklens/ledger.db 持久归档保护，VPS 定期清理日志或重启均不丢历史账单",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.2,
+                FontSize = DesignSystem.TextCaption,
                 VerticalAlignment = VerticalAlignment.Center,
                 HorizontalAlignment = HorizontalAlignment.Right,
                 TextTrimming = TextTrimming.CharacterEllipsis,
@@ -1313,16 +1287,16 @@ namespace TokLens
             return card;
         }
 
-        // -------------------- Card 3: Scan Source, Budget & Preferences (Auto-Save) --------------------
+        // -------------------- Card 3: Scan Source & Preferences (Auto-Save) --------------------
 
-        private Border BuildCard3PreferencesAndBudget()
+        private Border BuildCard3ScanAndPreferences()
         {
             Border card = ModernControlsFactory.CreateCard(new Thickness(20, 18, 20, 18));
             StackPanel sp = new StackPanel();
 
             sp.Children.Add(MakeCardHeaderBlock(
                 UiIcons.Settings,
-                "3. 本机扫描源、每日预算提醒与常驻偏好",
+                "3. 本机扫描源与常驻偏好",
                 "以下本机偏好设置修改后即时生效并自动持久化保存，无需额外点击保存按钮"));
 
             // Row 1: Home Directory Selection
@@ -1347,7 +1321,7 @@ namespace TokLens
             {
                 Text = ResolveCurrentHomeDirectory(),
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 11.5,
+                FontSize = DesignSystem.TextCaption,
                 Margin = new Thickness(0, 2, 0, 0),
                 TextTrimming = TextTrimming.CharacterEllipsis
             };
@@ -1372,74 +1346,7 @@ namespace TokLens
             rowWsl.Child = wslDock;
             sp.Children.Add(rowWsl);
 
-            // Row 3: Daily Budget Alert
-            Border rowBudget = MakeSettingRowContainer(true);
-            DockPanel budgetDock = new DockPanel();
-
-            StackPanel budgetRight = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            DockPanel.SetDock(budgetRight, Dock.Right);
-
-            _budgetCurrencyPrefix = new TextBlock
-            {
-                Text = "¥",
-                FontFamily = DesignSystem.FontMono,
-                FontSize = 12.5,
-                FontWeight = FontWeights.SemiBold,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 5, 0)
-            };
-            _budgetCurrencyPrefix.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-            budgetRight.Children.Add(_budgetCurrencyPrefix);
-
-            _budgetAmountBox = ModernControlsFactory.CreateTextInput("", 28);
-            _budgetAmountBox.Width = 84;
-            _budgetAmountBox.FontFamily = DesignSystem.FontMono;
-            _budgetAmountBox.Margin = new Thickness(0, 0, 6, 0);
-            _budgetAmountBox.ToolTip = "输入每日花费预算上限（按当前所选展示币种折算存储）";
-            _budgetAmountBox.KeyDown += delegate(object s, KeyEventArgs e)
-            {
-                if (e.Key == Key.Enter)
-                {
-                    ApplyDailyBudgetSetting(true);
-                    e.Handled = true;
-                }
-            };
-            _budgetAmountBox.LostFocus += delegate(object s, RoutedEventArgs e)
-            {
-                if (!_suppressUiEvents && _budgetEnableSwitch.IsChecked == true)
-                    ApplyDailyBudgetSetting(false);
-            };
-            budgetRight.Children.Add(_budgetAmountBox);
-
-            _applyBudgetBtn = ModernControlsFactory.CreateButton("应用", "secondary");
-            _applyBudgetBtn.Height = 28;
-            _applyBudgetBtn.Padding = new Thickness(10, 0, 10, 0);
-            _applyBudgetBtn.Margin = new Thickness(0, 0, 10, 0);
-            _applyBudgetBtn.Click += delegate(object s, RoutedEventArgs e)
-            {
-                if (_budgetEnableSwitch.IsChecked != true)
-                {
-                    _suppressUiEvents = true;
-                    _budgetEnableSwitch.IsChecked = true;
-                    _suppressUiEvents = false;
-                }
-                ApplyDailyBudgetSetting(true);
-            };
-            budgetRight.Children.Add(_applyBudgetBtn);
-
-            _budgetEnableSwitch = ModernControlsFactory.CreateToggleSwitch("");
-            _budgetEnableSwitch.VerticalAlignment = VerticalAlignment.Center;
-            _budgetEnableSwitch.Click += OnBudgetSwitchClicked;
-            budgetRight.Children.Add(_budgetEnableSwitch);
-
-            budgetDock.Children.Add(budgetRight);
-            budgetDock.Children.Add(MakeRowTitleAndDesc(
-                "每日花费预算阈值提醒",
-                "当日等效 API 花费达到或超过设定预算时，在概览卡片与顶栏显示温和提醒徽章"));
-            rowBudget.Child = budgetDock;
-            sp.Children.Add(rowBudget);
-
-            // Row 4: Minimize to System Tray on Close
+            // Row 3: Minimize to System Tray on Close
             Border rowTray = MakeSettingRowContainer(true);
             DockPanel trayDock = new DockPanel();
             _minToTraySwitch = ModernControlsFactory.CreateToggleSwitch("");
@@ -1450,11 +1357,11 @@ namespace TokLens
 
             trayDock.Children.Add(MakeRowTitleAndDesc(
                 "关闭主窗口时最小化驻留到系统托盘",
-                "点击右上角关闭按钮时不退出进程，保持后台毫秒级日志监听与 5 分钟云端自动同步"));
+                "点击右上角关闭按钮时不退出进程，保持后台日志监听与 5 分钟云端自动同步"));
             rowTray.Child = trayDock;
             sp.Children.Add(rowTray);
 
-            // Row 5: Theme & Default Currency
+            // Row 4: Theme & Default Currency
             Border rowAppearance = MakeSettingRowContainer(true);
             DockPanel appDock = new DockPanel();
 
@@ -1506,9 +1413,6 @@ namespace TokLens
                     _workingCfg.PreferCny = wantCny;
                     SyncService.SaveConfig(_liveCfg);
                     ModernControlsFactory.UpdateSegmentedGroup(_currencySegBtns, idx);
-                    _suppressUiEvents = true;
-                    try { SyncBudgetInputsFromLiveConfig(); }
-                    finally { _suppressUiEvents = false; }
                     RefreshTopologyPreviewUi();
                     if (_callbacks.OnThemeOrCurrencyChanged != null)
                         _callbacks.OnThemeOrCurrencyChanged();
@@ -1521,7 +1425,7 @@ namespace TokLens
             appDock.Children.Add(appControls);
             appDock.Children.Add(MakeRowTitleAndDesc(
                 "界面外观与默认计价币种",
-                "切换深浅色视觉主题与全局默认显示货币，切换后保持 0.0px 零布局抖动"));
+                "深浅色主题与默认显示币种，修改后立即生效"));
             rowAppearance.Child = appDock;
             sp.Children.Add(rowAppearance);
 
@@ -1581,7 +1485,7 @@ namespace TokLens
 
             maintDock.Children.Add(maintBtns);
             maintDock.Children.Add(MakeRowTitleAndDesc(
-                "三源云端模型价格库与在线实时汇率",
+                "模型价格库与汇率",
                 "支持在 ~/.toklens/custom_prices.json 中放置自定义单价覆盖规则"));
             rowMaint.Child = maintDock;
             sp.Children.Add(rowMaint);
@@ -1600,13 +1504,13 @@ namespace TokLens
             DockPanel hdr = new DockPanel { Margin = new Thickness(0, 0, 0, 14) };
             TextBlock okLbl;
             Shapes.Ellipse okDot;
-            Border healthBadge = ModernControlsFactory.CreateStatusBadge("双层防清理保护已激活", "success", out okLbl, out okDot);
+            Border healthBadge = ModernControlsFactory.CreateStatusBadge("归档保护已开启", "success", out okLbl, out okDot);
             DockPanel.SetDock(healthBadge, Dock.Right);
             hdr.Children.Add(healthBadge);
 
             hdr.Children.Add(MakeCardHeaderBlock(
                 UiIcons.Shield,
-                "4. 双层历史防清理归档健康度与统计口径",
+                "4. 本地归档与统计口径",
                 "即使 AI 工具自动清理旧会话、手动清空日志目录甚至重装系统，已入库与已同步的历史账单永久保留不归零"));
             sp.Children.Add(hdr);
 
@@ -1625,7 +1529,7 @@ namespace TokLens
 
             TextBlock sub1;
             Border m1 = MakeMiniMetricTile("当前活跃跟踪日志", out _statTrackedFilesVal, out sub1);
-            sub1.Text = "字节级游标毫秒增量监听";
+            sub1.Text = "增量监听中";
             Grid.SetColumn(m1, 2);
             metricsGrid.Children.Add(m1);
 
@@ -1667,9 +1571,9 @@ namespace TokLens
 
             _methodologyToggleLabel = new TextBlock
             {
-                Text = "展开查看：免代理实时 TPS 测算原理、三源独立模型价格库与双层高水位合并架构说明",
+                Text = "展开查看：请求 TPS 计时口径、模型价格库与历史用量合并说明",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12,
+                FontSize = DesignSystem.TextBody,
                 FontWeight = FontWeights.Medium
             };
             _methodologyToggleLabel.SetResourceReference(TextBlock.ForegroundProperty, "AccentText");
@@ -1684,7 +1588,7 @@ namespace TokLens
 
             _methodologyBodyPanel.Children.Add(MakeMethodologyItem(
                 "1) 免代理实时请求流监控 + SQLite 字节偏移游标引擎",
-                "无需配置本地反向代理或改动任何开发环境变量：通过 FileSystemWatcher 监听、4 秒轻量脉冲与 JSONL 字节游标（Seek Cursor）实时捕获每次模型调用，自动测算响应耗时与输出生成速率 TPS（tok/s），冷启动 0ms 瞬开。"));
+                "通过日志变更监听和增量扫描读取请求用量。TPS = 输出 Token ÷ 日志记录的请求耗时（秒），可能包含等待时间；仅使用明确的耗时字段或同一请求的起止时间。缺少可靠计时显示 —，不从相邻日志间隔推算，也不代表流式实时生成速度。"));
             _methodologyBodyPanel.Children.Add(MakeMethodologyItem(
                 "2) 第一层保护：本地防清理持久归档（toklens.db & local_highwater）",
                 "桌面端维护文件级快照与按日高水位账本；当 Claude Code / Codex / Cursor 等工具自动轮转清理旧会话或手动删除缓存日志时，被清理文件的历史累计 Token 与金额自动沉淀至持久归档，绝不倒扣归零。"));
@@ -1701,7 +1605,7 @@ namespace TokLens
                 _methodologyBodyPanel.Visibility = _methodologyExpanded ? Visibility.Visible : Visibility.Collapsed;
                 _methodologyToggleLabel.Text = _methodologyExpanded
                     ? "收起架构与统计口径说明"
-                    : "展开查看：免代理实时 TPS 测算原理、三源独立模型价格库与双层高水位合并架构说明";
+                    : "展开查看：请求 TPS 计时口径、模型价格库与历史用量合并说明";
             };
 
             accStack.Children.Add(accHeaderHit);
@@ -1761,7 +1665,7 @@ namespace TokLens
             {
                 Text = "选择用于同步账单的 GitHub 账号",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.5,
+                FontSize = DesignSystem.TextCaption,
                 FontWeight = FontWeights.SemiBold,
                 Margin = new Thickness(8, 4, 8, 6)
             };
@@ -1966,7 +1870,7 @@ namespace TokLens
             {
                 Text = "选择 @" + _lastProbeResult.Login + " 名下的 TokLens 私有同步库",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.5,
+                FontSize = DesignSystem.TextCaption,
                 FontWeight = FontWeights.SemiBold,
                 Margin = new Thickness(8, 4, 8, 6)
             };
@@ -2148,7 +2052,7 @@ namespace TokLens
             {
                 Text = title,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.8,
+                FontSize = DesignSystem.TextBody,
                 FontWeight = FontWeights.SemiBold,
                 TextTrimming = TextTrimming.CharacterEllipsis,
                 MaxWidth = 190
@@ -2161,7 +2065,7 @@ namespace TokLens
             {
                 Text = "ID: " + machineId,
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 10.5,
+                FontSize = DesignSystem.TextCaption,
                 Margin = new Thickness(0, 2, 0, 1),
                 TextTrimming = TextTrimming.CharacterEllipsis
             };
@@ -2172,7 +2076,7 @@ namespace TokLens
             {
                 Text = metaLine,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 10.8,
+                FontSize = DesignSystem.TextCaption,
                 TextTrimming = TextTrimming.CharacterEllipsis
             };
             metaTb.SetResourceReference(TextBlock.ForegroundProperty, isLocal ? "AccentText" : "FgSecondary");
@@ -2489,89 +2393,6 @@ namespace TokLens
                 "accent");
         }
 
-        private void SyncBudgetInputsFromLiveConfig()
-        {
-            bool recentFx;
-            ExchangeRateInfo fx = ExchangeRateService.LoadCachedOrDefault(out recentFx);
-            double rate = fx != null && fx.Rate > 0 ? fx.Rate : ExchangeRateService.DefaultRate;
-
-            bool preferCny = _liveCfg.PreferCny;
-            if (_budgetCurrencyPrefix != null)
-                _budgetCurrencyPrefix.Text = preferCny ? "¥" : "$";
-
-            bool hasBudget = _liveCfg.DailyBudgetUsd > 0.0001;
-            if (_budgetEnableSwitch != null)
-                _budgetEnableSwitch.IsChecked = hasBudget;
-
-            if (_budgetAmountBox != null)
-            {
-                if (hasBudget)
-                {
-                    double dispVal = preferCny ? (_liveCfg.DailyBudgetUsd * rate) : _liveCfg.DailyBudgetUsd;
-                    _budgetAmountBox.Text = dispVal.ToString("0.##", CultureInfo.InvariantCulture);
-                }
-                else
-                {
-                    _budgetAmountBox.Text = preferCny ? "50" : "10";
-                }
-                _budgetAmountBox.IsEnabled = hasBudget;
-            }
-        }
-
-        private void OnBudgetSwitchClicked(object sender, RoutedEventArgs e)
-        {
-            if (_suppressUiEvents) return;
-            bool on = _budgetEnableSwitch.IsChecked == true;
-            _budgetAmountBox.IsEnabled = on;
-            if (!on)
-            {
-                _liveCfg.DailyBudgetUsd = 0.0;
-                _workingCfg.DailyBudgetUsd = 0.0;
-                SyncService.SaveConfig(_liveCfg);
-                if (_callbacks.OnThemeOrCurrencyChanged != null)
-                    _callbacks.OnThemeOrCurrencyChanged();
-                NotifyUser("已关闭每日预算提醒", "不再显示当日预算阈值提示。", "accent");
-            }
-            else
-            {
-                ApplyDailyBudgetSetting(true);
-            }
-        }
-
-        private void ApplyDailyBudgetSetting(bool showToast)
-        {
-            double inputAmount;
-            if (!double.TryParse((_budgetAmountBox.Text ?? "").Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out inputAmount) ||
-                double.IsNaN(inputAmount) || double.IsInfinity(inputAmount) || inputAmount <= 0.0)
-            {
-                if (showToast)
-                    NotifyUser("预算金额格式无效", "请输入大于 0 的数字（例如 50）。", "warning");
-                return;
-            }
-
-            bool recentFx;
-            ExchangeRateInfo fx = ExchangeRateService.LoadCachedOrDefault(out recentFx);
-            double rate = fx != null && fx.Rate > 0 ? fx.Rate : ExchangeRateService.DefaultRate;
-
-            double usd = _liveCfg.PreferCny ? (inputAmount / rate) : inputAmount;
-            _liveCfg.DailyBudgetUsd = Math.Round(usd, 4);
-            _workingCfg.DailyBudgetUsd = _liveCfg.DailyBudgetUsd;
-            _budgetAmountBox.IsEnabled = true;
-            SyncService.SaveConfig(_liveCfg);
-
-            if (_callbacks.OnThemeOrCurrencyChanged != null)
-                _callbacks.OnThemeOrCurrencyChanged();
-
-            if (showToast)
-            {
-                string unit = _liveCfg.PreferCny ? "¥" : "$";
-                NotifyUser(
-                    "每日预算提醒已更新",
-                    "当日阈值已设为 " + unit + inputAmount.ToString("0.##", CultureInfo.InvariantCulture),
-                    "success");
-            }
-        }
-
         private void OnMinToTrayToggleChanged(object sender, RoutedEventArgs e)
         {
             if (_suppressUiEvents) return;
@@ -2612,6 +2433,11 @@ namespace TokLens
             if (string.IsNullOrEmpty(tok))
             {
                 SetIdentityBadgeState("未配置令牌", "neutral", "等待读取或输入 GitHub 访问令牌");
+            }
+            else if (_lastProbeResult == null)
+            {
+                // 已有令牌但还没校验：不能沿用初始的「未配置令牌」，也不能提前说「已认证」。
+                SetIdentityBadgeState("待校验", "neutral", "已保存令牌，打开此页后会自动校验账号与 gist 权限");
             }
         }
 
@@ -2763,7 +2589,7 @@ namespace TokLens
         {
             double val = preferCny ? (usd * rate) : usd;
             string sym = preferCny ? "¥" : "$";
-            return sym + val.ToString("0.00", CultureInfo.InvariantCulture);
+            return sym + val.ToString("N2", CultureInfo.InvariantCulture);
         }
 
         private static bool TrySetClipboardSafe(string text)
@@ -2835,7 +2661,7 @@ namespace TokLens
             {
                 Text = title,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 14,
+                FontSize = DesignSystem.TextTitle,
                 FontWeight = FontWeights.SemiBold,
                 VerticalAlignment = VerticalAlignment.Center
             };
@@ -2849,7 +2675,7 @@ namespace TokLens
                 {
                     Text = subtitle,
                     FontFamily = DesignSystem.FontUi,
-                    FontSize = 11.5,
+                    FontSize = DesignSystem.TextCaption,
                     Margin = new Thickness(32, 3, 0, 0),
                     TextWrapping = TextWrapping.Wrap
                 };
@@ -2865,7 +2691,7 @@ namespace TokLens
             {
                 Text = text,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.5,
+                FontSize = DesignSystem.TextCaption,
                 FontWeight = FontWeights.Medium,
                 Margin = new Thickness(0, 0, 0, 5),
                 TextWrapping = TextWrapping.Wrap
@@ -2896,7 +2722,7 @@ namespace TokLens
             {
                 Text = text,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.2,
+                FontSize = DesignSystem.TextCaption,
                 LineHeight = 17,
                 TextWrapping = TextWrapping.Wrap
             };
@@ -2925,7 +2751,7 @@ namespace TokLens
             {
                 Text = title,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12.5,
+                FontSize = DesignSystem.TextLabel,
                 FontWeight = FontWeights.Medium
             };
             tb.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
@@ -2942,7 +2768,7 @@ namespace TokLens
                 {
                     Text = desc,
                     FontFamily = DesignSystem.FontUi,
-                    FontSize = 11.2,
+                    FontSize = DesignSystem.TextCaption,
                     Margin = new Thickness(0, 2, 0, 0),
                     TextWrapping = TextWrapping.Wrap
                 };
@@ -2968,7 +2794,7 @@ namespace TokLens
             {
                 Text = label,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11,
+                FontSize = DesignSystem.TextCaption,
                 TextTrimming = TextTrimming.CharacterEllipsis
             };
             lbl.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -2977,7 +2803,7 @@ namespace TokLens
             valOut = new TextBlock
             {
                 Text = "—",
-                FontSize = 16,
+                FontSize = DesignSystem.TextTitle,
                 FontWeight = FontWeights.SemiBold,
                 Margin = new Thickness(0, 4, 0, 2),
                 TextTrimming = TextTrimming.CharacterEllipsis
@@ -2990,7 +2816,7 @@ namespace TokLens
             {
                 Text = "",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 10.5,
+                FontSize = DesignSystem.TextCaption,
                 TextTrimming = TextTrimming.CharacterEllipsis
             };
             subOut.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
@@ -3017,7 +2843,7 @@ namespace TokLens
             {
                 Text = heading,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12,
+                FontSize = DesignSystem.TextBody,
                 FontWeight = FontWeights.SemiBold,
                 Margin = new Thickness(0, 0, 0, 3)
             };
@@ -3028,7 +2854,7 @@ namespace TokLens
             {
                 Text = body,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.4,
+                FontSize = DesignSystem.TextCaption,
                 LineHeight = 17.5,
                 TextWrapping = TextWrapping.Wrap
             };
@@ -3068,7 +2894,7 @@ namespace TokLens
             {
                 Text = title,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12,
+                FontSize = DesignSystem.TextBody,
                 FontWeight = FontWeights.SemiBold,
                 TextTrimming = TextTrimming.CharacterEllipsis
             };
@@ -3081,7 +2907,7 @@ namespace TokLens
                 {
                     Text = subtitle,
                     FontFamily = DesignSystem.FontUi,
-                    FontSize = 11,
+                    FontSize = DesignSystem.TextCaption,
                     Margin = new Thickness(0, 2, 0, 0),
                     TextWrapping = TextWrapping.Wrap
                 };
@@ -3098,146 +2924,4 @@ namespace TokLens
         }
     }
 
-    // Backward-compatible Modern Frameless Standalone Window Wrapper around SyncSettingsView
-    public sealed class SyncWindow : Window
-    {
-        private readonly SyncConfig _cfg;
-        private readonly ScanResult _localScan;
-        private readonly Action<SyncOutcome> _onSynced;
-        private readonly ToastManager _toastManager;
-        private readonly SyncSettingsView _settingsView;
-
-        public SyncWindow(Window owner, SyncConfig cfg, ScanResult localScan, Action<SyncOutcome> onSynced)
-            : this(owner, cfg, localScan, onSynced, 0)
-        {
-        }
-
-        public SyncWindow(Window owner, SyncConfig cfg, ScanResult localScan, Action<SyncOutcome> onSynced, int initialTab)
-        {
-            Owner = owner;
-            _cfg = cfg ?? SyncService.LoadConfig();
-            _localScan = localScan;
-            _onSynced = onSynced;
-
-            if (owner != null && owner.Icon != null)
-            {
-                Icon = owner.Icon;
-            }
-
-            Title = "多端同步与系统设置 — " + AppConstants.ProductTitle;
-            Width = 900;
-            Height = 680;
-            MinWidth = 600;
-            MinHeight = 480;
-            WindowStartupLocation = owner != null ? WindowStartupLocation.CenterOwner : WindowStartupLocation.CenterScreen;
-            FontFamily = DesignSystem.FontUi;
-            UseLayoutRounding = true;
-            SnapsToDevicePixels = true;
-
-            DesignSystem.ApplyTheme(this, _cfg.IsDarkTheme);
-            SetResourceReference(Window.BackgroundProperty, "BgWindow");
-            SetResourceReference(Window.ForegroundProperty, "FgPrimary");
-
-            _toastManager = new ToastManager();
-
-            SyncSettingsCallbacks cbs = new SyncSettingsCallbacks();
-            cbs.OnSynced = delegate(SyncOutcome outcome)
-            {
-                if (_onSynced != null) _onSynced(outcome);
-            };
-            cbs.OnThemeOrCurrencyChanged = delegate()
-            {
-                DesignSystem.ApplyTheme(this, _cfg.IsDarkTheme);
-                if (_onSynced != null) _onSynced(null);
-            };
-            cbs.ShowToast = delegate(string title, string detail, string variant)
-            {
-                _toastManager.Show(title, detail, variant);
-            };
-
-            string initHome = (_localScan != null && !string.IsNullOrWhiteSpace(_localScan.UserHome))
-                ? _localScan.UserHome
-                : Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-
-            _settingsView = new SyncSettingsView(
-                this,
-                _cfg,
-                delegate() { return _localScan; },
-                delegate() { return initHome; },
-                cbs);
-
-            Border rootShell = new Border
-            {
-                BorderThickness = new Thickness(1),
-                SnapsToDevicePixels = true
-            };
-            rootShell.SetResourceReference(Border.BackgroundProperty, "BgWindow");
-            rootShell.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
-
-            Grid shellGrid = new Grid();
-            shellGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(42) });
-            shellGrid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-
-            // Custom Frameless Title Bar
-            Border titleBar = new Border
-            {
-                Height = 42,
-                Padding = new Thickness(16, 0, 8, 0),
-                BorderThickness = new Thickness(0, 0, 0, 1)
-            };
-            titleBar.SetResourceReference(Border.BackgroundProperty, "BgTitleBar");
-            titleBar.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
-
-            DockPanel titleDock = new DockPanel();
-            Button maxBtn;
-            Shapes.Path maxIconPath;
-            StackPanel captionBtns = ModernWindowChrome.CreateCaptionButtons(this, true, out maxBtn, out maxIconPath);
-            DockPanel.SetDock(captionBtns, Dock.Right);
-            titleDock.Children.Add(captionBtns);
-
-            StackPanel titleLeft = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            Shapes.Path titleIcon = UiIcons.CreateIcon(UiIcons.Settings, 14, "AccentText");
-            titleIcon.Margin = new Thickness(0, 0, 8, 0);
-            titleLeft.Children.Add(titleIcon);
-
-            TextBlock titleText = new TextBlock
-            {
-                Text = "多端同步与系统设置",
-                FontFamily = DesignSystem.FontUi,
-                FontSize = 12.5,
-                FontWeight = FontWeights.SemiBold,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            titleText.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
-            titleLeft.Children.Add(titleText);
-            titleDock.Children.Add(titleLeft);
-            titleBar.Child = titleDock;
-
-            Grid.SetRow(titleBar, 0);
-            shellGrid.Children.Add(titleBar);
-
-            // Content & Non-blocking Toast Layer
-            Grid bodyLayer = new Grid();
-            bodyLayer.Children.Add(_settingsView);
-            bodyLayer.Children.Add(_toastManager.HostElement);
-            Grid.SetRow(bodyLayer, 1);
-            shellGrid.Children.Add(bodyLayer);
-
-            rootShell.Child = shellGrid;
-            Content = rootShell;
-
-            ModernWindowChrome.Attach(
-                this,
-                rootShell,
-                maxBtn,
-                maxIconPath,
-                42.0,
-                delegate() { return _cfg != null ? _cfg.IsDarkTheme : true; });
-
-            if (initialTab > 0)
-            {
-                _settingsView.ScrollToSection(initialTab);
-            }
-        }
-    }
 }

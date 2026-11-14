@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
@@ -123,16 +123,6 @@ namespace TokLens
                     ? "查看同步与令牌原理 →"
                     : "← 返回快捷键速查";
             }
-        }
-
-        /// <summary>
-        /// 动态同步深色/浅色主题。
-        /// </summary>
-        public void ApplyThemeMode(bool isDark)
-        {
-            _isDark = isDark;
-            DesignSystem.ApplyTheme(this, _isDark);
-            SelectTab(_activeTabIndex);
         }
 
         private void AttachOwnerSafely(Window owner)
@@ -280,7 +270,7 @@ namespace TokLens
             {
                 Text = "快捷键速查与同步原理指南",
                 FontFamily = DesignSystem.FontDisplay,
-                FontSize = 13,
+                FontSize = DesignSystem.TextLabel,
                 FontWeight = FontWeights.SemiBold,
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 8, 0)
@@ -380,7 +370,7 @@ namespace TokLens
             _headerSubHintText = new TextBlock
             {
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.5,
+                FontSize = DesignSystem.TextCaption,
                 VerticalAlignment = VerticalAlignment.Center
             };
             _headerSubHintText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -420,7 +410,7 @@ namespace TokLens
             {
                 Text = title,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12,
+                FontSize = DesignSystem.TextBody,
                 FontWeight = FontWeights.Medium,
                 VerticalAlignment = VerticalAlignment.Center
             };
@@ -518,9 +508,9 @@ namespace TokLens
                 true));
 
             leftStack.Children.Add(BuildShortcutRow(
-                "秒切左侧各核心功能视图",
-                "按数字键快速跳转总览、动态、模型、设备等页",
-                new string[][] { new string[] { "Ctrl", "1 ~ 9" } },
+                "切换页面",
+                "数字键直达侧栏各页",
+                new string[][] { new string[] { "Ctrl", "1–5 / 7–9 / 0" } },
                 true));
 
             leftStack.Children.Add(BuildShortcutRow(
@@ -550,18 +540,18 @@ namespace TokLens
 
             rightStack.Children.Add(BuildShortcutRow(
                 "立即增量扫描本机日志",
-                "按字节游标极速提取本机 IDE / CLI 最新消耗",
+                "只读取各工具日志的新增部分",
                 new string[][] { new string[] { "Ctrl", "R" }, new string[] { "F5" } },
                 true));
 
             rightStack.Children.Add(BuildShortcutRow(
-                "立即执行云端双向同步",
-                "合并远端多设备账本并推送本机增量快照",
+                "导出对账明细 (.csv)",
+                "按日期、设备、工具和模型逐行",
                 new string[][] { new string[] { "Ctrl", "S" } },
                 true));
 
             rightStack.Children.Add(BuildShortcutRow(
-                "导出交互式 HTML 算力报告",
+                "导出网页看板 (.html)",
                 "生成单文件离线交互图表与模型成本明细账单",
                 new string[][] { new string[] { "Ctrl", "E" } },
                 true));
@@ -617,7 +607,7 @@ namespace TokLens
             {
                 Text = "系统全局跨应用唤醒快捷键",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12.5,
+                FontSize = DesignSystem.TextLabel,
                 FontWeight = FontWeights.SemiBold,
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 8, 0)
@@ -635,7 +625,7 @@ namespace TokLens
             {
                 Text = "无论当前焦点位于 Cursor、VS Code、终端还是浏览器，按下组合键即可从后台或系统托盘瞬间唤醒/隐藏主窗口。",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.5,
+                FontSize = DesignSystem.TextCaption,
                 Margin = new Thickness(0, 4, 12, 0),
                 TextWrapping = TextWrapping.Wrap
             };
@@ -680,7 +670,7 @@ namespace TokLens
             {
                 Text = subtitle,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11,
+                FontSize = DesignSystem.TextCaption,
                 VerticalAlignment = VerticalAlignment.Center
             };
             subTb.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -709,7 +699,7 @@ namespace TokLens
             {
                 Text = title,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12.5,
+                FontSize = DesignSystem.TextLabel,
                 FontWeight = FontWeights.SemiBold,
                 VerticalAlignment = VerticalAlignment.Center
             };
@@ -766,7 +756,7 @@ namespace TokLens
             {
                 Text = actionTitle,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12,
+                FontSize = DesignSystem.TextBody,
                 FontWeight = FontWeights.Medium,
                 TextTrimming = TextTrimming.CharacterEllipsis
             };
@@ -779,7 +769,7 @@ namespace TokLens
                 {
                     Text = actionSubDesc,
                     FontFamily = DesignSystem.FontUi,
-                    FontSize = 10.5,
+                    FontSize = DesignSystem.TextCaption,
                     Margin = new Thickness(0, 2, 0, 0),
                     TextTrimming = TextTrimming.CharacterEllipsis
                 };
@@ -821,7 +811,7 @@ namespace TokLens
                     {
                         Text = "/",
                         FontFamily = DesignSystem.FontMono,
-                        FontSize = 11,
+                        FontSize = DesignSystem.TextCaption,
                         Margin = new Thickness(5, 0, 5, 0),
                         VerticalAlignment = VerticalAlignment.Center
                     };
@@ -840,7 +830,7 @@ namespace TokLens
                         {
                             Text = "+",
                             FontFamily = DesignSystem.FontMono,
-                            FontSize = 10.5,
+                            FontSize = DesignSystem.TextCaption,
                             Margin = new Thickness(3, 0, 3, 0),
                             VerticalAlignment = VerticalAlignment.Center
                         };
@@ -885,7 +875,7 @@ namespace TokLens
             {
                 Text = keyLabel ?? "",
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 11,
+                FontSize = DesignSystem.TextCaption,
                 FontWeight = FontWeights.SemiBold,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center
@@ -964,7 +954,7 @@ namespace TokLens
             {
                 Text = "核心结论：两台电脑的 gh 令牌本就不一样，千万无需手动复制粘贴令牌！",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12.5,
+                FontSize = DesignSystem.TextLabel,
                 FontWeight = FontWeights.SemiBold,
                 TextWrapping = TextWrapping.Wrap
             };
@@ -974,7 +964,7 @@ namespace TokLens
             TextBlock bodyTb = new TextBlock
             {
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.5,
+                FontSize = DesignSystem.TextCaption,
                 LineHeight = 18,
                 Margin = new Thickness(0, 3, 0, 0),
                 TextWrapping = TextWrapping.Wrap
@@ -1028,7 +1018,7 @@ namespace TokLens
             {
                 Text = "跨设备 OAuth 独立令牌与云端私有账本拓扑图解",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12,
+                FontSize = DesignSystem.TextBody,
                 FontWeight = FontWeights.SemiBold,
                 VerticalAlignment = VerticalAlignment.Center
             };
@@ -1110,7 +1100,7 @@ namespace TokLens
             {
                 Text = deviceTitle,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.5,
+                FontSize = DesignSystem.TextCaption,
                 FontWeight = FontWeights.SemiBold,
                 VerticalAlignment = VerticalAlignment.Center
             };
@@ -1134,7 +1124,7 @@ namespace TokLens
             {
                 Text = tokenSample,
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 11,
+                FontSize = DesignSystem.TextCaption,
                 FontWeight = FontWeights.SemiBold
             };
             tokCode.SetResourceReference(TextBlock.ForegroundProperty, "AccentText");
@@ -1144,7 +1134,7 @@ namespace TokLens
             {
                 Text = tokenNote,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 10,
+                FontSize = DesignSystem.TextCaption,
                 Margin = new Thickness(0, 1, 0, 0)
             };
             tokSub.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -1168,7 +1158,7 @@ namespace TokLens
             {
                 Text = accountHandle,
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 10.5,
+                FontSize = DesignSystem.TextCaption,
                 FontWeight = FontWeights.Medium,
                 VerticalAlignment = VerticalAlignment.Center
             };
@@ -1208,7 +1198,7 @@ namespace TokLens
             {
                 Text = "同一私有 Gist 账本",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12,
+                FontSize = DesignSystem.TextBody,
                 FontWeight = FontWeights.SemiBold,
                 VerticalAlignment = VerticalAlignment.Center
             };
@@ -1231,7 +1221,7 @@ namespace TokLens
             {
                 Text = "Secret Gist · 多设备汇总库",
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 10.5,
+                FontSize = DesignSystem.TextCaption,
                 FontWeight = FontWeights.SemiBold,
                 HorizontalAlignment = HorizontalAlignment.Center
             };
@@ -1242,7 +1232,7 @@ namespace TokLens
             {
                 Text = "自动识别账号名下已有账本",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 10,
+                FontSize = DesignSystem.TextCaption,
                 Margin = new Thickness(0, 1, 0, 0),
                 HorizontalAlignment = HorizontalAlignment.Center
             };
@@ -1256,7 +1246,7 @@ namespace TokLens
             {
                 Text = "唯一归属锚点：@同一GitHub账号",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 10.5,
+                FontSize = DesignSystem.TextCaption,
                 FontWeight = FontWeights.Medium,
                 HorizontalAlignment = HorizontalAlignment.Center
             };
@@ -1279,7 +1269,7 @@ namespace TokLens
             {
                 Text = topLabel,
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 9.5,
+                FontSize = DesignSystem.TextCaption,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 Margin = new Thickness(0, 0, 0, 3)
             };
@@ -1305,7 +1295,7 @@ namespace TokLens
             {
                 Text = bottomLabel,
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 9.5,
+                FontSize = DesignSystem.TextCaption,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 Margin = new Thickness(0, 3, 0, 0)
             };
@@ -1335,7 +1325,7 @@ namespace TokLens
             {
                 Text = "3 种真正会导致数据不同步的情况及 10 秒排障对策",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12,
+                FontSize = DesignSystem.TextBody,
                 FontWeight = FontWeights.SemiBold,
                 VerticalAlignment = VerticalAlignment.Center
             };
@@ -1350,8 +1340,8 @@ namespace TokLens
             item1.Inlines.Add(MakeMonoRun("@公司号", "SemanticWarning"));
             item1.Inlines.Add(new Run(" vs "));
             item1.Inlines.Add(MakeMonoRun("@个人号", "SemanticWarning"));
-            item1.Inlines.Add(new Run("） → 在「同步与设置」页点击「"));
-            item1.Inlines.Add(MakeBoldRun("验证身份", "AccentText"));
+            item1.Inlines.Add(new Run("） → 在「设置 › 同步与偏好」页点击「"));
+            item1.Inlines.Add(MakeBoldRun("校验身份", "AccentText"));
             item1.Inlines.Add(new Run("」核对 "));
             item1.Inlines.Add(MakeMonoRun("@用户名", "FgPrimary"));
             item1.Inlines.Add(new Run(" 或切换账号。"));
@@ -1375,7 +1365,7 @@ namespace TokLens
             item3.Inlines.Add(new Run("旧版残留了另一账号的 Gist ID 导致 "));
             item3.Inlines.Add(MakeMonoRun("404", "SemanticDanger"));
             item3.Inlines.Add(new Run(" → 点击「"));
-            item3.Inlines.Add(MakeBoldRun("探测云端已有账本", "AccentText"));
+            item3.Inlines.Add(MakeBoldRun("自动查找 / 新建", "AccentText"));
             item3.Inlines.Add(new Run("」一键吸附真实多设备库。"));
             stack.Children.Add(BuildNumberedTroubleshootRow("3", item3, false));
 
@@ -1388,7 +1378,7 @@ namespace TokLens
             TextBlock tb = new TextBlock
             {
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.5,
+                FontSize = DesignSystem.TextCaption,
                 LineHeight = 17.5,
                 TextWrapping = TextWrapping.Wrap,
                 VerticalAlignment = VerticalAlignment.Center
@@ -1429,7 +1419,7 @@ namespace TokLens
             {
                 Text = numText,
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 10.5,
+                FontSize = DesignSystem.TextCaption,
                 FontWeight = FontWeights.Bold,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center
@@ -1485,7 +1475,7 @@ namespace TokLens
             {
                 Text = "隐私安全承诺：本地增量游标 + 系统级凭据加密 + 100% 零正文采集",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 12,
+                FontSize = DesignSystem.TextBody,
                 FontWeight = FontWeights.SemiBold,
                 TextWrapping = TextWrapping.Wrap
             };
@@ -1495,7 +1485,7 @@ namespace TokLens
             TextBlock descTb = new TextBlock
             {
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.5,
+                FontSize = DesignSystem.TextCaption,
                 Margin = new Thickness(0, 2, 0, 0),
                 TextWrapping = TextWrapping.Wrap
             };
@@ -1568,7 +1558,7 @@ namespace TokLens
             {
                 Text = "按 ",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.5,
+                FontSize = DesignSystem.TextCaption,
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 3, 0)
             };
@@ -1581,7 +1571,7 @@ namespace TokLens
             {
                 Text = " 一键关闭  ·  按 ",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.5,
+                FontSize = DesignSystem.TextCaption,
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(3, 0, 3, 0)
             };
@@ -1594,7 +1584,7 @@ namespace TokLens
             {
                 Text = "/",
                 FontFamily = DesignSystem.FontMono,
-                FontSize = 11,
+                FontSize = DesignSystem.TextCaption,
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(4, 0, 4, 0)
             };
@@ -1607,7 +1597,7 @@ namespace TokLens
             {
                 Text = " 快速切换上方标签页",
                 FontFamily = DesignSystem.FontUi,
-                FontSize = 11.5,
+                FontSize = DesignSystem.TextCaption,
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(3, 0, 0, 0)
             };
@@ -1625,7 +1615,7 @@ namespace TokLens
         {
             Run r = new Run(text ?? "");
             r.FontFamily = DesignSystem.FontMono;
-            r.FontSize = 11;
+            r.FontSize = DesignSystem.TextCaption;
             r.FontWeight = FontWeights.SemiBold;
             if (!string.IsNullOrEmpty(foregroundResourceKey))
             {

@@ -35,10 +35,11 @@ try:
 except ImportError:
     fcntl = None
 
-AGENT_VERSION = "2.2"
+AGENT_VERSION = "2.2.1"
 SCHEMA_VERSION = "toklens.node.v2"
-SCANNER_REV = 27
-CURSOR_SCHEMA_VERSION = "toklens.cursor.v2.7"
+SCANNER_REV = 29
+RECONCILED_REVISION = 28
+CURSOR_SCHEMA_VERSION = "toklens.cursor.v2.9"
 CRON_MARKER = "# toklens-auto-sync"
 MAX_SQLITE_TEMP_COPY_BYTES = 128 * 1024 * 1024  # 128 MB 保护阈值，防止打满 VPS /tmp tmpfs
 LOG_MAX_BYTES = 131072  # 128 KB 触发滚动
@@ -365,7 +366,7 @@ def normalize_model(raw, fallback="unknown") -> str:
         m = m.rsplit("/", 1)[-1].strip()
     if not m.lower().startswith("ft:") and ":" in m:
         m = m.rsplit(":", 1)[-1].strip()
-    m = re.sub(r"\s*\([^)]*\)\s*", "", m).strip()
+    m = m.replace("(", " ").replace(")", " ").strip()
     slug = re.sub(r"[\s_]+", "-", m.lower())
     if slug.startswith("claude-"):
         slug = CLAUDE_DOT_VER_RE.sub(r"\1-\2", slug)
@@ -904,7 +905,7 @@ class PricingLookup:
                 ex = self.rates[k]
                 # 保护内置官方直连单价免受第三方代理网关微幅手续费（如 $0.42 vs $0.40）污染
                 if (
-                    k in BUILTIN_PRICING
+                    k in BUILTIN_RATES
                     and ex[0] > 0
                     and ex[1] > 0
                     and abs(ex[0] - ic) <= ex[0] * 0.15
@@ -945,53 +946,8 @@ class PricingLookup:
         if no_date in self.rates:
             return self.rates[no_date]
 
-        best = None
-        for k in self.rates:
-            if len(k) < 2:
-                continue
-            if len(k) < 4 and k not in ("o1", "o3", "k3"):
-                continue
-            if self._is_prefix_boundary_match(slug, k) or self._is_prefix_boundary_match(no_date, k):
-                if best is None or len(k) > len(best):
-                    best = k
-        if best:
-            return self.rates[best]
-
-        if "minimax" in slug:
-            return self.rates["minimax-m2.5"]
-        if "kimi" in slug or "moonshot" in slug or slug.startswith("k3"):
-            return self.rates["kimi-k2.5" if "k2" in slug else "kimi-for-coding"]
-        if "glm" in slug:
-            return self.rates["glm-4.5-flash" if "flash" in slug else ("glm-4.5-air" if "air" in slug else "glm-5")]
-        if "deepseek" in slug:
-            if "r1" in slug or "reasoner" in slug:
-                return self.rates["deepseek-r1"]
-            return self.rates["deepseek-v4.1-flash" if "flash" in slug else "deepseek-v3.2"]
-        if "qwen" in slug or "qwq" in slug:
-            return self.rates["qwen3-max" if "max" in slug else "qwen3-coder-plus"]
-        if "doubao" in slug:
-            return self.rates["doubao-seed-code"]
-        if "devstral" in slug or "codestral" in slug:
-            return self.rates["codestral" if "codestral" in slug else "devstral"]
-        if "opus" in slug:
-            return self.rates["claude-opus-4-6"]
-        if "sonnet" in slug:
-            return self.rates["claude-sonnet-4-6"]
-        if "haiku" in slug:
-            return self.rates["claude-haiku-4-5"]
-        if "gemini" in slug:
-            if "flash-lite" in slug or "lite" in slug:
-                return self.rates["gemini-2.5-flash-lite"]
-            if "2.0-flash" in slug:
-                return self.rates["gemini-2.0-flash"]
-            if "flash" in slug:
-                return self.rates["gemini-2.5-flash"]
-            return self.rates["gemini-2.5-pro"]
-        if "gpt" in slug or "codex" in slug:
-            if "nano" in slug:
-                return self.rates["gpt-5-nano"]
-            return self.rates["gpt-5-mini" if "mini" in slug else "gpt-5.2-codex"]
-        return (1.0, 4.0, 0.1, 0.0)
+        # Unknown rates stay explicitly unpriced; do not borrow another model.
+        return (0.0, 0.0, 0.0, 0.0)
 
 
 def extract_generic_usage(obj: dict, cur_model: str, fallback_ts: float, tz_offset_min: int = None):
@@ -1223,22 +1179,6 @@ def get_ledger_db_path(home: Path) -> Path:
     return base / ".toklens" / "ledger.db"
 
 
-def _quarantine_corrupt_ledger(db_path: Path):
-    ts = int(time.time())
-    for suf in ("", "-wal", "-shm"):
-        p = Path(str(db_path) + suf)
-        ps = os_path_str(p)
-        if os.path.exists(ps):
-            try:
-                bak = Path(str(db_path) + f"{suf}.corrupt.{ts}.bak")
-                os.replace(ps, os_path_str(bak))
-            except Exception:
-                try:
-                    os.unlink(ps)
-                except Exception:
-                    pass
-
-
 def _init_ledger_connection(db_path: Path):
     try:
         conn = sqlite3.connect(str(db_path), timeout=10.0)
@@ -1261,8 +1201,16 @@ def _init_ledger_connection(db_path: Path):
         row = conn.execute("SELECT v FROM kv_meta WHERE k='cursor_schema' LIMIT 1").fetchone()
         cur_ver = row[0] if row else ""
         if cur_ver != CURSOR_SCHEMA_VERSION:
-            conn.execute("DELETE FROM file_cursors")
-            conn.execute("DELETE FROM daily_archive WHERE tool IN ('Google Antigravity', 'OpenAI Codex')")
+            if cur_ver:
+                conn.commit()
+                backup = sqlite3.connect(str(db_path) + ".before-v2.9." + str(time.time_ns()) + ".db")
+                try:
+                    conn.backup(backup)
+                finally:
+                    backup.close()
+            live_keys = [r[0] for r in conn.execute("SELECT file_key FROM file_cursors") if os.path.exists(os_path_str(Path(r[0])))]
+            conn.executemany("DELETE FROM file_cursors WHERE file_key=?", [(key,) for key in live_keys])
+            conn.execute("DELETE FROM file_cursors WHERE file_key LIKE '%state_5.sqlite'")
             conn.execute(
                 "INSERT OR REPLACE INTO kv_meta (k, v) VALUES ('cursor_schema', ?)",
                 (CURSOR_SCHEMA_VERSION,),
@@ -1280,15 +1228,9 @@ def _init_ledger_connection(db_path: Path):
 def _open_ledger_rw(home: Path):
     ensure_toklens_dir(home)
     db_path = get_ledger_db_path(home)
-    try:
-        conn = _init_ledger_connection(db_path)
-    except sqlite3.DatabaseError as ex:
-        msg = str(ex).lower()
-        if "not a database" in msg or "malformed" in msg or "corrupt" in msg:
-            _quarantine_corrupt_ledger(db_path)
-            conn = _init_ledger_connection(db_path)
-        else:
-            raise
+    # An unreadable ledger is not an empty ledger. Never replace it and then
+    # upload a partial scan with a newer reconciliation timestamp.
+    conn = _init_ledger_connection(db_path)
     if os.name != "nt":
         try:
             os.chmod(os_path_str(db_path), 0o600)
@@ -1316,14 +1258,10 @@ class CursorStore:
             for fk, hk, ino, fsz, mns, boff, meta_s, ev_s in conn.execute(
                 "SELECT file_key, home_key, inode, file_size, mtime_ns, byte_offset, extra_meta, events_json FROM file_cursors"
             ):
-                try:
-                    meta = json.loads(meta_s) if meta_s else {}
-                except Exception:
-                    meta = {}
-                try:
-                    evs = json.loads(ev_s) if ev_s else []
-                except Exception:
-                    evs = []
+                meta = json.loads(meta_s) if meta_s else {}
+                evs = json.loads(ev_s) if ev_s else []
+                if not isinstance(meta, dict) or not isinstance(evs, list):
+                    raise ValueError("Invalid stored request cursor")
                 self.cursors[fk] = {
                     "file_key": fk,
                     "home_key": hk or "",
@@ -1334,8 +1272,9 @@ class CursorStore:
                     "meta": meta if isinstance(meta, dict) else {},
                     "events": evs if isinstance(evs, list) else [],
                 }
-        except Exception:
-            pass
+        except Exception as ex:
+            self.cursors.clear()
+            raise RuntimeError("请求游标读取失败，已停止扫描以保护历史账本") from ex
         finally:
             if conn is not None:
                 try:
@@ -1405,8 +1344,8 @@ class CursorStore:
             )
             conn.commit()
             self.dirty.clear()
-        except Exception:
-            pass
+        except Exception as ex:
+            raise RuntimeError("请求游标保存失败，已中止本次扫描") from ex
         finally:
             if conn is not None:
                 try:
@@ -1502,6 +1441,147 @@ def _merge_sqlite_cursor_events(cur_entry: dict, fresh_events: list) -> list:
     return list(by_key.values()) + no_key_fresh
 
 
+def _usage_proto_fields(data):
+    """Decode wire fields without searching unrelated nested bytes."""
+    if not isinstance(data, (bytes, bytearray)):
+        return {}
+    pos, result = 0, {}
+
+    def varint():
+        nonlocal pos
+        value = 0
+        for shift in range(0, 64, 7):
+            if pos >= len(data):
+                raise ValueError("Truncated protobuf")
+            byte = data[pos]
+            pos += 1
+            if shift == 63 and byte > 1:
+                raise ValueError("Protobuf integer overflow")
+            value |= (byte & 127) << shift
+            if byte < 128:
+                return value
+        raise ValueError("Invalid protobuf varint")
+
+    while pos < len(data):
+        tag = varint()
+        field, wire = tag >> 3, tag & 7
+        if not field:
+            raise ValueError("Invalid protobuf tag")
+        if wire == 0:
+            result[field] = varint()
+            continue
+        size = varint() if wire == 2 else (8 if wire == 1 else 4 if wire == 5 else -1)
+        if size < 0 or size > len(data) - pos:
+            raise ValueError("Invalid protobuf field")
+        result[field] = data[pos:pos + size]
+        pos += size
+    return result
+
+
+def _agy_native_model(backend, tier):
+    actual, variant = normalize_model(backend, "unknown"), normalize_model(tier, "")
+    if variant == actual or variant.startswith(actual + "-"):
+        return variant
+    if actual == "gemini-pro-orchestrator" and variant.startswith("orchestrator-"):
+        return variant
+    return actual
+
+
+def _usage_epoch_ms(raw, fallback):
+    try:
+        stamp = datetime.datetime.fromisoformat(str(raw).replace("Z", "+00:00")).astimezone(datetime.timezone.utc)
+        delta = stamp - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
+        return delta.days * 86400000 + delta.seconds * 1000 + delta.microseconds // 1000
+    except (ValueError, TypeError, OverflowError):
+        return int(fallback * 1000)
+
+
+class CodexUsageState:
+    """Exact response IDs, paired snapshots, and durable incremental state."""
+    def __init__(self, tid, fallback, tz_offset_min=None, meta=None, events=None):
+        self.meta = dict(meta or {})
+        self.meta.setdefault("tid", tid)
+        self.meta.setdefault("mdl", "unknown")
+        self.fallback, self.tz_offset_min = fallback, tz_offset_min
+        self.rows = {}
+        for index, ev in enumerate(events or []):
+            self.rows[str(ev[9]) if len(ev) > 9 and ev[9] else "legacy:" + str(index)] = list(ev)
+        self.seen = list(self.meta.get("seen") or [])
+
+    @staticmethod
+    def counters(value):
+        if not isinstance(value, dict):
+            return None
+        inp, out = safe_int(value.get("input_tokens")), safe_int(value.get("output_tokens"))
+        read = min(inp, first_pos_int(value.get("cached_input_tokens"), value.get("cache_read_input_tokens"), value.get("cached_tokens")))
+        write = min(inp - read, first_pos_int(value.get("cache_write_input_tokens"), value.get("cache_creation_input_tokens")))
+        return [inp, out, read, write]
+
+    def remember(self, signature):
+        if signature in self.seen:
+            return False
+        self.seen.append(signature)
+        self.seen = self.seen[-128:]
+        return True
+
+    def emit(self, usage, raw_ts, response=None):
+        inp, out, read, write = usage
+        if inp + out <= 0:
+            return ""
+        read, write = min(inp, read), min(inp - min(inp, read), write)
+        ms = _usage_epoch_ms(raw_ts, self.fallback)
+        key = "codex-response:" + response if response else "codex:" + str(self.meta["tid"]) + ":" + str(ms) + ":" + ",".join(map(str, usage))
+        self.rows[key] = ["OpenAI Codex", self.meta["mdl"], to_local_date(raw_ts, self.fallback, self.tz_offset_min), inp - read - write, out, read, write, 0.0, 1, key, 0, self.meta["tid"], ms]
+        return key
+
+    def on_line(self, line, _index=0):
+        obj = json.loads(line)
+        if not isinstance(obj, dict) or not isinstance(obj.get("payload"), dict):
+            return
+        typ, p, ts = obj.get("type"), obj["payload"], obj.get("timestamp")
+        if typ == "session_meta":
+            self.meta["tid"] = str(p.get("id") or self.meta["tid"])
+            self.meta["parent"] = str(p.get("forked_from_id") or "")
+            self.meta["fork_ms"] = _usage_epoch_ms(ts, self.fallback)
+        if typ in ("session_meta", "turn_context") or p.get("type") == "thread_settings_applied":
+            if p.get("model"):
+                self.meta["mdl"] = normalize_model(str(p["model"]), "unknown")
+        if typ == "token_usage_record":
+            usage = self.counters(p.get("usage"))
+            if usage is not None:
+                self.meta["pending_key"] = self.emit(usage, ts, p.get("response_id"))
+                self.meta["pending"] = usage
+            return
+        if typ != "event_msg" or p.get("type") != "token_count" or not isinstance(p.get("info"), dict):
+            return
+        info = p["info"]
+        model = info.get("model") or info.get("model_name") or p.get("model")
+        if model:
+            self.meta["mdl"] = normalize_model(str(model), "unknown")
+        last, total = self.counters(info.get("last_token_usage")), self.counters(info.get("total_token_usage"))
+        previous = self.meta.get("previous")
+        reset = total is not None and previous is not None and sum(total[:2]) < sum(previous[:2])
+        if reset and last is None:
+            self.seen.clear()
+        duplicate = total is not None and not self.remember(json.dumps([total, last], separators=(",", ":")))
+        usage = last if last is not None else ([max(0, total[i] - (previous[i] if previous and not reset else 0)) for i in range(4)] if total is not None else None)
+        if total is not None:
+            self.meta["previous"] = total
+        pending = self.meta.pop("pending", None)
+        covered = pending is not None and (pending == usage or last is not None and last[0] + last[1] == 0)
+        pending_key = self.meta.pop("pending_key", "")
+        if covered and model and pending_key in self.rows:
+            self.rows[pending_key][1] = self.meta["mdl"]
+        if not duplicate and not covered and usage is not None:
+            if total is not None or self.remember(str(ts) + "|" + json.dumps(usage)):
+                self.emit(usage, ts)
+
+    def state(self):
+        self.meta["seen"] = self.seen
+        self.meta["accounting_rev"] = SCANNER_REV
+        return self.meta
+
+
 class MultiHarnessScanner:
     def __init__(self, home: Path, tz_offset_min: int = None, include_other_users: bool = False, allow_network_pricing: bool = True):
         self.ledger_home = Path(home).expanduser()
@@ -1522,6 +1602,11 @@ class MultiHarnessScanner:
         self.codex_live = set()
         self.codex_archive_candidates = []
         self.archived_files_recovered = 0
+        self.request_seen = set()
+        self.request_events = {}
+        self.reconciled_partitions = {}
+        self.failed_exact_tools = set()
+        self.unverified_partitions = set()
 
     def _norm_file_key(self, p: Path) -> str:
         s = str(p)
@@ -1551,6 +1636,48 @@ class MultiHarnessScanner:
                 dedup_set.add(dk)
             cw1h = safe_int(ev[10]) if len(ev) > 10 else 0
             self.add_ev(ev[0], ev[1], ev[2], safe_int(ev[3]), safe_int(ev[4]), safe_int(ev[5]), safe_int(ev[6]), safe_float(ev[7]), max(1, safe_int(ev[8])), cw1h=cw1h)
+
+    def _emit_usage_events(self, file_key, rows):
+        meta = (self.cursor_store.get(file_key) or {}).get("meta") or {}
+        for index, row in enumerate(rows or []):
+            if not isinstance(row, (list, tuple)) or len(row) < 9:
+                continue
+            ev = list(row)
+            raw_key = str(ev[9] or "") if len(ev) > 9 else ""
+            if ev[0] == "Google Antigravity":
+                cid = Path(file_key).parents[2].name
+                key = "agy:" + cid + ":" + (raw_key or str(index))
+            else:
+                key = raw_key or "legacy-codex:" + str(meta.get("tid") or file_key) + ":" + str(index)
+                if not raw_key:
+                    self.unverified_partitions.add(str(ev[2]) + "||OpenAI Codex")
+            previous = self.request_events.get(key)
+            if previous is None or sum(ev[3:7]) > sum(previous[0][3:7]) or (previous[0][1] == "unknown" and ev[1] != "unknown"):
+                self.request_events[key] = (ev, str(meta.get("tid") or ""))
+
+    def _finalize_request_events(self):
+        timelines, parents = {}, {}
+        for cursor in self.cursor_store.cursors.values():
+            meta = cursor.get("meta") or {}
+            if meta.get("tid") and meta.get("parent"):
+                parents[str(meta["tid"])] = (str(meta["parent"]), safe_int(meta.get("fork_ms")))
+        for ev, tid in self.request_events.values():
+            if len(ev) > 12 and ev[0] == "OpenAI Codex":
+                timelines.setdefault(str(ev[11] or tid), set()).add((ev[12], *ev[3:7]))
+        aliases = {}
+        for key, (ev, tid) in self.request_events.items():
+            if len(ev) > 12 and ev[0] == "OpenAI Codex":
+                tid = str(ev[11] or tid)
+                signature = (ev[12], *ev[3:7])
+                parent = parents.get(tid)
+                if parent and ev[12] <= parent[1] and signature in timelines.get(parent[0], set()):
+                    continue
+                alias = (tid, signature)
+                previous = aliases.get(alias)
+                if previous is not None and not (key.startswith("codex-response:") and previous.startswith("codex-response:") and key != previous):
+                    continue
+                aliases[alias] = key
+            self._emit_ev_list([ev])
 
     def scan_all(self, strict_ledger: bool = False):
         scan_funcs = (
@@ -1587,12 +1714,18 @@ class MultiHarnessScanner:
                 try:
                     fn()
                 except Exception:
-                    pass
+                    tools = {"scan_claude": ("Claude Code", "Claude Desktop"), "scan_codex_live": ("OpenAI Codex",), "scan_antigravity": ("Google Antigravity",), "scan_zcode": ("ZCode",)}
+                    self.failed_exact_tools.update(tools.get(fn.__name__, ()))
         self.home = self.ledger_home
         self._recover_deleted_cursors_and_finalize_codex()
+        self._finalize_request_events()
         self.cursor_store.flush()
         rows = self.build_records()
-        return merge_with_ledger_db(self.ledger_home, rows, strict=strict_ledger)
+        now_ms = int(time.time() * 1000)
+        for row in rows:
+            if row[1] in ("Claude Code", "Claude Desktop", "OpenAI Codex", "Google Antigravity", "ZCode") and row[1] not in self.failed_exact_tools and row[0] + "||" + row[1] not in self.unverified_partitions:
+                self.reconciled_partitions[row[0] + "||" + row[1]] = now_ms
+        return merge_with_ledger_db(self.ledger_home, rows, strict=strict_ledger, reconciled_partitions=self.reconciled_partitions)
 
     def _recover_deleted_cursors_and_finalize_codex(self):
         for fk, cur in self.cursor_store.cursors.items():
@@ -1612,7 +1745,6 @@ class MultiHarnessScanner:
             self.archived_files_recovered += 1
 
             if fk.lower().endswith("state_5.sqlite"):
-                self.codex_archive_candidates.extend(evs)
                 continue
 
             if ".codex" in fk.lower():
@@ -1625,10 +1757,16 @@ class MultiHarnessScanner:
                     self.codex_live.add(tid)
 
             self._emit_ev_list(rot)
+            if evs and all(isinstance(ev, list) and len(ev) >= 9 and ev[0] in ("OpenAI Codex", "Google Antigravity") for ev in evs):
+                self._emit_usage_events(fk, evs)
+                continue
             for ev in evs:
                 if not isinstance(ev, list) or len(ev) < 9:
                     continue
                 tool = ev[0]
+                if tool in ("OpenAI Codex", "Google Antigravity"):
+                    self._emit_usage_events(fk, [ev])
+                    continue
                 dk = str(ev[9]) if len(ev) > 9 and ev[9] else ""
                 if dk:
                     if tool in ("Claude Desktop", "Claude Code"):
@@ -1979,6 +2117,17 @@ class MultiHarnessScanner:
     def _scan_codex_zst_lines(fp: Path, on_line):
         path_str = os_path_str(fp)
         try:
+            from compression import zstd
+            with zstd.open(path_str, "rt", encoding="utf-8") as reader:
+                for index, line in enumerate(reader, 1):
+                    if len(line.strip()) > 2:
+                        on_line(line.rstrip("\r\n"), index)
+            return True
+        except ImportError:
+            pass
+        except Exception:
+            return False
+        try:
             import zstandard as zstd  # type: ignore
             dctx = zstd.ZstdDecompressor()
             with open(path_str, "rb") as raw_f:
@@ -2029,188 +2178,94 @@ class MultiHarnessScanner:
             return False
 
     def scan_codex_live(self):
-        hkey = self._norm_home_key(self.home)
-        codex_bases = [self.home / ".codex"]
-        env_codex = os.environ.get("CODEX_HOME", "").strip()
-        if env_codex and self.home == self.ledger_home:
-            codex_bases.append(Path(env_codex).expanduser())
-
-        seen_real = set()
-        for cbase in codex_bases:
+        bases = [self.home / ".codex"]
+        if self.home == self.ledger_home and os.environ.get("CODEX_HOME", "").strip():
+            bases.append(Path(os.environ["CODEX_HOME"]).expanduser())
+        seen = set()
+        for base in bases:
             for sub in ("sessions", "archived_sessions"):
-                for suf in (".jsonl", ".jsonl.zst"):
-                    for fp in safe_walk_files(cbase / sub, suffix=suf):
-                        try:
-                            rp = os.path.realpath(os_path_str(fp))
-                            if rp in seen_real:
-                                continue
-                            seen_real.add(rp)
-                        except Exception:
-                            pass
-
-                        ok, ino, fsize, m_ns, m_sec = safe_file_stat(fp)
+                for suffix in (".jsonl", ".jsonl.zst"):
+                    for fp in safe_walk_files(base / sub, suffix=suffix):
+                        real = os.path.realpath(os_path_str(fp))
+                        if real in seen:
+                            continue
+                        seen.add(real)
+                        ok, ino, size, m_ns, m_sec = safe_file_stat(fp)
                         if not ok:
+                            self.failed_exact_tools.add("OpenAI Codex")
                             continue
                         fk = self._track_file(fp)
-                        is_zst = fp.name.lower().endswith(".zst")
-
-                        found_uuids = UUID_RE.findall(fp.name)
-                        for tid_u in found_uuids:
-                            self.codex_live.add(tid_u)
-                        file_tid = found_uuids[0] if found_uuids else ""
-
-                        if self.cursor_store.is_unchanged(fk, ino, fsize, m_ns):
-                            cur = self.cursor_store.get(fk)
-                            c_meta = cur.get("meta") or {}
-                            if c_meta.get("tid"):
-                                self.codex_live.add(str(c_meta["tid"]))
-                            self._emit_ev_list(c_meta.get("rotated_buckets") or [])
-                            self._emit_ev_list(cur.get("events") or [])
-                            continue
-
                         cur = self.cursor_store.get(fk)
-                        start_off = 0
-                        cur_m = "gpt-5.2-codex"
-                        prev_tot = None
-                        meta_tid = file_tid
-                        file_evs = []
-                        rot_buckets = list(((cur.get("meta") if cur else None) or {}).get("rotated_buckets") or [])
+                        ids = UUID_RE.findall(fp.name)
+                        tid = ids[-1] if ids else ""
+                        if self.cursor_store.is_unchanged(fk, ino, size, m_ns):
+                            self._emit_usage_events(fk, cur.get("events") or [])
+                            continue
+                        compressed = fp.name.endswith(".zst")
+                        offset = cur["byte_offset"] if not compressed and cur and size > cur["file_size"] and self.cursor_store.can_append_seek(fk, ino, size) else 0
+                        parser = CodexUsageState(tid, m_sec, self.tz_offset_min, cur.get("meta") if offset else None, cur.get("events") if cur else None)
+                        failed = False
 
-                        if (not is_zst) and self.cursor_store.can_append_seek(fk, ino, fsize):
-                            start_off = cur["byte_offset"]
-                            c_meta = cur.get("meta") or {}
-                            cur_m = str(c_meta.get("mdl") or cur_m)
-                            meta_tid = str(c_meta.get("tid") or meta_tid)
-                            pt = c_meta.get("prev_tot")
-                            if isinstance(pt, list) and len(pt) == 3:
-                                prev_tot = (safe_int(pt[0]), safe_int(pt[1]), safe_int(pt[2]))
-                            file_evs = list(cur.get("events") or [])
-                        elif cur and cur.get("events"):
-                            rot_buckets = _fold_rotated_events(rot_buckets, cur["events"])
-
-                        def _on_codex_line(line: str, _idx: int):
-                            nonlocal cur_m, prev_tot, meta_tid
-                            if "turn_context" not in line and "token_count" not in line and "session_meta" not in line:
+                        def on_line(line, index):
+                            nonlocal failed
+                            if not any(word in line for word in ("token_count", "token_usage_record", "turn_context", "thread_settings_applied", "session_meta")):
                                 return
                             try:
-                                obj = json.loads(line)
+                                parser.on_line(line, index)
                             except Exception:
-                                return
-                            if not isinstance(obj, dict):
-                                return
-                            typ = obj.get("type")
-                            pl = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
-                            if typ == "session_meta" and pl.get("id"):
-                                meta_tid = str(pl["id"])
-                                self.codex_live.add(meta_tid)
-                            elif typ == "turn_context" and pl.get("model"):
-                                cur_m = normalize_model(str(pl["model"]), cur_m)
-                            elif typ == "event_msg" and pl.get("type") == "token_count":
-                                info = pl.get("info") if isinstance(pl.get("info"), dict) else {}
-                                last_u = info.get("last_token_usage")
-                                if not isinstance(last_u, dict):
-                                    return
-                                tot_u = info.get("total_token_usage") if isinstance(info.get("total_token_usage"), dict) else {}
-                                sig = (
-                                    safe_int(tot_u.get("input_tokens")),
-                                    safe_int(tot_u.get("output_tokens")),
-                                    safe_int(tot_u.get("cached_input_tokens")),
-                                )
-                                if sig == (0, 0, 0) or sig == prev_tot:
-                                    return
-                                prev_tot = sig
-                                raw_in = safe_int(last_u.get("input_tokens"))
-                                cr = safe_int(last_u.get("cached_input_tokens"))
-                                out_tok = safe_int(last_u.get("output_tokens"))
-                                fi = max(0, raw_in - cr)
-                                if fi + out_tok + cr > 0:
-                                    dt = to_local_date(obj.get("timestamp"), m_sec, self.tz_offset_min)
-                                    file_evs.append(["OpenAI Codex", cur_m, dt, fi, out_tok, cr, 0, 0.0, 1, ""])
+                                failed = True
+                                self.failed_exact_tools.add("OpenAI Codex")
 
-                        valid_end = start_off
-                        if is_zst:
-                            if self._scan_codex_zst_lines(fp, _on_codex_line):
-                                valid_end = fsize
-                        else:
-                            try:
-                                valid_end, _ = scan_jsonl_from_offset(fp, start_off, m_sec, _on_codex_line)
-                            except Exception:
-                                pass
-
-                        if meta_tid:
-                            self.codex_live.add(meta_tid)
-                        n_meta = {
-                            "mdl": cur_m,
-                            "tid": meta_tid,
-                            "prev_tot": list(prev_tot) if prev_tot else None,
-                        }
-                        if rot_buckets:
-                            n_meta["rotated_buckets"] = rot_buckets
-                        self.cursor_store.put(fk, hkey, ino, fsize, m_ns, valid_end, n_meta, file_evs)
-                        self._emit_ev_list(rot_buckets)
-                        self._emit_ev_list(file_evs)
+                        valid_end = offset
+                        try:
+                            if compressed:
+                                if self._scan_codex_zst_lines(fp, on_line):
+                                    valid_end = size
+                                else:
+                                    failed = True
+                            else:
+                                valid_end, _ = scan_jsonl_from_offset(fp, offset, m_sec, on_line)
+                        except Exception:
+                            failed = True
+                        if failed:
+                            self.failed_exact_tools.add("OpenAI Codex")
+                        events = list(parser.rows.values())
+                        if not failed:
+                            self.cursor_store.put(fk, self._norm_home_key(self.home), ino, size, m_ns, valid_end, parser.state(), events)
+                        self._emit_usage_events(fk, events)
 
     @staticmethod
     def _extract_agy_db_step_models(conv_db: Path):
-        step_models = {}
-        latest_model = ""
         if not conv_db or not os.path.exists(os_path_str(conv_db)):
-            return step_models, latest_model
-        conn, tmp_dir = open_sqlite_ro(conv_db)
-        if not conn:
-            return step_models, latest_model
+            return {}, ""
+        conn, tmp = open_sqlite_ro(conv_db)
+        if conn is None:
+            return {}, ""
         try:
-            cur = conn.execute(
-                "SELECT idx, substr(data, max(1, length(data) - 2048), 2049) "
-                "FROM gen_metadata ORDER BY idx"
-            )
-            for row in cur.fetchall():
-                tail = row[1]
-                if not isinstance(tail, (bytes, bytearray)):
+            generations = {}
+            for idx, data in conn.execute("SELECT idx, data FROM gen_metadata"):
+                try:
+                    response = _usage_proto_fields(_usage_proto_fields(data).get(1))
+                    backend = response.get(19, b"").decode("utf-8")
+                    if backend:
+                        generations[idx] = _agy_native_model(backend, response.get(21, b"").decode("utf-8"))
+                except (ValueError, TypeError, UnicodeError):
                     continue
-                tlen = len(tail)
-                lsi_pos = tail.find(b"last_step_index")
-                step_key = str(safe_int(row[0]) + 1)
-                if lsi_pos >= 0:
-                    val_off = lsi_pos + 15
-                    if val_off + 2 < tlen and tail[val_off] == 0x12:
-                        slen = tail[val_off + 1]
-                        if 1 <= slen <= 12 and val_off + 2 + slen <= tlen:
-                            digits = tail[val_off + 2 : val_off + 2 + slen]
-                            if all(48 <= b <= 57 for b in digits):
-                                step_key = str(int(digits.decode("ascii")) + 1)
-                found_raw = ""
-                for i in range(0, max(0, tlen - 4)):
-                    if tail[i] == 0x9A and tail[i + 1] == 0x01:
-                        mlen = tail[i + 2]
-                        if 4 <= mlen <= 64 and i + 3 + mlen <= tlen:
-                            cand = tail[i + 3 : i + 3 + mlen]
-                            ok_ascii = True
-                            has_alpha = False
-                            has_sep = False
-                            for b in cand:
-                                if (97 <= b <= 122) or (65 <= b <= 90):
-                                    has_alpha = True
-                                elif (48 <= b <= 57) or b in (45, 95, 46, 47, 58):
-                                    if b in (45, 95):
-                                        has_sep = True
-                                else:
-                                    ok_ascii = False
-                                    break
-                            if ok_ascii and has_alpha and (has_sep or b"orchestrator" in cand.lower()):
-                                found_raw = cand.decode("ascii", errors="ignore")
-                if found_raw:
-                    norm_m = normalize_model(found_raw, "")
-                    if norm_m == "orchestrator":
-                        norm_m = "gemini-pro-orchestrator"
-                    if norm_m and norm_m != "unknown":
-                        step_models[step_key] = norm_m
-                        latest_model = norm_m
-        except Exception:
-            pass
+            models = {}
+            for idx, metadata in conn.execute("SELECT idx, metadata FROM steps WHERE step_type IN (15, 23) ORDER BY idx"):
+                try:
+                    reference = _usage_proto_fields(metadata).get(20)
+                    if reference is not None:
+                        generation = _usage_proto_fields(reference).get(3, 0)
+                        if generation in generations:
+                            models[str(idx)] = generations[generation]
+                except (ValueError, TypeError):
+                    continue
+            return models, ""
+        except sqlite3.Error:
+            return {}, ""
         finally:
-            close_sqlite(conn, tmp_dir)
-        return step_models, latest_model
+            close_sqlite(conn, tmp)
 
     def scan_antigravity(self):
         hkey = self._norm_home_key(self.home)
@@ -2267,7 +2322,9 @@ class MultiHarnessScanner:
         conv_explicit_models = {}
         for cdir in conv_dirs:
             cid = cdir.name
-            tf = cdir / ".system_generated" / "logs" / "transcript.jsonl"
+            tf = cdir / ".system_generated" / "logs" / "transcript_full.jsonl"
+            if not tf.exists():
+                tf = cdir / ".system_generated" / "logs" / "transcript.jsonl"
             ok, ino, fsize, m_ns, m_sec = safe_file_stat(tf)
             if not ok:
                 continue
@@ -2315,6 +2372,7 @@ class MultiHarnessScanner:
                 try:
                     obj = json.loads(line)
                 except Exception:
+                    self.failed_exact_tools.add("Google Antigravity")
                     return
                 if not isinstance(obj, dict):
                     return
@@ -2331,6 +2389,8 @@ class MultiHarnessScanner:
                             cur_m = normalize_model(mm.group(1), cur_m)
                             if cur_m == "orchestrator":
                                 cur_m = "gemini-pro-orchestrator"
+                if obj.get("type") not in ("PLANNER_RESPONSE", "CHECKPOINT") or obj.get("status") != "DONE" or obj.get("step_index") is None:
+                    return
                 fi = safe_int(obj.get("input_tokens"))
                 out_tok = safe_int(obj.get("output_tokens"))
                 cr = safe_int(obj.get("cache_read_tokens"))
@@ -2345,16 +2405,16 @@ class MultiHarnessScanner:
                 try:
                     valid_end, _ = scan_jsonl_from_offset(tf, start_off, m_sec, _on_agy_line)
                 except Exception:
-                    pass
+                    self.failed_exact_tools.add("Google Antigravity")
 
             db_step_models, latest_db_model = self._extract_agy_db_step_models(conv_db)
             evs = list(steps.values())
             for ev in evs:
                 skey = str(ev[9]) if len(ev) > 9 else ""
                 if skey and skey in db_step_models:
-                    ev[1] = db_step_models[skey]
+                    ev[1] = _agy_native_model(db_step_models[skey], ev[1])
                 elif not ev[1]:
-                    ev[1] = cur_m or latest_db_model or ""
+                    ev[1] = "unknown"
                 elif ev[1] == "orchestrator":
                     ev[1] = "gemini-pro-orchestrator"
 
@@ -2371,23 +2431,8 @@ class MultiHarnessScanner:
             cid, fk, ino, fsize, m_ns, valid_end, exp_m, pid, rot_buckets, evs = it[:10]
             dirty = it[10]
             db_sig = it[11] if len(it) > 11 else ""
-            fallback_m = exp_m
-            if not fallback_m:
-                walk_pid = pid or conv_parents.get(cid, "")
-                for _hop in range(6):
-                    if not walk_pid:
-                        break
-                    if conv_explicit_models.get(walk_pid):
-                        fallback_m = conv_explicit_models[walk_pid]
-                        break
-                    nxt = conv_parents.get(walk_pid, "")
-                    if not nxt or nxt == walk_pid:
-                        break
-                    walk_pid = nxt
-            if not fallback_m:
-                fallback_m = "gemini-4-carbon"
-
             patched = False
+            fallback_m = "unknown"
             for ev in evs:
                 if not ev[1] or ev[1] == "unknown":
                     ev[1] = fallback_m
@@ -2401,13 +2446,13 @@ class MultiHarnessScanner:
                 elif rb[1] == "orchestrator":
                     rb[1] = "gemini-pro-orchestrator"
 
-            if dirty or patched:
+            if (dirty or patched) and "Google Antigravity" not in self.failed_exact_tools:
                 n_meta = {"mdl": exp_m, "pid": pid, "dbs": db_sig}
                 if rot_buckets:
                     n_meta["rotated_buckets"] = rot_buckets
                 self.cursor_store.put(fk, hkey, ino, fsize, m_ns, valid_end, n_meta, evs)
-            self._emit_ev_list(rot_buckets)
-            self._emit_ev_list(evs)
+            self._emit_usage_events(fk, rot_buckets)
+            self._emit_usage_events(fk, evs)
 
     def scan_gemini_and_qwen_chats(self):
         hkey = self._norm_home_key(self.home)
@@ -2461,6 +2506,7 @@ class MultiHarnessScanner:
         cur = self.cursor_store.get(fk)
         conn, tmp = open_sqlite_ro(zdb)
         if not conn:
+            self.failed_exact_tools.add("ZCode")
             if cur and cur.get("events"):
                 self._emit_ev_list(cur["events"])
             return
@@ -2485,25 +2531,26 @@ class MultiHarnessScanner:
                 cr = safe_int(cache.get("read"))
                 cw = safe_int(cache.get("write"))
                 tot = safe_int(tok.get("total"))
-                prov = str(d.get("providerID") or "")
+                prov = str(d.get("providerId") or d.get("providerID") or "")
                 if (tot > 0 and abs((raw_in + out_tok) - tot) <= 4 and cr > 0) or (raw_in >= cr > 0 and "anthropic" not in prov.lower()):
                     fi = max(0, raw_in - cr - cw)
                 else:
                     fi = raw_in
                 if fi + out_tok + cr + cw <= 0:
                     continue
-                mdl = normalize_model(d.get("modelID") or d.get("model"), "glm-5.3")
+                mdl = normalize_model(d.get("modelId") or d.get("modelID") or d.get("model"), "unknown")
                 tval = (d.get("time") or {}).get("created") if isinstance(d.get("time"), dict) else None
                 dt = to_local_date(tval or tc, m_sec, self.tz_offset_min)
                 dk = f"z:{mid}"
                 fresh_evs.append(["ZCode", mdl, dt, fi, out_tok, cr, cw, safe_float(d.get("cost")), 1, dk])
         except Exception:
-            pass
+            self.failed_exact_tools.add("ZCode")
         finally:
             close_sqlite(conn, tmp)
 
         merged_evs = _merge_sqlite_cursor_events(cur, fresh_evs)
-        self.cursor_store.put(fk, hkey, ino, csize, m_ns, csize, {}, merged_evs)
+        if "ZCode" not in self.failed_exact_tools:
+            self.cursor_store.put(fk, hkey, ino, csize, m_ns, csize, {}, merged_evs)
         self._emit_ev_list(merged_evs)
 
     def scan_kimi(self):
@@ -3305,42 +3352,9 @@ class MultiHarnessScanner:
             pass
 
     def scan_codex_sqlite_archive(self):
-        hkey = self._norm_home_key(self.home)
-        st_db = self.home / ".codex" / "state_5.sqlite"
-        ok, ino, csize, m_ns, m_sec = safe_sqlite_combined_stat(st_db)
-        if not ok:
-            return
-        fk = self._track_file(st_db)
-        if self.cursor_store.is_unchanged(fk, ino, csize, m_ns):
-            self.codex_archive_candidates.extend(self.cursor_store.get(fk).get("events") or [])
-            return
-
-        cur = self.cursor_store.get(fk)
-        conn, tmp = open_sqlite_ro(st_db)
-        if not conn:
-            if cur and cur.get("events"):
-                self.codex_archive_candidates.extend(cur["events"])
-            return
-
-        fresh_threads = []
-        try:
-            for tid, mdl, tot, cat in conn.execute("SELECT id, model, tokens_used, created_at FROM threads WHERE tokens_used > 0"):
-                tot = safe_int(tot)
-                if tot <= 0:
-                    continue
-                cr = int(tot * 0.963)
-                out_tok = max(1, int(tot * 0.004))
-                fi = max(0, tot - cr - out_tok)
-                dt = to_local_date(cat, m_sec, self.tz_offset_min)
-                fresh_threads.append(["OpenAI Codex", normalize_model(str(mdl or ""), "gpt-6-astra"), dt, fi, out_tok, cr, 0, 0.0, 1, str(tid or "")])
-        except Exception:
-            pass
-        finally:
-            close_sqlite(conn, tmp)
-
-        merged_threads = _merge_sqlite_cursor_events(cur, fresh_threads)
-        self.cursor_store.put(fk, hkey, ino, csize, m_ns, csize, {}, merged_threads)
-        self.codex_archive_candidates.extend(merged_threads)
+        # A single tokens_used total cannot establish a cache/output split.
+        # Retain its backup, but never manufacture a precise bill from ratios.
+        return
 
     def build_records(self):
         buckets = {}
@@ -3361,7 +3375,7 @@ class MultiHarnessScanner:
             safe_logged = safe_float(logged_cost)
             actual = safe_logged if safe_logged > 0 else calc
             baseline = max(base, actual)
-            rate_lbl = f"${inp_r:g} / ${out_r:g}"
+            rate_lbl = f"${inp_r:g} / ${out_r:g}" if any((inp_r, out_r, cr_r, cw_r)) else "未定价"
             k = (dt, tool, model)
             if k not in buckets:
                 buckets[k] = [dt, tool, model, 0, 0, 0, 0, 0, 0.0, 0.0, rate_lbl]
@@ -3426,126 +3440,37 @@ def _collapse_record_rows(rows) -> dict:
     return out
 
 
-def _find_reclassified_dt_tools(p_map: dict, h_map: dict) -> set:
-    """识别同一 (date, tool) 下活跃轮次/Token完整覆盖历史但模型桶重新拆分的记录，防止旧错分类模型残留翻倍"""
-    p_tot = {}
-    h_tot = {}
-    for k, r in p_map.items():
-        dt_t = (k[0], k[1])
-        cur = p_tot.setdefault(dt_t, [0, 0])
-        cur[0] += r[3]
-        cur[1] += r[4] + r[5] + r[6] + r[7]
-    for k, r in h_map.items():
-        dt_t = (k[0], k[1])
-        cur = h_tot.setdefault(dt_t, [0, 0])
-        cur[0] += r[3]
-        cur[1] += r[4] + r[5] + r[6] + r[7]
-
-    reclassified = set()
-    for dt_t, (ht, htok) in h_tot.items():
-        if ht <= 0:
-            continue
-        pt, ptok = p_tot.get(dt_t, (0, 0))
-        if pt >= ht and ptok >= int(htok * 0.98):
-            has_excess = False
-            for k, hr in h_map.items():
-                if (k[0], k[1]) != dt_t:
-                    continue
-                pr = p_map.get(k)
-                htok_m = hr[4] + hr[5] + hr[6] + hr[7]
-                ptok_m = (pr[4] + pr[5] + pr[6] + pr[7]) if pr else 0
-                if pr is None or hr[3] > pr[3] or htok_m > ptok_m:
-                    has_excess = True
-                    break
-            if has_excess:
-                reclassified.add(dt_t)
-    return reclassified
-
-
-def merge_records_high_water(primary_rows: list, historical_rows: list, historical_scanner_rev: int = None) -> list:
-    """
-    按 (date, tool, model) 执行高水位合并（v2.7 重分类自愈 + 旧版错账淘汰 + 单价修正感知）：
-    - 若远端/历史快照来自旧版扫描器 (scanner_rev < 27)，且本地最新扫描已有对应日期的 Google Antigravity / OpenAI Codex 记录，
-      直接以本地准确解析替换旧版虚高/错分类账本；同时将旧版 Antigravity 的裸 "orchestrator" 归一化为 "gemini-pro-orchestrator"；
-    - 若同一 (date, tool) 下活跃扫描的轮次与 Token 完整覆盖历史归档（>=98%），但旧模型桶发生缩减或消失（模型重分类），
-      直接采纳活跃拆分桶并淘汰旧错模型桶，杜绝翻倍重复计费；
-    - 否则按 (date, tool, model) 取高水位 max，彻底免疫 AI 工具清理过期会话日志。
-    """
-    upgrading_legacy = historical_scanner_rev is not None and historical_scanner_rev < 27
-    norm_hist_rows = historical_rows
-    if upgrading_legacy and historical_rows:
-        norm_hist_rows = []
-        for raw in historical_rows:
-            if isinstance(raw, (list, tuple)) and len(raw) >= 3 and str(raw[1] or "").strip() == "Google Antigravity" and str(raw[2] or "").strip().lower() == "orchestrator":
-                fixed = list(raw)
-                fixed[2] = "gemini-pro-orchestrator"
-                norm_hist_rows.append(fixed)
-            else:
-                norm_hist_rows.append(raw)
-
-    p_map = _collapse_record_rows(primary_rows)
-    h_map = _collapse_record_rows(norm_hist_rows)
-    prim_has_agy = any(k[1] == "Google Antigravity" for k in p_map.keys())
-    prim_has_codex = any(k[1] == "OpenAI Codex" for k in p_map.keys())
-    reclassified = _find_reclassified_dt_tools(p_map, h_map)
-    merged = {}
-    for k in set(p_map.keys()) | set(h_map.keys()):
-        p = p_map.get(k)
-        h = h_map.get(k)
-        if upgrading_legacy and (
-            (k[1] == "Google Antigravity" and prim_has_agy)
-            or (k[1] == "OpenAI Codex" and prim_has_codex)
-        ):
-            if p:
-                merged[k] = list(p)
-            continue
-        if (k[0], k[1]) in reclassified:
-            if p:
-                merged[k] = list(p)
-            continue
-        if p and h:
-            all_live_ge_hist = (
-                p[3] >= h[3]
-                and p[4] >= h[4]
-                and p[5] >= h[5]
-                and p[6] >= h[6]
-                and p[7] >= h[7]
-            )
-            if all_live_ge_hist and p[8] > 0:
-                c_usd = round(p[8], 6)
-                b_usd = round(max(p[9], c_usd), 6)
-                lbl = p[10] or h[10]
-            else:
-                c_usd = round(max(p[8], h[8]), 6)
-                b_usd = round(max(p[9], h[9], c_usd), 6)
-                lbl = p[10] or h[10]
-            merged[k] = [
-                k[0],
-                k[1],
-                k[2],
-                max(p[3], h[3]),
-                max(p[4], h[4]),
-                max(p[5], h[5]),
-                max(p[6], h[6]),
-                max(p[7], h[7]),
-                c_usd,
-                b_usd,
-                lbl,
-            ]
+def merge_records_high_water(primary_rows, historical_rows, historical_scanner_rev=None, primary_partitions=None, historical_partitions=None):
+    """Replace proved day/tool partitions; retain coherent whole legacy rows."""
+    p_map, h_map = _collapse_record_rows(primary_rows), _collapse_record_rows(historical_rows)
+    primary_partitions, historical_partitions = primary_partitions or {}, historical_partitions or {}
+    owners = {}
+    for key in set(primary_partitions) | set(historical_partitions):
+        p_time, h_time = safe_int(primary_partitions.get(key)), safe_int(historical_partitions.get(key))
+        if p_time > 0 or h_time > 0:
+            owners[key] = p_time >= h_time
+    merged = []
+    for key in set(p_map) | set(h_map):
+        current, previous = p_map.get(key), h_map.get(key)
+        partition = key[0] + "||" + key[1]
+        if partition in owners:
+            chosen = current if owners[partition] else previous
+        elif current and previous:
+            chosen = max((current, previous), key=lambda r: (r[3], sum(r[4:8])))
         else:
-            src = p or h
-            merged[k] = list(src)
-    return sorted(merged.values(), key=lambda x: (x[0], x[1], x[2]))
+            chosen = current or previous
+        if chosen is not None:
+            merged.append(list(chosen))
+    return sorted(merged, key=lambda r: (r[0], r[1], r[2]))
 
 
-def merge_with_ledger_db(home: Path, current_rows: list, strict: bool = False) -> list:
+def merge_with_ledger_db(home: Path, current_rows: list, strict: bool = False, reconciled_partitions=None) -> list:
     """
     使用本地 ~/.toklens/ledger.db (SQLite WAL) 进行持久化高水位归档：
     - 仅增量写入新增、发生变化或需淘汰旧错分类的行，降低 VPS 磁盘写放大；
     - 当 strict=True（如云同步阶段）且本地已有 ledger.db 读取失败/锁死时，严禁返回未归档残缺快照冲刷云端，直接抛出异常中止覆盖。
     """
     db_path = get_ledger_db_path(home)
-    db_existed = os.path.exists(os_path_str(db_path))
     conn = None
     try:
         conn = _open_ledger_rw(home)
@@ -3569,7 +3494,16 @@ def merge_with_ledger_db(home: Path, current_rows: list, strict: bool = False) -
                 str(lst[10] or ""),
             )
 
-        merged = merge_records_high_water(current_rows, archived_rows)
+        proof_row = conn.execute("SELECT v FROM kv_meta WHERE k='accounting_partitions'").fetchone()
+        old_proofs = json.loads(proof_row[0]) if proof_row else {}
+        merged = merge_records_high_water(current_rows, archived_rows, primary_partitions=reconciled_partitions, historical_partitions=old_proofs)
+        proofs = dict(old_proofs)
+        for key, value in (reconciled_partitions or {}).items():
+            proofs[key] = max(safe_int(value), safe_int(proofs.get(key)))
+        conn.execute("INSERT OR REPLACE INTO kv_meta(k,v) VALUES ('accounting_partitions',?)", (json.dumps(proofs, separators=(",", ":")),))
+        if reconciled_partitions is not None:
+            reconciled_partitions.clear()
+            reconciled_partitions.update(proofs)
         merged_keys = set((r[0], r[1], r[2]) for r in merged)
         obsolete_keys = [k for k in archived_map.keys() if k not in merged_keys]
 
@@ -3593,14 +3527,11 @@ def merge_with_ledger_db(home: Path, current_rows: list, strict: bool = False) -
                     "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     diff_params,
                 )
-            conn.commit()
+        conn.commit()
         return merged
     except Exception as ex:
         append_agent_log(home, "ERROR", f"ledger.db 读写异常: {ex}")
-        if strict or db_existed:
-            if strict:
-                raise RuntimeError(f"本地归档账本 ledger.db 访问失败，已中止云端同步以保护历史数据: {ex}") from ex
-        return merge_records_high_water(current_rows, [])
+        raise RuntimeError("本地归档账本 ledger.db 访问失败，已中止本次扫描及同步以保护历史数据") from ex
     finally:
         if conn is not None:
             try:
@@ -3640,6 +3571,8 @@ def build_snapshot(
             "schema": SCHEMA_VERSION,
             "agent_version": AGENT_VERSION,
             "scanner_rev": SCANNER_REV,
+            "accounting_updated_ms": int(time.time() * 1000),
+            "reconciled_partitions": scanner.reconciled_partitions,
             "machine_id": sanitize_machine_id(machine_id),
             "machine_name": machine_name.strip() or socket.gethostname(),
             "machine_type": machine_type,
@@ -3746,13 +3679,13 @@ def sync_gist(snapshot: dict, gist_id: str, token: str, home: Path = None) -> di
             remote_snap = json.loads(remote_text)
             if isinstance(remote_snap, dict) and isinstance(remote_snap.get("records"), list):
                 hist_rev = safe_int(remote_snap.get("scanner_rev"))
-                merged_rows = merge_records_high_water(
-                    snapshot.get("records", []),
-                    remote_snap["records"],
-                    historical_scanner_rev=hist_rev,
-                )
-                merged_rows = merge_with_ledger_db(target_home, merged_rows, strict=True)
-                snapshot["records"] = merged_rows
+                p_proofs = dict(snapshot.get("reconciled_partitions") or {})
+                h_proofs = remote_snap.get("reconciled_partitions") or {} if hist_rev >= RECONCILED_REVISION else {}
+                merged_rows = merge_records_high_water(snapshot.get("records", []), remote_snap["records"], hist_rev, p_proofs, h_proofs)
+                for key, value in h_proofs.items():
+                    p_proofs[key] = max(safe_int(value), safe_int(p_proofs.get(key)))
+                snapshot["records"] = merge_with_ledger_db(target_home, merged_rows, strict=True, reconciled_partitions=p_proofs)
+                snapshot["reconciled_partitions"] = p_proofs
 
     # 2. PATCH 上传合并后的最新快照
     payload = {"files": {fname: {"content": json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))}}}
@@ -3812,13 +3745,13 @@ def sync_webdav(snapshot: dict, webdav_url: str, user: str, password: str, home:
             remote_snap = json.loads(remote_text)
             if isinstance(remote_snap, dict) and isinstance(remote_snap.get("records"), list):
                 hist_rev = safe_int(remote_snap.get("scanner_rev"))
-                merged_rows = merge_records_high_water(
-                    snapshot.get("records", []),
-                    remote_snap["records"],
-                    historical_scanner_rev=hist_rev,
-                )
-                merged_rows = merge_with_ledger_db(target_home, merged_rows, strict=True)
-                snapshot["records"] = merged_rows
+                p_proofs = dict(snapshot.get("reconciled_partitions") or {})
+                h_proofs = remote_snap.get("reconciled_partitions") or {} if hist_rev >= RECONCILED_REVISION else {}
+                merged_rows = merge_records_high_water(snapshot.get("records", []), remote_snap["records"], hist_rev, p_proofs, h_proofs)
+                for key, value in h_proofs.items():
+                    p_proofs[key] = max(safe_int(value), safe_int(p_proofs.get(key)))
+                snapshot["records"] = merge_with_ledger_db(target_home, merged_rows, strict=True, reconciled_partitions=p_proofs)
+                snapshot["reconciled_partitions"] = p_proofs
     except urllib.error.HTTPError as he:
         if he.code != 404:
             raise

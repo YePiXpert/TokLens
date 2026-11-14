@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Globalization;
 using System.Text;
 using System.Windows;
@@ -21,14 +21,6 @@ namespace TokLens
         private const double DrawerFixedWidth = 300.0;
 
         // 四维 Token 专属语义色板（暗色 / 亮色主题自适应）
-        private const string ColorFreshDark  = "#38BDF8";
-        private const string ColorFreshLight = "#0284C7";
-        private const string ColorCrDark     = "#34D399";
-        private const string ColorCrLight    = "#059669";
-        private const string ColorCwDark     = "#FBBF24";
-        private const string ColorCwLight    = "#D97706";
-        private const string ColorOutDark    = "#818CF8";
-        private const string ColorOutLight   = "#4F46E5";
 
         private readonly string _homeDir;
         private readonly Action _onCloseRequested;
@@ -236,7 +228,7 @@ namespace TokLens
             _toolBadgeText = new TextBlock();
             _toolBadgeText.Text = "请求链路透视";
             _toolBadgeText.FontFamily = DesignSystem.FontUi;
-            _toolBadgeText.FontSize = 11.5;
+            _toolBadgeText.FontSize = DesignSystem.TextCaption;
             _toolBadgeText.FontWeight = FontWeights.SemiBold;
             _toolBadgeText.VerticalAlignment = VerticalAlignment.Center;
             _toolBadgeText.TextTrimming = TextTrimming.CharacterEllipsis;
@@ -284,7 +276,7 @@ namespace TokLens
 
             _modelPillText = new TextBlock();
             _modelPillText.FontFamily = DesignSystem.FontMono;
-            _modelPillText.FontSize = 11.5;
+            _modelPillText.FontSize = DesignSystem.TextCaption;
             _modelPillText.FontWeight = FontWeights.Medium;
             _modelPillText.VerticalAlignment = VerticalAlignment.Center;
             _modelPillText.TextTrimming = TextTrimming.CharacterEllipsis;
@@ -322,7 +314,7 @@ namespace TokLens
             TextBlock title = new TextBlock();
             title.Text = "单条请求链路深度透视";
             title.FontFamily = DesignSystem.FontUi;
-            title.FontSize = 13.0;
+            title.FontSize = DesignSystem.TextLabel;
             title.FontWeight = FontWeights.SemiBold;
             title.TextAlignment = TextAlignment.Center;
             title.HorizontalAlignment = HorizontalAlignment.Center;
@@ -332,7 +324,7 @@ namespace TokLens
             TextBlock desc = new TextBlock();
             desc.Text = "在左侧「实时请求流」中点选任意一条对话请求，即可查看双币成本拆解、缓存省钱比例与 Token 瀑布详情。";
             desc.FontFamily = DesignSystem.FontUi;
-            desc.FontSize = 11.5;
+            desc.FontSize = DesignSystem.TextCaption;
             desc.LineHeight = 18.0;
             desc.TextAlignment = TextAlignment.Center;
             desc.TextWrapping = TextWrapping.Wrap;
@@ -345,7 +337,7 @@ namespace TokLens
             {
                 "¥ / $ 双币账单与 Prompt Cache 省钱透视",
                 "Fresh / Read / Write / Output 四维瀑布",
-                "毫秒级耗时遥测、TPS 评级与 JSON 导出"
+                "耗时、输出速率与 JSON 导出"
             };
             string[] icons = new string[]
             {
@@ -373,7 +365,7 @@ namespace TokLens
                 TextBlock ht = new TextBlock();
                 ht.Text = hints[i];
                 ht.FontFamily = DesignSystem.FontUi;
-                ht.FontSize = 11.0;
+                ht.FontSize = DesignSystem.TextCaption;
                 ht.VerticalAlignment = VerticalAlignment.Center;
                 ht.TextTrimming = TextTrimming.CharacterEllipsis;
                 ht.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -429,7 +421,7 @@ namespace TokLens
             _priceSourceText = new TextBlock();
             _priceSourceText.Text = "内置基准";
             _priceSourceText.FontFamily = DesignSystem.FontUi;
-            _priceSourceText.FontSize = 10.5;
+            _priceSourceText.FontSize = DesignSystem.TextCaption;
             _priceSourceText.FontWeight = FontWeights.Medium;
             _priceSourceText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             _priceSourceBadge.Child = _priceSourceText;
@@ -448,7 +440,7 @@ namespace TokLens
 
             _primaryCostText = new TextBlock();
             _primaryCostText.Text = "¥0.0000";
-            _primaryCostText.FontSize = 21.0;
+            _primaryCostText.FontSize = DesignSystem.TextHeading;
             _primaryCostText.FontWeight = FontWeights.Bold;
             _primaryCostText.Margin = new Thickness(0, 0, 8, 0);
             _primaryCostText.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
@@ -466,7 +458,7 @@ namespace TokLens
 
             _secondaryCostText = new TextBlock();
             _secondaryCostText.Text = "≈ $0.0000 USD";
-            _secondaryCostText.FontSize = 11.0;
+            _secondaryCostText.FontSize = DesignSystem.TextCaption;
             _secondaryCostText.FontWeight = FontWeights.Medium;
             _secondaryCostText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
             ModernControlsFactory.EnableTabularNumbers(_secondaryCostText, true);
@@ -537,7 +529,7 @@ namespace TokLens
 
             _savingsPctText = new TextBlock();
             _savingsPctText.Text = "-0.0%";
-            _savingsPctText.FontSize = 11.0;
+            _savingsPctText.FontSize = DesignSystem.TextCaption;
             _savingsPctText.FontWeight = FontWeights.Bold;
             _savingsPctText.SetResourceReference(TextBlock.ForegroundProperty, "SemanticSuccess");
             ModernControlsFactory.EnableTabularNumbers(_savingsPctText, true);
@@ -553,7 +545,7 @@ namespace TokLens
             _savingsHeadlineText = new TextBlock();
             _savingsHeadlineText.Text = "缓存省下 ¥0.0000";
             _savingsHeadlineText.FontFamily = DesignSystem.FontUi;
-            _savingsHeadlineText.FontSize = 11.5;
+            _savingsHeadlineText.FontSize = DesignSystem.TextCaption;
             _savingsHeadlineText.FontWeight = FontWeights.SemiBold;
             _savingsHeadlineText.VerticalAlignment = VerticalAlignment.Center;
             _savingsHeadlineText.TextTrimming = TextTrimming.CharacterEllipsis;
@@ -565,7 +557,7 @@ namespace TokLens
             _savingsSubText = new TextBlock();
             _savingsSubText.Text = "对比无缓存全按 Input 计费原价";
             _savingsSubText.FontFamily = DesignSystem.FontUi;
-            _savingsSubText.FontSize = 10.5;
+            _savingsSubText.FontSize = DesignSystem.TextCaption;
             _savingsSubText.Margin = new Thickness(0, 4, 0, 0);
             _savingsSubText.TextTrimming = TextTrimming.CharacterEllipsis;
             _savingsSubText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
@@ -585,7 +577,7 @@ namespace TokLens
 
             valTextOut = new TextBlock();
             valTextOut.Text = "$0/M";
-            valTextOut.FontSize = 10.8;
+            valTextOut.FontSize = DesignSystem.TextCaption;
             valTextOut.FontWeight = FontWeights.SemiBold;
             valTextOut.TextAlignment = TextAlignment.Right;
             valTextOut.VerticalAlignment = VerticalAlignment.Center;
@@ -597,7 +589,7 @@ namespace TokLens
             TextBlock lbl = new TextBlock();
             lbl.Text = label;
             lbl.FontFamily = DesignSystem.FontUi;
-            lbl.FontSize = 10.5;
+            lbl.FontSize = DesignSystem.TextCaption;
             lbl.VerticalAlignment = VerticalAlignment.Center;
             lbl.TextTrimming = TextTrimming.CharacterEllipsis;
             lbl.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -629,7 +621,7 @@ namespace TokLens
 
             _totalTokensBadgeText = new TextBlock();
             _totalTokensBadgeText.Text = "共 0 tok";
-            _totalTokensBadgeText.FontSize = 10.8;
+            _totalTokensBadgeText.FontSize = DesignSystem.TextCaption;
             _totalTokensBadgeText.FontWeight = FontWeights.SemiBold;
             _totalTokensBadgeText.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
             ModernControlsFactory.EnableTabularNumbers(_totalTokensBadgeText, true);
@@ -687,13 +679,6 @@ namespace TokLens
                 "缓存创建写入",
                 "模型生成输出"
             };
-            string[] enSubNames = new string[]
-            {
-                "Fresh Input",
-                "Cache Read",
-                "Cache Write",
-                "Output"
-            };
 
             _dimColorDots = new Ellipse[4];
             _dimCountTexts = new TextBlock[4];
@@ -736,28 +721,18 @@ namespace TokLens
                 TextBlock cnTb = new TextBlock();
                 cnTb.Text = cnNames[i];
                 cnTb.FontFamily = DesignSystem.FontUi;
-                cnTb.FontSize = 11.2;
+                cnTb.FontSize = DesignSystem.TextCaption;
                 cnTb.FontWeight = FontWeights.Medium;
                 cnTb.VerticalAlignment = VerticalAlignment.Center;
                 cnTb.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
                 nameSp.Children.Add(cnTb);
-
-                TextBlock enTb = new TextBlock();
-                enTb.Text = enSubNames[i];
-                enTb.FontFamily = DesignSystem.FontUi;
-                enTb.FontSize = 9.8;
-                enTb.Margin = new Thickness(4, 1, 0, 0);
-                enTb.VerticalAlignment = VerticalAlignment.Center;
-                enTb.TextTrimming = TextTrimming.CharacterEllipsis;
-                enTb.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-                nameSp.Children.Add(enTb);
 
                 Grid.SetColumn(nameSp, 1);
                 line.Children.Add(nameSp);
 
                 TextBlock cntTb = new TextBlock();
                 cntTb.Text = "0";
-                cntTb.FontSize = 11.2;
+                cntTb.FontSize = DesignSystem.TextCaption;
                 cntTb.FontWeight = FontWeights.SemiBold;
                 cntTb.TextAlignment = TextAlignment.Right;
                 cntTb.VerticalAlignment = VerticalAlignment.Center;
@@ -770,7 +745,7 @@ namespace TokLens
 
                 TextBlock pctTb = new TextBlock();
                 pctTb.Text = "0.0%";
-                pctTb.FontSize = 10.8;
+                pctTb.FontSize = DesignSystem.TextCaption;
                 pctTb.TextAlignment = TextAlignment.Right;
                 pctTb.VerticalAlignment = VerticalAlignment.Center;
                 pctTb.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
@@ -814,7 +789,7 @@ namespace TokLens
             _contextSummaryText = new TextBlock();
             _contextSummaryText.Text = "输入上下文合计 0 · 缓存命中覆盖 0.0%";
             _contextSummaryText.FontFamily = DesignSystem.FontUi;
-            _contextSummaryText.FontSize = 10.5;
+            _contextSummaryText.FontSize = DesignSystem.TextCaption;
             _contextSummaryText.Margin = new Thickness(2, 7, 2, 0);
             _contextSummaryText.TextTrimming = TextTrimming.CharacterEllipsis;
             _contextSummaryText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -866,7 +841,7 @@ namespace TokLens
 
             _exactTimestampText = new TextBlock();
             _exactTimestampText.Text = "—";
-            _exactTimestampText.FontSize = 11.0;
+            _exactTimestampText.FontSize = DesignSystem.TextCaption;
             _exactTimestampText.FontWeight = FontWeights.Medium;
             _exactTimestampText.TextAlignment = TextAlignment.Right;
             _exactTimestampText.VerticalAlignment = VerticalAlignment.Center;
@@ -879,7 +854,7 @@ namespace TokLens
             TextBlock tsLabel = new TextBlock();
             tsLabel.Text = "请求时间";
             tsLabel.FontFamily = DesignSystem.FontUi;
-            tsLabel.FontSize = 10.8;
+            tsLabel.FontSize = DesignSystem.TextCaption;
             tsLabel.VerticalAlignment = VerticalAlignment.Center;
             tsLabel.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             tsDock.Children.Add(tsLabel);
@@ -887,7 +862,7 @@ namespace TokLens
             tsBox.Child = tsDock;
             sp.Children.Add(tsBox);
 
-            // 双栏核心遥测块：响应总耗时 + 输出生成速率 TPS
+            // 双栏核心遥测块：响应总耗时 + 输出请求均速 TPS
             Grid metricsGrid = new Grid();
             metricsGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             metricsGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(8) });
@@ -905,13 +880,13 @@ namespace TokLens
             TextBlock latHdr = new TextBlock();
             latHdr.Text = "响应总耗时";
             latHdr.FontFamily = DesignSystem.FontUi;
-            latHdr.FontSize = 10.5;
+            latHdr.FontSize = DesignSystem.TextCaption;
             latHdr.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             latSp.Children.Add(latHdr);
 
             _durationMainText = new TextBlock();
             _durationMainText.Text = "—";
-            _durationMainText.FontSize = 15.5;
+            _durationMainText.FontSize = DesignSystem.TextTitle;
             _durationMainText.FontWeight = FontWeights.Bold;
             _durationMainText.Margin = new Thickness(0, 3, 0, 2);
             _durationMainText.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
@@ -921,7 +896,7 @@ namespace TokLens
             _durationSubText = new TextBlock();
             _durationSubText.Text = "未记录起止毫秒差";
             _durationSubText.FontFamily = DesignSystem.FontMono;
-            _durationSubText.FontSize = 10.2;
+            _durationSubText.FontSize = DesignSystem.TextCaption;
             _durationSubText.TextTrimming = TextTrimming.CharacterEllipsis;
             _durationSubText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             latSp.Children.Add(_durationSubText);
@@ -930,7 +905,7 @@ namespace TokLens
             Grid.SetColumn(latTile, 0);
             metricsGrid.Children.Add(latTile);
 
-            // 右块：输出生成速率 TPS
+            // 右块：输出请求均速 TPS
             Border tpsTile = new Border();
             tpsTile.CornerRadius = new CornerRadius(6);
             tpsTile.Padding = new Thickness(9, 7, 9, 8);
@@ -940,15 +915,15 @@ namespace TokLens
 
             StackPanel tpsSp = new StackPanel();
             TextBlock tpsHdr = new TextBlock();
-            tpsHdr.Text = "生成速率 TPS";
+            tpsHdr.Text = "请求均速 TPS";
             tpsHdr.FontFamily = DesignSystem.FontUi;
-            tpsHdr.FontSize = 10.5;
+            tpsHdr.FontSize = DesignSystem.TextCaption;
             tpsHdr.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             tpsSp.Children.Add(tpsHdr);
 
             _tpsMainText = new TextBlock();
             _tpsMainText.Text = "—";
-            _tpsMainText.FontSize = 15.5;
+            _tpsMainText.FontSize = DesignSystem.TextTitle;
             _tpsMainText.FontWeight = FontWeights.Bold;
             _tpsMainText.Margin = new Thickness(0, 3, 0, 4);
             _tpsMainText.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
@@ -980,7 +955,7 @@ namespace TokLens
             _tpsSubHintText = new TextBlock();
             _tpsSubHintText.Text = "tok/s 吞吐遥测";
             _tpsSubHintText.FontFamily = DesignSystem.FontUi;
-            _tpsSubHintText.FontSize = 9.8;
+            _tpsSubHintText.FontSize = DesignSystem.TextCaption;
             _tpsSubHintText.Margin = new Thickness(0, 3, 0, 0);
             _tpsSubHintText.TextTrimming = TextTrimming.CharacterEllipsis;
             _tpsSubHintText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -1028,7 +1003,7 @@ namespace TokLens
             _copyBtnLabel = new TextBlock();
             _copyBtnLabel.Text = "复制 JSON 详情";
             _copyBtnLabel.FontFamily = DesignSystem.FontUi;
-            _copyBtnLabel.FontSize = 11.5;
+            _copyBtnLabel.FontSize = DesignSystem.TextCaption;
             _copyBtnLabel.VerticalAlignment = VerticalAlignment.Center;
             copySp.Children.Add(_copyBtnLabel);
 
@@ -1040,7 +1015,7 @@ namespace TokLens
             // [按此模型过滤]
             _filterModelBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Search, "按此模型过滤", "primary");
             _filterModelBtn.Height = 30.0;
-            _filterModelBtn.FontSize = 11.5;
+            _filterModelBtn.FontSize = DesignSystem.TextCaption;
             _filterModelBtn.Padding = new Thickness(8, 0, 8, 0);
             _filterModelBtn.HorizontalAlignment = HorizontalAlignment.Stretch;
             _filterModelBtn.ToolTip = "在列表中仅筛选当前选中的模型名称";
@@ -1069,7 +1044,7 @@ namespace TokLens
             TextBlock tb = new TextBlock();
             tb.Text = text;
             tb.FontFamily = DesignSystem.FontUi;
-            tb.FontSize = 11.2;
+            tb.FontSize = DesignSystem.TextCaption;
             tb.FontWeight = FontWeights.SemiBold;
             tb.VerticalAlignment = VerticalAlignment.Center;
             tb.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
@@ -1134,7 +1109,7 @@ namespace TokLens
             _pricing.ComputeCost(modelName, fi, outTok, cr, cw, row.CostUsd, out actualUsd, out baselineUsd, out computedRate);
             if (lookupRate == null)
             {
-                lookupRate = computedRate ?? new ModelRate(1.0, 4.0, 0.1, 0.0, "fallback");
+                lookupRate = computedRate ?? new ModelRate(0, 0, 0, 0, "unpriced");
             }
 
             double actualCny = actualUsd * _currentUsdToCny;
@@ -1194,7 +1169,7 @@ namespace TokLens
             _copyJsonBtn.IsEnabled = false;
             _filterModelBtn.IsEnabled = false;
 
-            string neutralHex = isDark ? "#818CF8" : "#4F46E5";
+            string neutralHex = DesignSystem.ThemeHex("ChartOutput", isDark);
             ApplyTintedPillBrush(_toolBadgeBorder, _toolBadgeDot, _toolBadgeText, neutralHex, isDark);
             _toolBadgeText.Text = "请求链路透视";
         }
@@ -1335,8 +1310,8 @@ namespace TokLens
                 totalTok);
 
             string[] hexes = isDark
-                ? new string[] { ColorFreshDark, ColorCrDark, ColorCwDark, ColorOutDark }
-                : new string[] { ColorFreshLight, ColorCrLight, ColorCwLight, ColorOutLight };
+                ? new string[] { DesignSystem.ThemeHex("ChartFresh", true), DesignSystem.ThemeHex("ChartCacheRead", true), DesignSystem.ThemeHex("ChartCacheWrite", true), DesignSystem.ThemeHex("ChartOutput", true) }
+                : new string[] { DesignSystem.ThemeHex("ChartFresh", false), DesignSystem.ThemeHex("ChartCacheRead", false), DesignSystem.ThemeHex("ChartCacheWrite", false), DesignSystem.ThemeHex("ChartOutput", false) };
 
             long[] counts = new long[] { fi, cr, cw, outTok };
             double[] unitRates = new double[]
@@ -1453,7 +1428,7 @@ namespace TokLens
 
             // 2. 响应总耗时 Duration
             int durMs = row.DurationMs;
-            bool validDuration = (durMs >= 150 && durMs <= 600000);
+            bool validDuration = UsageTiming.IsMeasured(row.TimingSource) && durMs > 0;
             if (validDuration)
             {
                 string dt = !string.IsNullOrWhiteSpace(row.DurationText) && row.DurationText != "—"
@@ -1465,18 +1440,18 @@ namespace TokLens
             else
             {
                 _durationMainText.Text = "—";
-                _durationSubText.Text = "无起止毫秒差";
+                _durationSubText.Text = "日志未提供可靠计时";
             }
 
-            // 3. 输出生成速率 TPS 及性能评级徽章
-            double tps = row.Tps > 0.0 ? row.Tps : FormatterUtil.ComputeTps(outTok, durMs);
+            // 3. 输出请求均速 TPS 及性能评级徽章
+            double tps = validDuration ? FormatterUtil.ComputeTps(outTok, durMs) : 0;
             if (double.IsNaN(tps) || double.IsInfinity(tps) || tps < 0.0)
                 tps = 0.0;
 
             if (tps > 0.0)
             {
-                _tpsMainText.Text = tps.ToString("F1", CultureInfo.InvariantCulture);
-                _tpsSubHintText.Text = "tok/s 实时吞吐";
+                _tpsMainText.Text = UsageTiming.FormatNumber(tps);
+                _tpsSubHintText.Text = "tok/s 请求均速（含等待）";
 
                 double gaugeRatio = Math.Min(1.0, tps / 120.0);
                 _tpsGaugeFillCol.Width = new GridLength(Math.Max(0.04, gaugeRatio), GridUnitType.Star);
@@ -1484,27 +1459,27 @@ namespace TokLens
 
                 if (tps >= 80.0)
                 {
-                    ApplyStatusBadgeVariant(_perfTierBadge, _perfTierText, _perfTierDot, "极速 ≥80 tok/s", "success");
+                    ApplyStatusBadgeVariant(_perfTierBadge, _perfTierText, _perfTierDot, "≥80 tok/s", "success");
                     _tpsGaugeFillBorder.SetResourceReference(Border.BackgroundProperty, "SemanticSuccess");
                 }
                 else if (tps >= 35.0)
                 {
-                    ApplyStatusBadgeVariant(_perfTierBadge, _perfTierText, _perfTierDot, "流畅 35–80 tok/s", "accent");
+                    ApplyStatusBadgeVariant(_perfTierBadge, _perfTierText, _perfTierDot, "35–80 tok/s", "accent");
                     _tpsGaugeFillBorder.SetResourceReference(Border.BackgroundProperty, "AccentPrimary");
                 }
                 else
                 {
-                    ApplyStatusBadgeVariant(_perfTierBadge, _perfTierText, _perfTierDot, "深度推理", "warning");
+                    ApplyStatusBadgeVariant(_perfTierBadge, _perfTierText, _perfTierDot, "<35 tok/s", "neutral");
                     _tpsGaugeFillBorder.SetResourceReference(Border.BackgroundProperty, "SemanticWarning");
                 }
             }
             else
             {
                 _tpsMainText.Text = "—";
-                _tpsSubHintText.Text = "单点日志快照";
+                _tpsSubHintText.Text = "无可用 TPS 数据";
                 _tpsGaugeFillCol.Width = new GridLength(0.0, GridUnitType.Star);
                 _tpsGaugeRestCol.Width = new GridLength(1.0, GridUnitType.Star);
-                ApplyStatusBadgeVariant(_perfTierBadge, _perfTierText, _perfTierDot, "静态快照", "neutral");
+                ApplyStatusBadgeVariant(_perfTierBadge, _perfTierText, _perfTierDot, "未计速", "neutral");
             }
         }
 
@@ -1639,13 +1614,14 @@ namespace TokLens
             ModelRate computedRate;
             _pricing.ComputeCost(model, fi, outTok, cr, cw, row.CostUsd, out actualUsd, out baselineUsd, out computedRate);
             if (rate == null)
-                rate = computedRate ?? new ModelRate(1.0, 4.0, 0.1, 0.0, "fallback");
+                rate = computedRate ?? new ModelRate(0, 0, 0, 0, "unpriced");
 
             double fx = SanitizeRate(_currentUsdToCny);
             double savedUsd = Math.Max(0.0, baselineUsd - actualUsd);
             double savedPct = (baselineUsd > 1e-9 && savedUsd > 1e-8) ? (savedUsd * 100.0 / baselineUsd) : 0.0;
-            double tps = row.Tps > 0.0 ? row.Tps : FormatterUtil.ComputeTps(outTok, row.DurationMs);
-            string tier = tps >= 80.0 ? "极速 (>=80 tok/s)" : (tps >= 35.0 ? "流畅 (35-80 tok/s)" : (tps > 0.0 ? "深度推理 (<35 tok/s)" : "静态快照"));
+            int duration = UsageTiming.IsMeasured(row.TimingSource) && row.DurationMs > 0 ? row.DurationMs : 0;
+            double tps = FormatterUtil.ComputeTps(outTok, duration);
+            string tier = tps >= 80.0 ? ">=80 tok/s" : (tps >= 35.0 ? "35-80 tok/s" : (tps > 0.0 ? "<35 tok/s" : "未计速"));
             string exactTime = FormatExactMillisecondTimestamp(row.TimestampMs, row.Date, row.TimeText);
 
             StringBuilder sb = new StringBuilder(640);
@@ -1679,9 +1655,11 @@ namespace TokLens
             sb.AppendFormat(CultureInfo.InvariantCulture, "    \"usd_to_cny_rate\": {0:F4}\r\n", fx);
             sb.AppendLine("  },");
             sb.AppendLine("  \"telemetry\": {");
-            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"duration_ms\": {0},\r\n", row.DurationMs);
-            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"duration_text\": \"{0}\",\r\n", JsonEscape(FormatterUtil.FormatDuration(row.DurationMs)));
-            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"tps\": {0:F2},\r\n", tps);
+            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"duration_ms\": {0},\r\n", duration);
+            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"duration_text\": \"{0}\",\r\n", JsonEscape(FormatterUtil.FormatDuration(duration)));
+            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"timing_source\": \"{0}\",\r\n", JsonEscape(row.TimingSource??""));
+            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"tps_kind\": \"{0}\",\r\n", tps>0?"request_average":"unavailable");
+            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"tps\": {0:R},\r\n", tps);
             sb.AppendFormat(CultureInfo.InvariantCulture, "    \"performance_tier\": \"{0}\"\r\n", JsonEscape(tier));
             sb.AppendLine("  }");
             sb.Append("}");

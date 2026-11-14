@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -49,7 +49,7 @@ namespace TokLens
     // Persistent SQLite Cursor & Instant-Snapshot Store (%APPDATA%\TokLens\toklens.db)
     public static class LocalUsageStore
     {
-        private const string StoreSchema = "toklens.store.v2.7";
+        private const string StoreSchema = "toklens.store.v2.10";
         private static readonly object StoreLock = new object();
         private static Dictionary<string, FileCursorEntry> _memCursors = null;
 
@@ -57,8 +57,7 @@ namespace TokLens
         {
             get
             {
-                string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-                return Path.Combine(appData, "TokLens", "toklens.db");
+                return Path.Combine(SyncService.AppConfigDir, "toklens.db");
             }
         }
 
@@ -78,9 +77,9 @@ namespace TokLens
         {
             if (db == null || !db.IsHealthy()) return false;
 
-            if (!db.Exec("CREATE TABLE IF NOT EXISTS kv_meta (k TEXT PRIMARY KEY, v TEXT);")) return false;
-            if (!db.Exec("CREATE TABLE IF NOT EXISTS file_cursors (file_key TEXT PRIMARY KEY, file_size INTEGER NOT NULL, mtime_ticks INTEGER NOT NULL, byte_offset INTEGER NOT NULL, extra_meta TEXT, events_data TEXT);")) return false;
-            if (!db.Exec("CREATE TABLE IF NOT EXISTS daily_archive (home_key TEXT NOT NULL, rec_date TEXT NOT NULL, tool TEXT NOT NULL, model TEXT NOT NULL, turns INTEGER NOT NULL, fi INTEGER NOT NULL, out_tok INTEGER NOT NULL, cr INTEGER NOT NULL, cw INTEGER NOT NULL, cost_usd REAL NOT NULL, base_usd REAL NOT NULL, rate_label TEXT, PRIMARY KEY(home_key, rec_date, tool, model));")) return false;
+            if (!db.ExecRequired("CREATE TABLE IF NOT EXISTS kv_meta (k TEXT PRIMARY KEY, v TEXT);")) return false;
+            if (!db.ExecRequired("CREATE TABLE IF NOT EXISTS file_cursors (file_key TEXT PRIMARY KEY, file_size INTEGER NOT NULL, mtime_ticks INTEGER NOT NULL, byte_offset INTEGER NOT NULL, extra_meta TEXT, events_data TEXT);")) return false;
+            if (!db.ExecRequired("CREATE TABLE IF NOT EXISTS daily_archive (home_key TEXT NOT NULL, rec_date TEXT NOT NULL, tool TEXT NOT NULL, model TEXT NOT NULL, turns INTEGER NOT NULL, fi INTEGER NOT NULL, out_tok INTEGER NOT NULL, cr INTEGER NOT NULL, cw INTEGER NOT NULL, cost_usd REAL NOT NULL, base_usd REAL NOT NULL, rate_label TEXT, PRIMARY KEY(home_key, rec_date, tool, model));")) return false;
 
             string curVer = "";
             db.Query("SELECT v FROM kv_meta WHERE k = 'schema' LIMIT 1", delegate(WinSqlite.SqliteRow r)
@@ -90,6 +89,12 @@ namespace TokLens
 
             if (!string.Equals(curVer, StoreSchema, StringComparison.Ordinal))
             {
+                if (!string.IsNullOrEmpty(curVer))
+                {
+                    string backupPath = DbFilePath + ".before-v2.10." + DateTime.UtcNow.ToString("yyyyMMddHHmmssfff", CultureInfo.InvariantCulture) + ".db";
+                    if (!db.BackupTo(backupPath))
+                        throw new IOException("账本升级前备份失败，已停止迁移：" + backupPath);
+                }
                 // Preserve daily_archive permanently and preserve cursors of already-deleted files;
                 // reset cursors of existing live files so updated parsers re-scan cleanly.
                 List<string> liveKeys = new List<string>();
@@ -108,82 +113,42 @@ namespace TokLens
                 }
                 catch { }
 
-                db.Exec("BEGIN IMMEDIATE;");
+                db.ExecRequired("BEGIN IMMEDIATE;");
                 try
                 {
                     if (liveKeys.Count > 0)
                     {
                         for (int i = 0; i < liveKeys.Count; i++)
-                            db.Exec("DELETE FROM file_cursors WHERE file_key = " + WinSqlite.SqlQuote(liveKeys[i]) + ";");
+                            db.ExecRequired("DELETE FROM file_cursors WHERE file_key = " + WinSqlite.SqlQuote(liveKeys[i]) + ";");
                     }
-                    else
-                    {
-                        db.Exec("DELETE FROM file_cursors;");
-                    }
-                    db.Exec("DELETE FROM daily_archive WHERE tool IN ('Google Antigravity', 'OpenAI Codex');");
-                    db.Exec("DELETE FROM file_cursors WHERE file_key LIKE '%state_5.sqlite';");
-                    db.Exec("DELETE FROM kv_meta;");
-                    db.Exec("INSERT OR REPLACE INTO kv_meta (k, v) VALUES ('schema', " + WinSqlite.SqlQuote(StoreSchema) + ");");
-                    db.Exec("COMMIT;");
+                    // Missing source files are not a reason to discard their
+                    // request cursors or archived history. Reconcile only the
+                    // partitions that a complete new scan can actually prove.
+                    db.ExecRequired("DELETE FROM file_cursors WHERE file_key LIKE '%state_5.sqlite';");
+                    db.ExecRequired("DELETE FROM kv_meta;");
+                    db.ExecRequired("INSERT OR REPLACE INTO kv_meta (k, v) VALUES ('schema', " + WinSqlite.SqlQuote(StoreSchema) + ");");
+                    db.ExecRequired("COMMIT;");
                 }
                 catch
                 {
-                    db.Exec("ROLLBACK;");
-                    db.Exec("DELETE FROM file_cursors;");
-                    db.Exec("DELETE FROM daily_archive WHERE tool IN ('Google Antigravity', 'OpenAI Codex');");
-                    db.Exec("DELETE FROM kv_meta;");
-                    db.Exec("INSERT OR REPLACE INTO kv_meta (k, v) VALUES ('schema', " + WinSqlite.SqlQuote(StoreSchema) + ");");
+                    db.ExecRequired("ROLLBACK;");
+                    throw;
                 }
             }
             return true;
         }
 
-        private static void BackupCorruptDbFiles(string dbPath)
-        {
-            try
-            {
-                if (File.Exists(dbPath))
-                {
-                    string bakPath = dbPath + ".corrupt." + DateTime.Now.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
-                    try
-                    {
-                        File.Move(dbPath, bakPath);
-                    }
-                    catch
-                    {
-                        try { File.Delete(dbPath); } catch { }
-                    }
-                }
-            }
-            catch { }
-            try { if (File.Exists(dbPath + "-wal")) File.Delete(dbPath + "-wal"); } catch { }
-            try { if (File.Exists(dbPath + "-shm")) File.Delete(dbPath + "-shm"); } catch { }
-        }
-
         private static WinSqlite OpenInitializedDb()
         {
-            string dbPath = DbFilePath;
-            WinSqlite db = WinSqlite.OpenReadWrite(dbPath);
-            if (db != null && InitializeDbTablesAndSchema(db))
-                return db;
-
-            if (db != null)
+            WinSqlite db = WinSqlite.OpenReadWrite(DbFilePath);
+            if (db == null) throw new IOException("用量账本暂时无法打开，原有文件保持不变。");
+            try
             {
-                db.Dispose();
-                db = null;
-            }
-
-            // Self-heal corrupted local store by backing up damaged DB + WAL/SHM and creating a fresh database
-            BackupCorruptDbFiles(dbPath);
-            _memCursors = null;
-
-            db = WinSqlite.OpenReadWrite(dbPath);
-            if (db != null && InitializeDbTablesAndSchema(db))
+                if (!db.IsHealthy() || !InitializeDbTablesAndSchema(db))
+                    throw new IOException("用量账本暂不可读，已停止覆盖历史。可从时光机备份恢复。");
                 return db;
-
-            if (db != null)
-                db.Dispose();
-            return null;
+            }
+            catch { db.Dispose(); throw; }
         }
 
         public static ScanResult TryLoadInstantSnapshot(string homeDir)
@@ -236,7 +201,7 @@ namespace TokLens
                     using (WinSqlite db = OpenInitializedDb())
                     {
                         if (db == null) return map;
-                        db.Query("SELECT file_key, file_size, mtime_ticks, byte_offset, extra_meta, events_data FROM file_cursors", delegate(WinSqlite.SqliteRow r)
+                        if (!db.Query("SELECT file_key, file_size, mtime_ticks, byte_offset, extra_meta, events_data FROM file_cursors", delegate(WinSqlite.SqliteRow r)
                         {
                             FileCursorEntry e = new FileCursorEntry();
                             e.FileKey = r.GetString(0);
@@ -247,10 +212,10 @@ namespace TokLens
                             e.Events = DeserializeEvents(r.GetString(5));
                             if (!string.IsNullOrEmpty(e.FileKey))
                                 map[e.FileKey] = e;
-                        });
+                        })) throw new IOException("无法读取请求游标，已停止扫描以保护历史账本。");
                     }
                 }
-                catch { }
+                catch { _memCursors = null; throw; }
                 _memCursors = map;
                 return CloneCursorMap(map);
             }
@@ -258,27 +223,17 @@ namespace TokLens
 
         internal static void SaveScanBatch(string homeDir, List<FileCursorEntry> dirtyCursors, ScanResult snapshot)
         {
-            if (dirtyCursors == null || dirtyCursors.Count == 0)
-                return;
+            if (dirtyCursors == null) dirtyCursors = new List<FileCursorEntry>();
+            if (dirtyCursors.Count == 0 && snapshot == null) return;
 
             lock (StoreLock)
             {
-                if (_memCursors != null)
-                {
-                    for (int i = 0; i < dirtyCursors.Count; i++)
-                    {
-                        FileCursorEntry dc = dirtyCursors[i];
-                        if (dc != null && !string.IsNullOrEmpty(dc.FileKey))
-                            _memCursors[dc.FileKey] = dc.Clone();
-                    }
-                }
-
                 try
                 {
                     using (WinSqlite db = OpenInitializedDb())
                     {
                         if (db == null) return;
-                        db.Exec("BEGIN IMMEDIATE;");
+                        db.ExecRequired("BEGIN IMMEDIATE;");
                         try
                         {
                             for (int i = 0; i < dirtyCursors.Count; i++)
@@ -294,25 +249,31 @@ namespace TokLens
                                     c.ByteOffset,
                                     WinSqlite.SqlQuote(c.ExtraMeta ?? ""),
                                     WinSqlite.SqlQuote(evData));
-                                db.Exec(sql);
+                                db.ExecRequired(sql);
                             }
 
                             if (snapshot != null && !string.IsNullOrWhiteSpace(homeDir))
                             {
                                 string snapKey = "snap:" + homeDir.Trim().ToLowerInvariant();
                                 string snapVal = SerializeSnapshotResult(snapshot);
-                                db.Exec("INSERT OR REPLACE INTO kv_meta (k, v) VALUES (" + WinSqlite.SqlQuote(snapKey) + ", " + WinSqlite.SqlQuote(snapVal) + ");");
+                                db.ExecRequired("INSERT OR REPLACE INTO kv_meta (k, v) VALUES (" + WinSqlite.SqlQuote(snapKey) + ", " + WinSqlite.SqlQuote(snapVal) + ");");
                             }
 
-                            db.Exec("COMMIT;");
+                            db.ExecRequired("COMMIT;");
                         }
                         catch
                         {
                             db.Exec("ROLLBACK;");
+                            throw;
                         }
                     }
                 }
-                catch { }
+                catch { _memCursors = null; throw; }
+                if (_memCursors != null)
+                {
+                    foreach (FileCursorEntry dc in dirtyCursors)
+                        if (dc != null && !string.IsNullOrEmpty(dc.FileKey)) _memCursors[dc.FileKey] = dc.Clone();
+                }
             }
         }
 
@@ -343,7 +304,9 @@ namespace TokLens
                   .Append(EscapeField(e.DedupKey)).Append('\t')
                   .Append(e.TimestampMs.ToString(CultureInfo.InvariantCulture)).Append('\t')
                   .Append(e.DurationMs.ToString(CultureInfo.InvariantCulture)).Append('\t')
-                  .Append(e.CacheWrite1h.ToString(CultureInfo.InvariantCulture));
+                  .Append(e.CacheWrite1h.ToString(CultureInfo.InvariantCulture)).Append('\t')
+                  .Append(EscapeField(e.SessionId)).Append('\t')
+                  .Append(EscapeField(e.TimingSource));
             }
             return sb.ToString();
         }
@@ -378,7 +341,10 @@ namespace TokLens
                         if (p.Length >= 11) long.TryParse(p[10], NumberStyles.Integer, CultureInfo.InvariantCulture, out tsMs);
                         if (p.Length >= 12) int.TryParse(p[11], NumberStyles.Integer, CultureInfo.InvariantCulture, out durMs);
                         if (p.Length >= 13) long.TryParse(p[12], NumberStyles.Integer, CultureInfo.InvariantCulture, out cw1h);
-                        list.Add(new UsageEvent(p[0], p[1], p[2], fi, outTok, cr, cw, cost, turns, dkey, tsMs, durMs, cw1h));
+                        UsageEvent ev = new UsageEvent(p[0], p[1], p[2], fi, outTok, cr, cw, cost, turns, dkey, tsMs, durMs, cw1h);
+                        ev.SessionId = p.Length >= 14 ? p[13] : "";
+                        ev.TimingSource = p.Length >= 15 ? p[14] : "";
+                        list.Add(ev);
                     }
                 }
                 pos = end + 1;
@@ -388,293 +354,59 @@ namespace TokLens
 
         public static void MergeAndSaveDailyArchive(string homeDir, List<RecordBucket> liveBuckets)
         {
-            if (string.IsNullOrWhiteSpace(homeDir) || liveBuckets == null)
-                return;
+            MergeAndSaveDailyArchive(homeDir, liveBuckets, null);
+        }
 
+        internal static void MergeAndSaveDailyArchive(string homeDir, List<RecordBucket> liveBuckets, ICollection<string> reconciledPartitions, ICollection<string> failedTools = null)
+        {
+            if (string.IsNullOrWhiteSpace(homeDir) || liveBuckets == null) return;
             string homeKey = homeDir.Trim().ToLowerInvariant();
-
             lock (StoreLock)
             {
-                try
+                using (WinSqlite db = OpenInitializedDb())
                 {
-                    using (WinSqlite db = OpenInitializedDb())
+                    if (db == null) throw new IOException("用量账本不可用，本次未覆盖历史。");
+                    db.ExecRequired("BEGIN IMMEDIATE;");
+                    try
                     {
-                        if (db == null) return;
-
-                        Dictionary<string, RecordBucket> archivedMap = new Dictionary<string, RecordBucket>(StringComparer.Ordinal);
-                        string selSql = "SELECT rec_date, tool, model, turns, fi, out_tok, cr, cw, cost_usd, base_usd, rate_label FROM daily_archive WHERE home_key = " + WinSqlite.SqlQuote(homeKey);
-                        db.Query(selSql, delegate(WinSqlite.SqliteRow r)
+                        Dictionary<string, RecordBucket> archived = new Dictionary<string, RecordBucket>(StringComparer.Ordinal);
+                        if (!db.Query("SELECT rec_date, tool, model, turns, fi, out_tok, cr, cw, cost_usd, base_usd, rate_label FROM daily_archive WHERE home_key=" + WinSqlite.SqlQuote(homeKey), delegate(WinSqlite.SqliteRow row)
                         {
-                            RecordBucket ab = new RecordBucket();
-                            ab.Date = r.GetString(0);
-                            ab.Tool = r.GetString(1);
-                            ab.Model = r.GetString(2);
-                            ab.Turns = (int)r.GetInt64(3);
-                            ab.FreshInput = r.GetInt64(4);
-                            ab.Output = r.GetInt64(5);
-                            ab.CacheRead = r.GetInt64(6);
-                            ab.CacheWrite = r.GetInt64(7);
-                            ab.CostUsd = r.GetDouble(8);
-                            ab.BaselineUsd = r.GetDouble(9);
-                            ab.RateLabel = r.GetString(10);
-                            string ak = ab.Date + "||" + ab.Tool + "||" + ab.Model;
-                            archivedMap[ak] = ab;
-                        });
-
-                        HashSet<string> seenLiveKeys = new HashSet<string>(StringComparer.Ordinal);
-                        List<RecordBucket> toUpsert = new List<RecordBucket>();
-                        List<RecordBucket> toDelete = new List<RecordBucket>();
-
-                        // 检测同一 (Date, Tool) 下是否发生了“模型重分类”（总轮次与总 Token >= 归档 98%，但旧错分类模型缩水或被替代）
-                        Dictionary<string, int> liveDtTurns = new Dictionary<string, int>(StringComparer.Ordinal);
-                        Dictionary<string, long> liveDtTokens = new Dictionary<string, long>(StringComparer.Ordinal);
-                        Dictionary<string, RecordBucket> liveByKey = new Dictionary<string, RecordBucket>(StringComparer.Ordinal);
-                        for (int i = 0; i < liveBuckets.Count; i++)
+                            RecordBucket r = new RecordBucket { Date=row.GetString(0), Tool=row.GetString(1), Model=row.GetString(2), Turns=(int)row.GetInt64(3), FreshInput=row.GetInt64(4), Output=row.GetInt64(5), CacheRead=row.GetInt64(6), CacheWrite=row.GetInt64(7), CostUsd=row.GetDouble(8), BaselineUsd=row.GetDouble(9), RateLabel=row.GetString(10) };
+                            archived[UsageAccounting.Partition(r.Date,r.Tool)+"||"+r.Model] = r;
+                        })) throw new IOException("无法读取历史账本，本次未覆盖历史。");
+                        Dictionary<string, RecordBucket> merged = new Dictionary<string, RecordBucket>(StringComparer.Ordinal);
+                        HashSet<string> archivedPartitions = new HashSet<string>(StringComparer.Ordinal);
+                        foreach (KeyValuePair<string, RecordBucket> kv in archived)
                         {
-                            RecordBucket lb = liveBuckets[i];
-                            string lk = (lb.Date ?? "") + "||" + (lb.Tool ?? "") + "||" + (lb.Model ?? "");
-                            liveByKey[lk] = lb;
-                            string dtTool = (lb.Date ?? "") + "||" + (lb.Tool ?? "");
-                            int curT;
-                            liveDtTurns.TryGetValue(dtTool, out curT);
-                            liveDtTurns[dtTool] = curT + lb.Turns;
-                            long curTok;
-                            liveDtTokens.TryGetValue(dtTool, out curTok);
-                            liveDtTokens[dtTool] = curTok + lb.FreshInput + lb.Output + lb.CacheRead + lb.CacheWrite;
+                            archivedPartitions.Add(UsageAccounting.Partition(kv.Value.Date, kv.Value.Tool));
+                            if (reconciledPartitions == null || !reconciledPartitions.Contains(UsageAccounting.Partition(kv.Value.Date,kv.Value.Tool))) merged[kv.Key] = kv.Value;
                         }
-
-                        Dictionary<string, int> archDtTurns = new Dictionary<string, int>(StringComparer.Ordinal);
-                        Dictionary<string, long> archDtTokens = new Dictionary<string, long>(StringComparer.Ordinal);
-                        foreach (KeyValuePair<string, RecordBucket> kv in archivedMap)
+                        foreach (RecordBucket live in liveBuckets)
                         {
-                            RecordBucket ab = kv.Value;
-                            string dtTool = (ab.Date ?? "") + "||" + (ab.Tool ?? "");
-                            int curT;
-                            archDtTurns.TryGetValue(dtTool, out curT);
-                            archDtTurns[dtTool] = curT + ab.Turns;
-                            long curTok;
-                            archDtTokens.TryGetValue(dtTool, out curTok);
-                            archDtTokens[dtTool] = curTok + ab.FreshInput + ab.Output + ab.CacheRead + ab.CacheWrite;
+                            if (failedTools != null && failedTools.Contains(live.Tool) && archivedPartitions.Contains(UsageAccounting.Partition(live.Date, live.Tool))) continue;
+                            string key = UsageAccounting.Partition(live.Date,live.Tool)+"||"+live.Model;
+                            RecordBucket old;
+                            merged.TryGetValue(key,out old);
+                            merged[key] = UsageAccounting.PickWholeBucket(live,old).Clone();
                         }
-
-                        HashSet<string> reclassifiedDtTools = new HashSet<string>(StringComparer.Ordinal);
-                        foreach (KeyValuePair<string, int> kv in archDtTurns)
+                        // A source-proved partition can shrink or change model names.
+                        // Missing source evidence never authorizes deleting its history.
+                        foreach (KeyValuePair<string, RecordBucket> kv in archived)
+                            if (!merged.ContainsKey(kv.Key)) db.ExecRequired("DELETE FROM daily_archive WHERE home_key="+WinSqlite.SqlQuote(homeKey)+" AND rec_date="+WinSqlite.SqlQuote(kv.Value.Date)+" AND tool="+WinSqlite.SqlQuote(kv.Value.Tool)+" AND model="+WinSqlite.SqlQuote(kv.Value.Model));
+                        foreach (RecordBucket r in merged.Values)
                         {
-                            string dtTool = kv.Key;
-                            int hTurns = kv.Value;
-                            if (hTurns <= 0) continue;
-                            int lTurns;
-                            liveDtTurns.TryGetValue(dtTool, out lTurns);
-                            long hTok;
-                            archDtTokens.TryGetValue(dtTool, out hTok);
-                            long lTok;
-                            liveDtTokens.TryGetValue(dtTool, out lTok);
-                            bool isAgyWithLegacyModels = false;
-                            if (lTurns > 0 && dtTool.EndsWith("||Google Antigravity", StringComparison.Ordinal))
-                            {
-                                foreach (KeyValuePair<string, RecordBucket> akv in archivedMap)
-                                {
-                                    RecordBucket ab = akv.Value;
-                                    if (((ab.Date ?? "") + "||" + (ab.Tool ?? "")) != dtTool) continue;
-                                    if (string.Equals(ab.Model, "gemini-2.5-pro", StringComparison.OrdinalIgnoreCase) ||
-                                        string.Equals(ab.Model, "orchestrator", StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        RecordBucket lbMatch;
-                                        if (!liveByKey.TryGetValue(akv.Key, out lbMatch) || lbMatch.Turns < ab.Turns)
-                                        {
-                                            isAgyWithLegacyModels = true;
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            if (isAgyWithLegacyModels)
-                            {
-                                reclassifiedDtTools.Add(dtTool);
-                            }
-                            else if (lTurns >= hTurns && (double)lTok >= (double)hTok * 0.98)
-                            {
-                                bool hasExcessArchModel = false;
-                                foreach (KeyValuePair<string, RecordBucket> akv in archivedMap)
-                                {
-                                    RecordBucket ab = akv.Value;
-                                    if (((ab.Date ?? "") + "||" + (ab.Tool ?? "")) != dtTool) continue;
-                                    RecordBucket lbMatch;
-                                    if (!liveByKey.TryGetValue(akv.Key, out lbMatch) ||
-                                        ab.Turns > lbMatch.Turns ||
-                                        (ab.FreshInput + ab.Output + ab.CacheRead + ab.CacheWrite) > (lbMatch.FreshInput + lbMatch.Output + lbMatch.CacheRead + lbMatch.CacheWrite))
-                                    {
-                                        hasExcessArchModel = true;
-                                        break;
-                                    }
-                                }
-                                if (hasExcessArchModel)
-                                    reclassifiedDtTools.Add(dtTool);
-                            }
+                            string sql = string.Format(CultureInfo.InvariantCulture,
+                                "INSERT OR REPLACE INTO daily_archive(home_key,rec_date,tool,model,turns,fi,out_tok,cr,cw,cost_usd,base_usd,rate_label) VALUES({0},{1},{2},{3},{4},{5},{6},{7},{8},{9},{10},{11});",
+                                WinSqlite.SqlQuote(homeKey),WinSqlite.SqlQuote(r.Date),WinSqlite.SqlQuote(r.Tool),WinSqlite.SqlQuote(r.Model),r.Turns,r.FreshInput,r.Output,r.CacheRead,r.CacheWrite,r.CostUsd.ToString("R",CultureInfo.InvariantCulture),r.BaselineUsd.ToString("R",CultureInfo.InvariantCulture),WinSqlite.SqlQuote(r.RateLabel));
+                            db.ExecRequired(sql);
                         }
-
-                        for (int i = 0; i < liveBuckets.Count; i++)
-                        {
-                            RecordBucket lb = liveBuckets[i];
-                            string lk = (lb.Date ?? "") + "||" + (lb.Tool ?? "") + "||" + (lb.Model ?? "");
-                            string dtTool = (lb.Date ?? "") + "||" + (lb.Tool ?? "");
-                            seenLiveKeys.Add(lk);
-
-                            RecordBucket ab;
-                            if (!archivedMap.TryGetValue(lk, out ab))
-                            {
-                                toUpsert.Add(lb);
-                            }
-                            else if (reclassifiedDtTools.Contains(dtTool))
-                            {
-                                // 同一 (Date, Tool) 已确认发生模型重分类：以活跃拆分结果为准覆盖归档，禁止旧桶叠加导致翻倍
-                                bool changedRec = lb.Turns != ab.Turns ||
-                                                  lb.FreshInput != ab.FreshInput ||
-                                                  lb.Output != ab.Output ||
-                                                  lb.CacheRead != ab.CacheRead ||
-                                                  lb.CacheWrite != ab.CacheWrite ||
-                                                  Math.Abs(lb.CostUsd - ab.CostUsd) > 1e-9 ||
-                                                  Math.Abs(lb.BaselineUsd - ab.BaselineUsd) > 1e-9 ||
-                                                  !string.Equals(lb.RateLabel ?? "", ab.RateLabel ?? "", StringComparison.Ordinal);
-                                if (changedRec)
-                                    toUpsert.Add(lb);
-                            }
-                            else
-                            {
-                                bool liveCoversArchive =
-                                    lb.Turns >= ab.Turns &&
-                                    lb.FreshInput >= ab.FreshInput &&
-                                    lb.Output >= ab.Output &&
-                                    lb.CacheRead >= ab.CacheRead &&
-                                    lb.CacheWrite >= ab.CacheWrite;
-
-                                int mergedTurns = Math.Max(lb.Turns, ab.Turns);
-                                long mergedFi = Math.Max(lb.FreshInput, ab.FreshInput);
-                                long mergedOut = Math.Max(lb.Output, ab.Output);
-                                long mergedCr = Math.Max(lb.CacheRead, ab.CacheRead);
-                                long mergedCw = Math.Max(lb.CacheWrite, ab.CacheWrite);
-
-                                double mergedCost;
-                                double mergedBase;
-                                if (liveCoversArchive)
-                                {
-                                    // Live scan covers all archived tokens (no deleted logs): adopt latest recalculated cost/rate
-                                    mergedCost = lb.CostUsd;
-                                    mergedBase = lb.BaselineUsd;
-                                }
-                                else
-                                {
-                                    // Logs were pruned/deleted: retain historical high-water mark cost
-                                    mergedCost = Math.Max(lb.CostUsd, ab.CostUsd);
-                                    mergedBase = Math.Max(lb.BaselineUsd, ab.BaselineUsd);
-                                }
-
-                                string mergedRate = !string.IsNullOrEmpty(lb.RateLabel) ? lb.RateLabel : (ab.RateLabel ?? "");
-
-                                bool changed = mergedTurns != ab.Turns ||
-                                               mergedFi != ab.FreshInput ||
-                                               mergedOut != ab.Output ||
-                                               mergedCr != ab.CacheRead ||
-                                               mergedCw != ab.CacheWrite ||
-                                               Math.Abs(mergedCost - ab.CostUsd) > 1e-9 ||
-                                               Math.Abs(mergedBase - ab.BaselineUsd) > 1e-9 ||
-                                               !string.Equals(mergedRate, ab.RateLabel ?? "", StringComparison.Ordinal);
-
-                                lb.Turns = mergedTurns;
-                                lb.FreshInput = mergedFi;
-                                lb.Output = mergedOut;
-                                lb.CacheRead = mergedCr;
-                                lb.CacheWrite = mergedCw;
-                                lb.CostUsd = mergedCost;
-                                lb.BaselineUsd = mergedBase;
-                                lb.RateLabel = mergedRate;
-
-                                if (changed)
-                                    toUpsert.Add(lb);
-                            }
-                        }
-
-                        bool addedMissing = false;
-                        foreach (KeyValuePair<string, RecordBucket> kv in archivedMap)
-                        {
-                            if (!seenLiveKeys.Contains(kv.Key))
-                            {
-                                RecordBucket ab = kv.Value;
-                                string dtTool = (ab.Date ?? "") + "||" + (ab.Tool ?? "");
-                                if (reclassifiedDtTools.Contains(dtTool))
-                                {
-                                    // 被模型重分类淘汰的历史错误模型行：从 liveBuckets 剔除并自 daily_archive 清理
-                                    toDelete.Add(ab);
-                                }
-                                else
-                                {
-                                    liveBuckets.Add(ab);
-                                    addedMissing = true;
-                                }
-                            }
-                        }
-
-                        if (addedMissing)
-                        {
-                            liveBuckets.Sort(delegate(RecordBucket x, RecordBucket y)
-                            {
-                                int c = string.CompareOrdinal(x.Date, y.Date);
-                                if (c != 0) return c;
-                                c = string.CompareOrdinal(x.Tool, y.Tool);
-                                if (c != 0) return c;
-                                return string.CompareOrdinal(x.Model, y.Model);
-                            });
-                        }
-
-                        if (toUpsert.Count > 0 || toDelete.Count > 0)
-                        {
-                            db.Exec("BEGIN IMMEDIATE;");
-                            try
-                            {
-                                for (int i = 0; i < toDelete.Count; i++)
-                                {
-                                    RecordBucket dbkt = toDelete[i];
-                                    string delSql = string.Format(
-                                        CultureInfo.InvariantCulture,
-                                        "DELETE FROM daily_archive WHERE home_key = {0} AND rec_date = {1} AND tool = {2} AND model = {3};",
-                                        WinSqlite.SqlQuote(homeKey),
-                                        WinSqlite.SqlQuote(dbkt.Date ?? ""),
-                                        WinSqlite.SqlQuote(dbkt.Tool ?? ""),
-                                        WinSqlite.SqlQuote(dbkt.Model ?? ""));
-                                    db.Exec(delSql);
-                                }
-                                for (int i = 0; i < toUpsert.Count; i++)
-                                {
-                                    RecordBucket b = toUpsert[i];
-                                    double safeCost = (double.IsNaN(b.CostUsd) || double.IsInfinity(b.CostUsd)) ? 0.0 : b.CostUsd;
-                                    double safeBase = (double.IsNaN(b.BaselineUsd) || double.IsInfinity(b.BaselineUsd)) ? 0.0 : b.BaselineUsd;
-                                    string upSql = string.Format(
-                                        CultureInfo.InvariantCulture,
-                                        "INSERT OR REPLACE INTO daily_archive (home_key, rec_date, tool, model, turns, fi, out_tok, cr, cw, cost_usd, base_usd, rate_label) VALUES ({0}, {1}, {2}, {3}, {4}, {5}, {6}, {7}, {8}, {9}, {10}, {11});",
-                                        WinSqlite.SqlQuote(homeKey),
-                                        WinSqlite.SqlQuote(b.Date ?? ""),
-                                        WinSqlite.SqlQuote(b.Tool ?? ""),
-                                        WinSqlite.SqlQuote(b.Model ?? ""),
-                                        b.Turns,
-                                        b.FreshInput,
-                                        b.Output,
-                                        b.CacheRead,
-                                        b.CacheWrite,
-                                        safeCost.ToString("R", CultureInfo.InvariantCulture),
-                                        safeBase.ToString("R", CultureInfo.InvariantCulture),
-                                        WinSqlite.SqlQuote(b.RateLabel ?? ""));
-                                    db.Exec(upSql);
-                                }
-                                db.Exec("COMMIT;");
-                            }
-                            catch
-                            {
-                                db.Exec("ROLLBACK;");
-                            }
-                        }
+                        db.ExecRequired("COMMIT;");
+                        liveBuckets.Clear(); liveBuckets.AddRange(merged.Values);
+                        liveBuckets.Sort(delegate(RecordBucket x,RecordBucket y) { int c=string.CompareOrdinal(x.Date,y.Date); if(c!=0)return c; c=string.CompareOrdinal(x.Tool,y.Tool); return c!=0?c:string.CompareOrdinal(x.Model,y.Model); });
                     }
+                    catch { db.Exec("ROLLBACK;"); throw; }
                 }
-                catch { }
             }
         }
 
@@ -687,6 +419,9 @@ namespace TokLens
               .Append(res.PricingModelCount.ToString(CultureInfo.InvariantCulture)).Append('\t')
               .Append(res.TotalFilesTracked.ToString(CultureInfo.InvariantCulture)).Append('\t')
               .Append(res.ArchivedFilesCount.ToString(CultureInfo.InvariantCulture));
+            sb.Append("\nA\t").Append(res.AccountingUpdatedMs.ToString(CultureInfo.InvariantCulture));
+            foreach (KeyValuePair<string, long> proof in res.ReconciledPartitions)
+                sb.Append("\nP\t").Append(EscapeField(proof.Key)).Append('\t').Append(proof.Value.ToString(CultureInfo.InvariantCulture));
 
             if (res.Records != null)
             {
@@ -725,7 +460,8 @@ namespace TokLens
                       .Append(rq.CacheWrite.ToString(CultureInfo.InvariantCulture)).Append('\t')
                       .Append(rq.Output.ToString(CultureInfo.InvariantCulture)).Append('\t')
                       .Append(rq.DurationMs.ToString(CultureInfo.InvariantCulture)).Append('\t')
-                      .Append(rq.CostUsd.ToString("R", CultureInfo.InvariantCulture));
+                      .Append(rq.CostUsd.ToString("R", CultureInfo.InvariantCulture)).Append('\t')
+                      .Append(EscapeField(rq.TimingSource));
                 }
             }
             return sb.ToString();
@@ -763,7 +499,14 @@ namespace TokLens
                 {
                     if (string.IsNullOrEmpty(lines[i])) continue;
                     string[] p = lines[i].Split('\t');
-                    if (p.Length >= 12 && p[0] == "B")
+                    if (p.Length >= 2 && p[0] == "A")
+                        long.TryParse(p[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out res.AccountingUpdatedMs);
+                    else if (p.Length >= 3 && p[0] == "P")
+                    {
+                        long timestamp;
+                        if (long.TryParse(p[2], NumberStyles.Integer, CultureInfo.InvariantCulture, out timestamp) && timestamp > 0) res.ReconciledPartitions[p[1]] = timestamp;
+                    }
+                    else if (p.Length >= 12 && p[0] == "B")
                     {
                         RecordBucket b = new RecordBucket();
                         b.Date = p[1];
@@ -793,6 +536,8 @@ namespace TokLens
                         long.TryParse(p[9], NumberStyles.Integer, CultureInfo.InvariantCulture, out rq.Output);
                         int.TryParse(p[10], NumberStyles.Integer, CultureInfo.InvariantCulture, out rq.DurationMs);
                         double.TryParse(p[11], NumberStyles.Any, CultureInfo.InvariantCulture, out rq.CostUsd);
+                        rq.TimingSource = p.Length >= 13 ? p[12] : "";
+                        if (!UsageTiming.IsMeasured(rq.TimingSource)) rq.DurationMs = 0;
                         res.RecentRequests.Add(rq);
                     }
                 }
@@ -1367,6 +1112,8 @@ namespace TokLens
         private readonly HashSet<string> _mobileClawSeenKeys = new HashSet<string>(StringComparer.Ordinal);
         private readonly List<UsageEvent> _codexArchiveCandidates = new List<UsageEvent>();
         private readonly List<string> _warnings = new List<string>();
+        private readonly HashSet<string> _failedExactTools = new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<string> _unverifiedPartitions = new HashSet<string>(StringComparer.Ordinal);
 
         private Dictionary<string, FileCursorEntry> _cursors;
         private readonly List<FileCursorEntry> _dirtyCursors = new List<FileCursorEntry>();
@@ -1378,7 +1125,7 @@ namespace TokLens
         private static readonly Regex AgySenderRegex = new Regex(@"\bsender=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         private static readonly byte[][] ClaudeKeywords = new byte[][] { Utf8LineScanner.KwInputTokens, Utf8LineScanner.KwEntrypoint, Utf8LineScanner.KwApiRequest, Utf8LineScanner.KwTypeUser };
-        private static readonly byte[][] CodexKeywords = new byte[][] { Utf8LineScanner.KwTurnContext, Utf8LineScanner.KwTokenCount, Utf8LineScanner.KwSessionMeta, Utf8LineScanner.KwCallOutput, Utf8LineScanner.KwUserMessage, Utf8LineScanner.KwTaskStarted };
+        private static readonly byte[][] CodexKeywords = new byte[][] { Utf8LineScanner.KwTurnContext, Utf8LineScanner.KwTokenCount, Utf8LineScanner.KwSessionMeta, Utf8LineScanner.KwCallOutput, Utf8LineScanner.KwUserMessage, Utf8LineScanner.KwTaskStarted, Encoding.ASCII.GetBytes("token_usage_record"), Encoding.ASCII.GetBytes("thread_settings_applied") };
         private static readonly byte[][] AgyKeywords = new byte[][] { Utf8LineScanner.KwInputTokens, Utf8LineScanner.KwModelSelection, Utf8LineScanner.KwCreatedAt };
         private static readonly byte[][] KimiKeywords = new byte[][] { Utf8LineScanner.KwUsageRecord, Utf8LineScanner.KwLlmRequest };
 
@@ -1630,7 +1377,6 @@ namespace TokLens
 
                     if (key.EndsWith("state_5.sqlite", StringComparison.OrdinalIgnoreCase))
                     {
-                        _codexArchiveCandidates.AddRange(cur.Events);
                         continue;
                     }
 
@@ -1671,7 +1417,7 @@ namespace TokLens
                                     continue;
                             }
                         }
-                        _events.Add(ev);
+                        EmitRequestEvents(key, new List<UsageEvent> { ev });
                     }
                 }
             }
@@ -1706,7 +1452,7 @@ namespace TokLens
             }
         }
 
-        private static List<string> SafeFindFiles(string rootDir, string pattern, bool recursive)
+        private static List<string> SafeFindFiles(string rootDir, string pattern, bool recursive, Action onError = null)
         {
             List<string> results = new List<string>();
             string lpRoot = ToLongPath(rootDir);
@@ -1716,6 +1462,7 @@ namespace TokLens
             }
             catch
             {
+                if (onError != null) onError();
                 return results;
             }
 
@@ -1731,7 +1478,7 @@ namespace TokLens
                 int depth = item.Value;
                 try
                 {
-                    string[] files = Directory.GetFiles(current, pattern);
+                    string[] files = Directory.GetFiles(ToLongPath(current), pattern);
                     for (int i = 0; i < files.Length; i++)
                     {
                         string f = files[i];
@@ -1742,13 +1489,13 @@ namespace TokLens
                         results.Add(f);
                     }
                 }
-                catch { }
+                catch { if (onError != null) onError(); }
 
                 if (recursive && depth < maxWalkDepth)
                 {
                     try
                     {
-                        string[] subDirs = Directory.GetDirectories(current);
+                        string[] subDirs = Directory.GetDirectories(ToLongPath(current));
                         for (int i = 0; i < subDirs.Length; i++)
                         {
                             string sd = subDirs[i];
@@ -1761,19 +1508,20 @@ namespace TokLens
                                 continue;
                             try
                             {
-                                FileAttributes attr = File.GetAttributes(sd);
+                                FileAttributes attr = File.GetAttributes(ToLongPath(sd));
                                 if ((attr & FileAttributes.ReparsePoint) != 0)
                                     continue;
                             }
                             catch
                             {
+                                if (onError != null) onError();
                                 continue;
                             }
                             if (visitedDirs.Add(sd))
                                 dirs.Push(new KeyValuePair<string, int>(sd, depth + 1));
                         }
                     }
-                    catch { }
+                    catch { if (onError != null) onError(); }
                 }
             }
             return results;
@@ -1995,14 +1743,6 @@ namespace TokLens
             return false;
         }
 
-        private static DateTime SafeLastWriteTime(string path)
-        {
-            long sz, mt;
-            if (TryGetFileStat(path, out sz, out mt))
-                return FileTimeTicksToLocal(mt);
-            return DateTime.Now;
-        }
-
         private static string ReadAllTextLong(string path)
         {
             using (FileStream fs = new FileStream(ToLongPath(path), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
@@ -2136,7 +1876,10 @@ namespace TokLens
             {
                 string rootPath = roots[r];
                 bool isProjectsStyleRoot = rootPath.EndsWith("projects", StringComparison.OrdinalIgnoreCase);
-                List<string> files = SafeFindFiles(rootPath, "*.jsonl", true);
+                List<string> files = SafeFindFiles(rootPath, "*.jsonl", true, delegate() {
+                    _failedExactTools.Add(isWsl ? "Claude Code (WSL)" : "Claude Code");
+                    if (!isWsl) _failedExactTools.Add("Claude Desktop");
+                });
                 for (int i = 0; i < files.Count; i++)
                 {
                     string fp = files[i];
@@ -2328,12 +2071,13 @@ namespace TokLens
                                 activeReqKey = key;
                                 activeReqStart = startRefMs;
 
-                                int durMs = ComputeSafeDurationMs(startRefMs, tsMs);
-                                if (durMs == 0)
-                                {
-                                    long explicitDur = FastJson.ExtractLong(line, "\"durationMs\"", 0, line.Length);
-                                    if (explicitDur >= 100 && explicitDur <= 600000) durMs = (int)explicitDur;
-                                }
+                                // A user/assistant log gap is not a measured request duration.
+                                Dictionary<string, object> timedMessage = null;
+                                if (line.IndexOf("\"durationMs\"", StringComparison.Ordinal) >= 0 || line.IndexOf("\"duration_ms\"", StringComparison.Ordinal) >= 0)
+                                    timedMessage = AsDict(NewJson().DeserializeObject(line));
+                                long explicitDur = GetLong(timedMessage, "durationMs");
+                                if (explicitDur == 0) explicitDur = GetLong(timedMessage, "duration_ms");
+                                int durMs = explicitDur > 0 && explicitDur <= int.MaxValue ? (int)explicitDur : 0;
                                 if (tsMs > 0) lastReqStartMs = tsMs;
 
                                 double cost = FastJson.ExtractDouble(line, "\"costUSD\"", 0, line.Length);
@@ -2342,16 +2086,19 @@ namespace TokLens
                                 if (!fileDedup.TryGetValue(key, out prev) ||
                                     (fi + outTok + cr + cw) >= (prev.FreshInput + prev.Output + prev.CacheRead + prev.CacheWrite))
                                 {
-                                    if (durMs == 0 && prev != null && prev.DurationMs > 0) durMs = prev.DurationMs;
                                     long finalCw1h = cw1h > 0L ? cw1h : (prev != null ? prev.CacheWrite1h : 0L);
                                     if (finalCw1h > cw) finalCw1h = cw;
-                                    fileDedup[key] = new UsageEvent(initDefaultTool, model, dateStr, fi, outTok, cr, cw, cost, 1, key, tsMs, durMs, finalCw1h);
+                                    fileDedup[key] = UsageTiming.Measured(new UsageEvent(initDefaultTool, model, dateStr, fi, outTok, cr, cw, cost, 1, key, tsMs, durMs, finalCw1h));
                                 }
                             },
                             out validEnd,
                             out endLineIdx);
                     }
-                    catch { }
+                    catch
+                    {
+                        _failedExactTools.Add(isWsl ? "Claude Code (WSL)" : "Claude Code");
+                        if (!isWsl) _failedExactTools.Add("Claude Desktop");
+                    }
 
                     if (pathIsDesktop && epKind == "unknown") epKind = "desktop";
                     if (epKind == "desktop" && projGroup.Length > 0)
@@ -2410,7 +2157,8 @@ namespace TokLens
                     if (src == null) continue;
                     if (!string.Equals(src.Tool, finalTool, StringComparison.Ordinal))
                     {
-                        src = new UsageEvent(finalTool, src.Model, src.Date, src.FreshInput, src.Output, src.CacheRead, src.CacheWrite, src.LoggedCostUsd, src.Turns, src.DedupKey, src.TimestampMs, src.DurationMs, src.CacheWrite1h);
+                        src = src.Clone();
+                        src.Tool = finalTool;
                         item.Events[e] = src;
                         toolUpdated = true;
                     }
@@ -2423,10 +2171,11 @@ namespace TokLens
                         long finalTs = src.TimestampMs > 0 ? src.TimestampMs : (prev != null ? prev.TimestampMs : 0L);
                         long finalCw1h = src.CacheWrite1h > 0L ? src.CacheWrite1h : (prev != null ? prev.CacheWrite1h : 0L);
                         globalDedup[dk] = new UsageEvent(finalTool, src.Model, src.Date, src.FreshInput, src.Output, src.CacheRead, src.CacheWrite, src.LoggedCostUsd, src.Turns, dk, finalTs, finalDur, finalCw1h);
+                        globalDedup[dk].TimingSource = src.TimingSource;
                     }
                 }
 
-                if (item.IsDirty || toolUpdated)
+                if ((item.IsDirty || toolUpdated) && !_failedExactTools.Contains(finalTool))
                 {
                     SaveDirtyCursor(item.FilePath, item.FileSize, item.MtimeTicks, item.ValidEnd, item.MetaStr, item.Events);
                 }
@@ -2442,6 +2191,11 @@ namespace TokLens
         private static string ExtractMetaField(string extraMeta, string field, string fallback)
         {
             if (string.IsNullOrEmpty(extraMeta)) return fallback;
+            if (extraMeta.StartsWith("{", StringComparison.Ordinal))
+            {
+                try { return GetStr(AsDict(NewJson().DeserializeObject(extraMeta)), field) ?? fallback; }
+                catch { return fallback; }
+            }
             string prefix = field + "=";
             string[] parts = extraMeta.Split(';');
             for (int i = 0; i < parts.Length; i++)
@@ -2458,237 +2212,88 @@ namespace TokLens
             ScanCodexLiveAt(_home, "OpenAI Codex");
         }
 
+        internal static long UsageTimestampMs(string value, DateTime fallback) { return ToUnixEpochMs(value, fallback); }
+        internal static string UsageLocalDate(string value, DateTime fallback) { return ToLocalDate(value, fallback); }
+
+        private void EmitRequestEvents(string path, List<UsageEvent> events)
+        {
+            if (events == null) return;
+            foreach (UsageEvent source in events)
+            {
+                if (source == null) continue;
+                UsageEvent ev = source.Clone();
+                if (ev.Tool == "Google Antigravity" && !(ev.DedupKey ?? "").StartsWith("agy:", StringComparison.Ordinal))
+                {
+                    string conv = new FileInfo(path).Directory.Parent.Parent.Name;
+                    ev.SessionId = conv;
+                    ev.DedupKey = "agy:" + conv + ":" + ev.DedupKey;
+                }
+                else if ((ev.Tool ?? "").StartsWith("OpenAI Codex", StringComparison.Ordinal) && string.IsNullOrEmpty(ev.DedupKey))
+                {
+                    _unverifiedPartitions.Add(UsageAccounting.Partition(ev.Date, ev.Tool));
+                    string tid = ""; FileCursorEntry cursor;
+                    if (_cursors.TryGetValue(path, out cursor)) tid = ExtractMetaField(cursor.ExtraMeta, "tid", "");
+                    ev.SessionId = tid;
+                    ev.DedupKey = "codex:" + tid + ":" + ev.TimestampMs.ToString(CultureInfo.InvariantCulture) + ":" + (ev.FreshInput + ev.CacheRead + ev.CacheWrite).ToString(CultureInfo.InvariantCulture) + "," + ev.Output.ToString(CultureInfo.InvariantCulture) + "," + ev.CacheRead.ToString(CultureInfo.InvariantCulture) + "," + ev.CacheWrite.ToString(CultureInfo.InvariantCulture);
+                }
+                _events.Add(ev);
+            }
+        }
+
         private void ScanCodexLiveAt(string homeRoot, string toolName)
         {
             if (string.IsNullOrWhiteSpace(homeRoot)) return;
             string codexDir = Path.Combine(homeRoot, ".codex");
-            string[] subs = new string[] { "sessions", "archived_sessions" };
-
-            for (int s = 0; s < subs.Length; s++)
+            if (string.Equals(homeRoot, _home, StringComparison.OrdinalIgnoreCase))
             {
-                string subDir = Path.Combine(codexDir, subs[s]);
-                List<string> rawJsonl = SafeFindFiles(subDir, "*.jsonl", true);
-                List<string> rawZst = SafeFindFiles(subDir, "*.jsonl.zst", true);
-                List<string> files = new List<string>(rawJsonl.Count + rawZst.Count);
-                HashSet<string> seenSubFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                for (int i = 0; i < rawJsonl.Count; i++)
+                string custom = Environment.GetEnvironmentVariable("CODEX_HOME");
+                if (!string.IsNullOrWhiteSpace(custom)) codexDir = custom;
+            }
+            foreach (string sub in new string[] { "sessions", "archived_sessions" })
+            {
+                Action failed = delegate() { _failedExactTools.Add(toolName); };
+                List<string> files = SafeFindFiles(Path.Combine(codexDir, sub), "*.jsonl", true, failed);
+                files.AddRange(SafeFindFiles(Path.Combine(codexDir, sub), "*.jsonl.zst", true, failed));
+                foreach (string fp in files)
                 {
-                    if (seenSubFiles.Add(rawJsonl[i])) files.Add(rawJsonl[i]);
-                }
-                for (int i = 0; i < rawZst.Count; i++)
-                {
-                    if (seenSubFiles.Add(rawZst[i])) files.Add(rawZst[i]);
-                }
-
-                for (int i = 0; i < files.Count; i++)
-                {
-                    string fp = files[i];
-                    long fSize, fMtime;
-                    if (!TryGetFileStat(fp, out fSize, out fMtime)) continue;
+                    if (_visitedFiles.Contains(fp)) continue;
+                    long size, mtime;
+                    if (!TryGetFileStat(fp, out size, out mtime)) { _failedExactTools.Add(toolName); continue; }
                     TrackVisitedFile(fp);
-
-                    string fileTid = "";
-                    MatchCollection mc = UuidRegex.Matches(Path.GetFileName(fp));
-                    for (int mi = 0; mi < mc.Count; mi++)
-                    {
-                        string u = mc[mi].Groups[1].Value;
-                        if (!string.IsNullOrEmpty(u))
-                        {
-                            _codexLiveThreads.Add(u);
-                            fileTid = u;
-                        }
-                    }
-
+                    string tid = "";
+                    MatchCollection matches = UuidRegex.Matches(Path.GetFileName(fp));
+                    if (matches.Count > 0) tid = matches[matches.Count - 1].Value;
                     FileCursorEntry cur;
-                    if (_cursors.TryGetValue(fp, out cur) && cur.FileSize == fSize && cur.MtimeTicks == fMtime)
+                    _cursors.TryGetValue(fp, out cur);
+                    if (cur != null && cur.FileSize == size && cur.MtimeTicks == mtime)
                     {
-                        string cachedTid = ExtractMetaField(cur.ExtraMeta, "tid", "");
-                        if (cachedTid.Length > 0) _codexLiveThreads.Add(cachedTid);
-                        _events.AddRange(cur.Events);
+                        tid = ExtractMetaField(cur.ExtraMeta, "tid", tid);
+                        if (tid.Length > 0) _codexLiveThreads.Add(tid);
+                        EmitRequestEvents(fp, cur.Events);
                         continue;
                     }
-
-                    bool isZst = fp.EndsWith(".zst", StringComparison.OrdinalIgnoreCase);
-                    long startOffset = 0L;
-                    int lineIdx = 0;
-                    string curModel = "gpt-5.2-codex";
-                    long prevTotIn = -1, prevTotOut = -1, prevTotCr = -1;
-                    string metaTid = fileTid;
-                    List<UsageEvent> fileEvents = new List<UsageEvent>();
-
-                    if (!isZst && cur != null && fSize > cur.ByteOffset && cur.ByteOffset > 0)
+                    bool compressed = fp.EndsWith(".zst", StringComparison.OrdinalIgnoreCase);
+                    long offset = !compressed && cur != null && size > cur.FileSize && size >= cur.ByteOffset ? cur.ByteOffset : 0;
+                    CodexUsageParser parser = new CodexUsageParser(toolName, tid, FileTimeTicksToLocal(mtime), offset > 0 ? cur.ExtraMeta : "", cur != null ? cur.Events : null);
+                    long validEnd = offset; int finalLine;
+                    Action<string, int> onLine = delegate(string line, int index)
                     {
-                        startOffset = cur.ByteOffset;
-                        curModel = ExtractMetaField(cur.ExtraMeta, "mdl", curModel);
-                        metaTid = ExtractMetaField(cur.ExtraMeta, "tid", metaTid);
-                        long.TryParse(ExtractMetaField(cur.ExtraMeta, "pi", "-1"), NumberStyles.Integer, CultureInfo.InvariantCulture, out prevTotIn);
-                        long.TryParse(ExtractMetaField(cur.ExtraMeta, "po", "-1"), NumberStyles.Integer, CultureInfo.InvariantCulture, out prevTotOut);
-                        long.TryParse(ExtractMetaField(cur.ExtraMeta, "pc", "-1"), NumberStyles.Integer, CultureInfo.InvariantCulture, out prevTotCr);
-                        fileEvents.AddRange(cur.Events);
-                    }
-
-                    DateTime fallbackDt = FileTimeTicksToLocal(fMtime);
-                    long validEnd = startOffset;
-                    int endIdx = lineIdx;
-                    long turnStartMs = 0L;
-                    if (!isZst)
-                        long.TryParse(ExtractMetaField(cur != null ? cur.ExtraMeta : "", "tsm", "0"), NumberStyles.Integer, CultureInfo.InvariantCulture, out turnStartMs);
-                    string lastNoTotSig = "";
-
-                    Action<string, int> onCodexLine = delegate(string line, int curIdx)
-                    {
-                        string typ = FastJson.ExtractString(line, "\"type\"", 0, Math.Min(line.Length, 180));
-                        if (typ == null) typ = FastJson.ExtractString(line, "\"type\"", 0, line.Length);
-                        if (typ == null) return;
-
-                        int plStart, plEnd;
-                        if (!FastJson.FindObjectBounds(line, "\"payload\"", 0, line.Length, out plStart, out plEnd))
-                            return;
-
-                        if (typ == "session_meta")
-                        {
-                            string tid = FastJson.ExtractString(line, "\"id\"", plStart, plEnd);
-                            if (!string.IsNullOrEmpty(tid))
-                            {
-                                metaTid = tid;
-                                _codexLiveThreads.Add(tid);
-                            }
-                            string smMdl = FastJson.ExtractString(line, "\"model\"", plStart, plEnd);
-                            if (!string.IsNullOrEmpty(smMdl))
-                                curModel = PricingEngine.NormalizeModelId(smMdl, curModel);
-                        }
-                        else if (typ == "turn_context")
-                        {
-                            string mdl = FastJson.ExtractString(line, "\"model\"", plStart, plEnd);
-                            if (!string.IsNullOrEmpty(mdl))
-                                curModel = PricingEngine.NormalizeModelId(mdl, curModel);
-                            string tcTs = FastJson.ExtractRawScalar(line, "\"timestamp\"", 0, Math.Min(line.Length, 160));
-                            long tcms = ToUnixEpochMs(tcTs, fallbackDt);
-                            if (tcms > 0) turnStartMs = tcms;
-                        }
-                        else if (typ == "response_item")
-                        {
-                            string rType = FastJson.ExtractString(line, "\"type\"", plStart, Math.Min(plEnd, plStart + 180));
-                            if (rType != null && rType.IndexOf("_call_output", StringComparison.Ordinal) >= 0)
-                            {
-                                string riTs = FastJson.ExtractRawScalar(line, "\"timestamp\"", 0, Math.Min(line.Length, 160));
-                                long rims = ToUnixEpochMs(riTs, fallbackDt);
-                                if (rims > 0) turnStartMs = rims;
-                            }
-                        }
-                        else if (typ == "event_msg")
-                        {
-                            string pType = FastJson.ExtractString(line, "\"type\"", plStart, Math.Min(plEnd, plStart + 160));
-                            if (pType == "user_message" || pType == "task_started")
-                            {
-                                string stTs = FastJson.ExtractRawScalar(line, "\"timestamp\"", 0, Math.Min(line.Length, 160));
-                                long stms = ToUnixEpochMs(stTs, fallbackDt);
-                                if (stms > 0) turnStartMs = stms;
-                                return;
-                            }
-                            if (pType != "token_count") return;
-
-                            int infoStart, infoEnd;
-                            if (!FastJson.FindObjectBounds(line, "\"info\"", plStart, plEnd, out infoStart, out infoEnd))
-                            {
-                                infoStart = plStart;
-                                infoEnd = plEnd;
-                            }
-
-                            int lastStart, lastEnd;
-                            if (!FastJson.FindObjectBounds(line, "\"last_token_usage\"", infoStart, infoEnd, out lastStart, out lastEnd))
-                                return;
-
-                            long rawIn = FastJson.ExtractLong(line, "\"input_tokens\"", lastStart, lastEnd);
-                            long cr = FastJson.ExtractLong(line, "\"cached_input_tokens\"", lastStart, lastEnd);
-                            if (cr == 0) cr = FastJson.ExtractLong(line, "\"cached_tokens\"", lastStart, lastEnd);
-                            long outTok = FastJson.ExtractLong(line, "\"output_tokens\"", lastStart, lastEnd);
-                            long fi = rawIn >= cr ? (rawIn - cr) : rawIn;
-                            if (fi + outTok + cr <= 0) return;
-
-                            string tsRaw = FastJson.ExtractRawScalar(line, "\"timestamp\"", 0, Math.Min(line.Length, 160));
-
-                            long tIn = 0, tOut = 0, tCr = 0;
-                            int totStart, totEnd;
-                            bool hasTotal = FastJson.FindObjectBounds(line, "\"total_token_usage\"", infoStart, infoEnd, out totStart, out totEnd);
-                            if (hasTotal)
-                            {
-                                tIn = FastJson.ExtractLong(line, "\"input_tokens\"", totStart, totEnd);
-                                tOut = FastJson.ExtractLong(line, "\"output_tokens\"", totStart, totEnd);
-                                tCr = FastJson.ExtractLong(line, "\"cached_input_tokens\"", totStart, totEnd);
-                                if (tCr == 0) tCr = FastJson.ExtractLong(line, "\"cached_tokens\"", totStart, totEnd);
-                            }
-
-                            if (hasTotal && (tIn > 0 || tOut > 0 || tCr > 0))
-                            {
-                                if (tIn == prevTotIn && tOut == prevTotOut && tCr == prevTotCr) return;
-                                prevTotIn = tIn; prevTotOut = tOut; prevTotCr = tCr;
-                            }
-                            else
-                            {
-                                // Support logs that only emit last_token_usage without total_token_usage
-                                string sig = (tsRaw ?? "") + "|" + rawIn.ToString(CultureInfo.InvariantCulture) + "|" + outTok.ToString(CultureInfo.InvariantCulture) + "|" + cr.ToString(CultureInfo.InvariantCulture);
-                                if (string.Equals(sig, lastNoTotSig, StringComparison.Ordinal)) return;
-                                lastNoTotSig = sig;
-                            }
-
-                            string evMdl = FastJson.ExtractString(line, "\"model\"", infoStart, infoEnd);
-                            if (!string.IsNullOrEmpty(evMdl))
-                                curModel = PricingEngine.NormalizeModelId(evMdl, curModel);
-
-                            string dtStr = ToLocalDate(tsRaw, fallbackDt);
-                            long tsMs = ToUnixEpochMs(tsRaw, fallbackDt);
-                            int durMs = ComputeSafeDurationMs(turnStartMs, tsMs);
-                            if (tsMs > 0) turnStartMs = tsMs;
-                            fileEvents.Add(new UsageEvent(toolName, curModel, dtStr, fi, outTok, cr, 0L, 0.0, 1, "", tsMs, durMs));
-                        }
+                        try { parser.OnLine(line, index); }
+                        catch { _failedExactTools.Add(toolName); }
                     };
-
                     try
                     {
-                        if (isZst)
+                        if (compressed)
                         {
-                            string[] zstKws = new string[] { "turn_context", "token_count", "session_meta", "call_output", "user_message", "task_started" };
-                            if (WinZstdReader.TryScanLines(fp, zstKws, onCodexLine))
-                                validEnd = fSize;
+                            if (WinZstdReader.TryScanLines(fp, new string[] { "turn_context", "token_count", "token_usage_record", "session_meta", "thread_settings_applied", "call_output", "task_started", "user_message" }, onLine)) validEnd = size;
+                            else _failedExactTools.Add(toolName);
                         }
-                        else
-                        {
-                            Utf8LineScanner.ScanFromOffset(
-                                ToLongPath(fp),
-                                startOffset,
-                                lineIdx,
-                                fMtime,
-                                delegate()
-                                {
-                                    fileEvents.Clear();
-                                    curModel = "gpt-5.2-codex";
-                                    prevTotIn = -1;
-                                    prevTotOut = -1;
-                                    prevTotCr = -1;
-                                    turnStartMs = 0L;
-                                    lastNoTotSig = "";
-                                },
-                                CodexKeywords,
-                                onCodexLine,
-                                out validEnd,
-                                out endIdx);
-                        }
+                        else Utf8LineScanner.ScanFromOffset(ToLongPath(fp), offset, 0, mtime, parser.Reset, CodexKeywords, onLine, out validEnd, out finalLine);
                     }
-                    catch { }
-
-                    if (fileEvents.Count == 0 && cur != null && cur.Events != null && cur.Events.Count > 0)
-                    {
-                        metaTid = ExtractMetaField(cur.ExtraMeta, "tid", metaTid);
-                        fileEvents.AddRange(cur.Events);
-                    }
-                    if (metaTid.Length > 0) _codexLiveThreads.Add(metaTid);
-                    string meta = string.Format(
-                        CultureInfo.InvariantCulture,
-                        "mdl={0};tid={1};pi={2};po={3};pc={4};tsm={5}",
-                        curModel, metaTid, prevTotIn, prevTotOut, prevTotCr, turnStartMs);
-                    SaveDirtyCursor(fp, fSize, fMtime, validEnd, meta, fileEvents);
-                    _events.AddRange(fileEvents);
+                    catch { _failedExactTools.Add(toolName); }
+                    if (!string.IsNullOrEmpty(parser.ThreadId)) _codexLiveThreads.Add(parser.ThreadId);
+                    if (!_failedExactTools.Contains(toolName)) SaveDirtyCursor(fp, size, mtime, validEnd, parser.SerializeState(), parser.Events);
+                    EmitRequestEvents(fp, parser.Events);
                 }
             }
         }
@@ -2724,153 +2329,48 @@ namespace TokLens
             return string.Format(CultureInfo.InvariantCulture, "{0}.{1}.{2}.{3}", dbSz, dbMt & 0xFFFFFFFFL, walSz, walMt & 0xFFFFFFFFL);
         }
 
-        private static bool IsPrintableModelSlugBytes(byte[] data, int start, int len)
-        {
-            bool hasAlpha = false;
-            bool hasSep = false;
-            for (int i = 0; i < len; i++)
-            {
-                byte b = data[start + i];
-                if ((b >= (byte)'a' && b <= (byte)'z') || (b >= (byte)'A' && b <= (byte)'Z'))
-                {
-                    hasAlpha = true;
-                }
-                else if (b >= (byte)'0' && b <= (byte)'9')
-                {
-                }
-                else if (b == (byte)'-' || b == (byte)'_' || b == (byte)'.' || b == (byte)'/' || b == (byte)':')
-                {
-                    if (b == (byte)'-' || b == (byte)'_') hasSep = true;
-                }
-                else
-                {
-                    return false;
-                }
-            }
-            if (!hasAlpha) return false;
-            if (hasSep) return true;
-            string s = Encoding.ASCII.GetString(data, start, len);
-            return s.IndexOf("orchestrator", StringComparison.OrdinalIgnoreCase) >= 0;
-        }
-
-        private static int FindAsciiBytes(byte[] haystack, byte[] needle)
-        {
-            if (haystack == null || needle == null || haystack.Length < needle.Length) return -1;
-            int limit = haystack.Length - needle.Length;
-            for (int i = 0; i <= limit; i++)
-            {
-                bool ok = true;
-                for (int j = 0; j < needle.Length; j++)
-                {
-                    if (haystack[i + j] != needle[j])
-                    {
-                        ok = false;
-                        break;
-                    }
-                }
-                if (ok) return i;
-            }
-            return -1;
-        }
-
         private static bool TryLoadAntigravityDbStepModels(string convDbPath, out Dictionary<string, string> stepModels, out string latestDbModel)
         {
             stepModels = new Dictionary<string, string>(StringComparer.Ordinal);
             latestDbModel = "";
             if (string.IsNullOrEmpty(convDbPath)) return false;
-            long dSz, dMt;
-            if (!TryGetFileStat(convDbPath, out dSz, out dMt) || dSz <= 0L)
-                return false;
-
-            byte[] lsiBytes = Encoding.ASCII.GetBytes("last_step_index");
+            Dictionary<string, string> result = stepModels;
             try
             {
                 using (WinSqlite db = WinSqlite.OpenReadOnly(convDbPath))
                 {
-                    if (db == null || !db.IsHealthy()) return false;
-                    Dictionary<string, string> localSteps = stepModels;
-                    string localLatest = "";
-                    db.Query("SELECT idx, substr(data, max(1, length(data) - 2048), 2049) FROM gen_metadata ORDER BY idx", delegate(WinSqlite.SqliteRow r)
+                    if (db == null) return false;
+                    Dictionary<long, string> generations = new Dictionary<long, string>();
+                    if (!db.Query("SELECT idx, data FROM gen_metadata", delegate(WinSqlite.SqliteRow r)
                     {
-                        byte[] tail = r.GetBlob(1);
-                        if (tail == null || tail.Length < 8) return;
-
-                        string stepKey = (r.GetInt64(0) + 1L).ToString(CultureInfo.InvariantCulture);
-                        int lsiPos = FindAsciiBytes(tail, lsiBytes);
-                        if (lsiPos >= 0)
-                        {
-                            int maxProbe = Math.Min(tail.Length - 3, lsiPos + lsiBytes.Length + 6);
-                            for (int p = lsiPos + lsiBytes.Length; p <= maxProbe; p++)
-                            {
-                                if (tail[p] == 0x12)
-                                {
-                                    int slen = tail[p + 1];
-                                    if (slen >= 1 && slen <= 12 && p + 2 + slen <= tail.Length)
-                                    {
-                                        bool allDigits = true;
-                                        for (int d = 0; d < slen; d++)
-                                        {
-                                            byte dbByte = tail[p + 2 + d];
-                                            if (dbByte < (byte)'0' || dbByte > (byte)'9')
-                                            {
-                                                allDigits = false;
-                                                break;
-                                            }
-                                        }
-                                        if (allDigits)
-                                        {
-                                            long parsedIdx;
-                                            if (long.TryParse(Encoding.ASCII.GetString(tail, p + 2, slen), NumberStyles.Integer, CultureInfo.InvariantCulture, out parsedIdx))
-                                            {
-                                                stepKey = (parsedIdx + 1L).ToString(CultureInfo.InvariantCulture);
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        string foundRaw = "";
-                        int limit = tail.Length - 4;
-                        for (int k = 0; k < limit; k++)
-                        {
-                            if (tail[k] == 0x9A && tail[k + 1] == 0x01)
-                            {
-                                int mlen = tail[k + 2];
-                                if (mlen >= 4 && mlen <= 64 && k + 3 + mlen <= tail.Length)
-                                {
-                                    if (IsPrintableModelSlugBytes(tail, k + 3, mlen))
-                                        foundRaw = Encoding.ASCII.GetString(tail, k + 3, mlen);
-                                }
-                            }
-                        }
-
-                        if (!string.IsNullOrEmpty(foundRaw))
-                        {
-                            string norm = PricingEngine.NormalizeModelId(foundRaw, "");
-                            if (string.Equals(norm, "orchestrator", StringComparison.OrdinalIgnoreCase))
-                                norm = "gemini-pro-orchestrator";
-                            if (!string.IsNullOrEmpty(norm) && !string.Equals(norm, "unknown", StringComparison.OrdinalIgnoreCase))
-                            {
-                                localSteps[stepKey] = norm;
-                                localLatest = norm;
-                            }
-                        }
-                    });
-                    latestDbModel = localLatest;
-                    return stepModels.Count > 0;
+                        byte[] response = UsageProto.Message(r.GetBlob(1), 1);
+                        string backend = UsageProto.Text(response, 19);
+                        if (!string.IsNullOrWhiteSpace(backend)) generations[r.GetInt64(0)] = UsageAccounting.AntigravityModel(backend, UsageProto.Text(response, 21));
+                    })) return false;
+                    if (!db.Query("SELECT idx, metadata FROM steps WHERE step_type IN (15, 23) ORDER BY idx", delegate(WinSqlite.SqliteRow r)
+                    {
+                        byte[] reference = UsageProto.Message(r.GetBlob(1), 20);
+                        if (reference == null) return;
+                        long generation;
+                        // Scalar zero is omitted by protobuf.
+                        UsageProto.Number(reference, 3, out generation);
+                        string model;
+                        if (generations.TryGetValue(generation, out model)) result[r.GetInt64(0).ToString(CultureInfo.InvariantCulture)] = model;
+                    })) return false;
+                    return result.Count > 0;
                 }
             }
-            catch
-            {
-                return false;
-            }
+            catch { return false; }
         }
 
         private void ScanAntigravity()
         {
-            string agyRoot = Path.Combine(_home, ".gemini", "antigravity");
+            ScanAntigravityRoot(Path.Combine(_home, ".gemini", "antigravity"));
+            ScanAntigravityRoot(Path.Combine(_home, ".gemini", "antigravity-cli"));
+        }
+
+        private void ScanAntigravityRoot(string agyRoot)
+        {
             string brainDir = Path.Combine(agyRoot, "brain");
             try { if (!Directory.Exists(ToLongPath(brainDir))) return; } catch { return; }
 
@@ -2914,7 +2414,8 @@ namespace TokLens
                     convDir = convDir.Substring(4);
 
                 string convId = Path.GetFileName(convDir) ?? "";
-                string tf = Path.Combine(convDir, ".system_generated", "logs", "transcript.jsonl");
+                string tf = Path.Combine(convDir, ".system_generated", "logs", "transcript_full.jsonl");
+                if (!File.Exists(ToLongPath(tf))) tf = Path.Combine(convDir, ".system_generated", "logs", "transcript.jsonl");
                 long fSize, fMtime;
                 if (!TryGetFileStat(tf, out fSize, out fMtime)) continue;
                 TrackVisitedFile(tf);
@@ -3108,32 +2609,35 @@ namespace TokLens
 
                                 if (line.IndexOf("input_tokens", StringComparison.Ordinal) < 0)
                                     return;
-
-                                long fi = FastJson.ExtractLong(line, "\"input_tokens\"", 0, line.Length);
-                                long outTok = FastJson.ExtractLong(line, "\"output_tokens\"", 0, line.Length);
-                                long cr = FastJson.ExtractLong(line, "\"cache_read_tokens\"", 0, line.Length);
-                                long cw = FastJson.ExtractLong(line, "\"cache_creation_tokens\"", 0, line.Length);
-                                if (cw == 0) cw = FastJson.ExtractLong(line, "\"cache_write_tokens\"", 0, line.Length);
+                                if (stepType != "PLANNER_RESPONSE" && stepType != "CHECKPOINT") return;
+                                Dictionary<string, object> step = AsDict(NewJson().DeserializeObject(line));
+                                if (GetStr(step, "status") != "DONE") return;
+                                long fi = GetLong(step, "input_tokens");
+                                long outTok = GetLong(step, "output_tokens");
+                                long cr = GetLong(step, "cache_read_tokens");
+                                long cw = Math.Max(GetLong(step, "cache_creation_tokens"), GetLong(step, "cache_write_tokens"));
 
                                 if (fi + outTok + cr + cw > 0)
                                 {
-                                    string stepKey = FastJson.ExtractRawScalar(line, "\"step_index\"", 0, Math.Min(line.Length, 200));
-                                    if (string.IsNullOrEmpty(stepKey)) stepKey = "s:" + seenSteps.Count.ToString(CultureInfo.InvariantCulture);
+                                    string stepKey = GetStr(step, "step_index");
+                                    if (string.IsNullOrEmpty(stepKey)) { _failedExactTools.Add("Google Antigravity"); return; }
                                     string dtStr = ToLocalDate(createdRaw, fallbackDt);
                                     long tsMs = curStepMs > 0 ? curStepMs : ToUnixEpochMs(null, fallbackDt);
 
                                     int durMs = 0;
-                                    long explicitDur = FastJson.ExtractLong(line, "\"duration_ms\"", 0, Math.Min(line.Length, 400));
-                                    if (explicitDur >= 100 && explicitDur <= 600000)
+                                    long explicitDur = GetLong(step, "duration_ms");
+                                    if (explicitDur > 0 && explicitDur <= int.MaxValue)
                                         durMs = (int)explicitDur;
 
-                                    UsageEvent oldStep;
+                                    UsageEvent oldStep = null;
                                     if (durMs == 0 && seenSteps.TryGetValue(stepKey, out oldStep) && oldStep != null && oldStep.DurationMs > 0)
                                         durMs = oldStep.DurationMs;
 
                                     if (!seenSteps.ContainsKey(stepKey))
                                         stepOrder.Add(stepKey);
                                     seenSteps[stepKey] = new UsageEvent("Google Antigravity", curModel, dtStr, fi, outTok, cr, cw, 0.0, 1, stepKey, tsMs, durMs);
+                                    if (explicitDur > 0 && explicitDur <= int.MaxValue) seenSteps[stepKey].TimingSource = "request";
+                                    else if (oldStep != null && oldStep.DurationMs == durMs) seenSteps[stepKey].TimingSource = oldStep.TimingSource;
 
                                     if (durMs == 0 && curStepMs > 0)
                                     {
@@ -3145,7 +2649,7 @@ namespace TokLens
                             out validEnd,
                             out endIdx);
                     }
-                    catch { }
+                    catch { _failedExactTools.Add("Google Antigravity"); }
                 }
 
                 Dictionary<string, string> dbStepModels;
@@ -3176,18 +2680,11 @@ namespace TokLens
                     string resolved = "";
                     if (!string.IsNullOrEmpty(fev.DedupKey) && dbStepModels.TryGetValue(fev.DedupKey, out resolved) && !string.IsNullOrEmpty(resolved))
                     {
-                        fev.Model = resolved;
+                        fev.Model = UsageAccounting.AntigravityModel(resolved, fev.Model);
                     }
                     else if (string.IsNullOrEmpty(fev.Model) || string.Equals(fev.Model, "unknown", StringComparison.OrdinalIgnoreCase))
                     {
-                        if (dbStepModels.Count > 0 && !string.IsNullOrEmpty(latestDbModel))
-                            fev.Model = latestDbModel;
-                        else if (!string.IsNullOrEmpty(curModel) && !string.Equals(curModel, "gemini-pro-orchestrator", StringComparison.OrdinalIgnoreCase))
-                            fev.Model = curModel;
-                        else if (!string.IsNullOrEmpty(latestDbModel))
-                            fev.Model = latestDbModel;
-                        else if (!string.IsNullOrEmpty(curModel))
-                            fev.Model = curModel;
+                        fev.Model = "unknown";
                     }
                     else if (string.Equals(fev.Model, "orchestrator", StringComparison.OrdinalIgnoreCase))
                     {
@@ -3224,28 +2721,7 @@ namespace TokLens
             for (int i = 0; i < agyItems.Count; i++)
             {
                 AgyConvItem item = agyItems[i];
-                string fallbackModel = item.ExplicitModel;
-                if (string.IsNullOrEmpty(fallbackModel))
-                {
-                    string walkPid = item.ParentConvId;
-                    if (string.IsNullOrEmpty(walkPid) && !string.IsNullOrEmpty(item.ConvId))
-                        convParents.TryGetValue(item.ConvId, out walkPid);
-                    for (int hop = 0; hop < 6 && !string.IsNullOrEmpty(walkPid); hop++)
-                    {
-                        string pMdl;
-                        if (convExplicitModels.TryGetValue(walkPid, out pMdl) && !string.IsNullOrEmpty(pMdl))
-                        {
-                            fallbackModel = pMdl;
-                            break;
-                        }
-                        string nextPid;
-                        if (!convParents.TryGetValue(walkPid, out nextPid) || string.Equals(nextPid, walkPid, StringComparison.OrdinalIgnoreCase))
-                            break;
-                        walkPid = nextPid;
-                    }
-                }
-                if (string.IsNullOrEmpty(fallbackModel))
-                    fallbackModel = "gemini-4-carbon";
+                string fallbackModel = "unknown";
 
                 bool modelPatched = false;
                 for (int e = 0; e < item.Events.Count; e++)
@@ -3266,7 +2742,7 @@ namespace TokLens
                     }
                 }
 
-                if (item.IsDirty || modelPatched)
+                if ((item.IsDirty || modelPatched) && !_failedExactTools.Contains("Google Antigravity"))
                 {
                     string safePsk = string.IsNullOrEmpty(item.PendingStepKey) ? "" : item.PendingStepKey.Replace(";", "_");
                     string safeDbs = string.IsNullOrEmpty(item.DbSig) ? "" : item.DbSig.Replace(";", "_");
@@ -3281,7 +2757,7 @@ namespace TokLens
                     SaveDirtyCursor(item.FilePath, item.FileSize, item.MtimeTicks, item.ValidEnd, meta, item.Events);
                 }
 
-                _events.AddRange(item.Events);
+                EmitRequestEvents(item.FilePath, item.Events);
             }
         }
 
@@ -3421,6 +2897,7 @@ namespace TokLens
                 {
                     if (db == null)
                     {
+                        _failedExactTools.Add(toolName);
                         if (cur != null && cur.Events != null) _events.AddRange(cur.Events);
                         return;
                     }
@@ -3444,7 +2921,7 @@ namespace TokLens
                         "SELECT id, time_created, time_updated, data FROM message WHERE time_updated >= {0} AND data LIKE '%\"tokens\"%' AND data LIKE '%\"assistant\"%'",
                         lastUpdated > 0 ? (lastUpdated - 1) : 0);
 
-                    db.Query(sql, delegate(WinSqlite.SqliteRow row)
+                    bool queryOk = db.Query(sql, delegate(WinSqlite.SqliteRow row)
                     {
                         string msgId = row.GetString(0);
                         long tCreated = row.GetInt64(1);
@@ -3475,7 +2952,7 @@ namespace TokLens
                             cw = FastJson.ExtractLong(dataStr, "\"write\"", cStart, cEnd);
                         }
 
-                        string prov = FastJson.ExtractString(dataStr, "\"providerID\"", 0, dataStr.Length) ?? "";
+                        string prov = FastJson.ExtractString(dataStr, "\"providerId\"", 0, dataStr.Length) ?? FastJson.ExtractString(dataStr, "\"providerID\"", 0, dataStr.Length) ?? "";
                         long fi;
                         if ((tot > 0 && Math.Abs((rawIn + outTok) - tot) <= 4 && cr > 0) ||
                             (rawIn >= cr && cr > 0 && prov.IndexOf("anthropic", StringComparison.OrdinalIgnoreCase) < 0))
@@ -3488,25 +2965,27 @@ namespace TokLens
                         }
                         if (fi + outTok + cr + cw <= 0) return;
 
-                        string rawMdl = FastJson.ExtractString(dataStr, "\"modelID\"", 0, dataStr.Length);
+                        string rawMdl = FastJson.ExtractString(dataStr, "\"modelId\"", 0, dataStr.Length) ?? FastJson.ExtractString(dataStr, "\"modelID\"", 0, dataStr.Length);
                         if (string.IsNullOrEmpty(rawMdl))
                             rawMdl = FastJson.ExtractString(dataStr, "\"model\"", 0, dataStr.Length);
-                        string mdl = PricingEngine.NormalizeModelId(rawMdl, "glm-5.3");
+                        string mdl = PricingEngine.NormalizeModelId(rawMdl, "unknown");
 
                         long createdTs = tCreated;
                         long completedTs = tUpdated;
+                        bool measuredPair = false;
                         int tmStart, tmEnd;
                         if (FastJson.FindObjectBounds(dataStr, "\"time\"", 0, Math.Min(dataStr.Length, 240), out tmStart, out tmEnd))
                         {
                             long cTs = FastJson.ExtractLong(dataStr, "\"created\"", tmStart, tmEnd);
                             long uTs = FastJson.ExtractLong(dataStr, "\"completed\"", tmStart, tmEnd);
+                            measuredPair = cTs > 0 && uTs > cTs;
                             if (cTs > 0) createdTs = cTs;
                             if (uTs > 0) completedTs = uTs;
                         }
 
                         long tsMs = ToUnixEpochMs(completedTs > 0 ? completedTs : createdTs, DateTime.Now);
                         long startMs = ToUnixEpochMs(createdTs, DateTime.Now);
-                        int durMs = ComputeSafeDurationMs(startMs, tsMs);
+                        int durMs = measuredPair ? UsageTiming.PairedDuration(createdTs, completedTs) : 0;
 
                         double cost = FastJson.ExtractDouble(dataStr, "\"cost\"", 0, dataStr.Length);
                         string dk = string.IsNullOrEmpty(msgId) ? ("z:" + tCreated.ToString(CultureInfo.InvariantCulture)) : msgId;
@@ -3514,15 +2993,16 @@ namespace TokLens
                         if (!msgDedup.TryGetValue(dk, out prevEv) ||
                             (fi + outTok + cr + cw) >= (prevEv.FreshInput + prevEv.Output + prevEv.CacheRead + prevEv.CacheWrite))
                         {
-                            msgDedup[dk] = new UsageEvent(toolName, mdl, ToLocalDate(createdTs, DateTime.Now), fi, outTok, cr, cw, cost, 1, dk, tsMs, durMs);
+                            msgDedup[dk] = UsageTiming.Measured(new UsageEvent(toolName, mdl, ToLocalDate(createdTs, DateTime.Now), fi, outTok, cr, cw, cost, 1, dk, tsMs, durMs));
                         }
                     });
+                    if (!queryOk) throw new IOException("ZCode message query failed");
                 }
             }
-            catch { }
+            catch { _failedExactTools.Add(toolName); }
 
             List<UsageEvent> zEvents = new List<UsageEvent>(msgDedup.Values);
-            SaveDirtyCursor(zdb, combSize, combMtime, combSize, "tu=" + maxSeenUpdated.ToString(CultureInfo.InvariantCulture), zEvents);
+            if (!_failedExactTools.Contains(toolName)) SaveDirtyCursor(zdb, combSize, combMtime, combSize, "tu=" + maxSeenUpdated.ToString(CultureInfo.InvariantCulture), zEvents);
             _events.AddRange(zEvents);
         }
 
@@ -3668,10 +3148,11 @@ namespace TokLens
             object tDone = (timeObj != null && timeObj.ContainsKey("completed")) ? timeObj["completed"] : tVal;
             long startMs = ToUnixEpochMs(tVal, fallbackTime);
             long endMs = ToUnixEpochMs(tDone, fallbackTime);
-            int durMs = ComputeSafeDurationMs(startMs, endMs);
+            int durMs = timeObj != null && timeObj.ContainsKey("created") && timeObj.ContainsKey("completed")
+                ? UsageTiming.PairedDuration(timeObj["created"], timeObj["completed"]) : 0;
             double cost = GetDouble(d, "cost");
             string mid = GetStr(d, "id") ?? "";
-            return new UsageEvent(toolName, mdl, ToLocalDate(tVal, fallbackTime), fi, outTok, cr, cw, cost, 1, mid, endMs > 0 ? endMs : startMs, durMs);
+            return UsageTiming.Measured(new UsageEvent(toolName, mdl, ToLocalDate(tVal, fallbackTime), fi, outTok, cr, cw, cost, 1, mid, endMs > 0 ? endMs : startMs, durMs));
         }
 
         private void ScanMobileClaw()
@@ -4109,24 +3590,11 @@ namespace TokLens
 
                                 int durMs = 0;
                                 long expDur = GetLong(info, "durationMs");
-                                if (expDur == 0) expDur = GetLong(info, "duration");
-                                if (expDur >= 100 && expDur <= 600000)
-                                {
-                                    durMs = (int)expDur;
-                                }
-                                else if (tsMs > 0 && m + 1 < msgs.Count)
-                                {
-                                    Dictionary<string, object> nextItem = AsDict(msgs[m + 1]);
-                                    if (nextItem != null && nextItem.ContainsKey("ts"))
-                                    {
-                                        long nextTsMs = ToUnixEpochMs(nextItem["ts"], fallbackDt);
-                                        if (nextTsMs > tsMs && (nextTsMs - tsMs) <= 180000L)
-                                            durMs = ComputeSafeDurationMs(tsMs, nextTsMs);
-                                    }
-                                }
+                                if (expDur == 0) expDur = GetLong(info, "duration_ms");
+                                if (expDur > 0 && expDur <= int.MaxValue) durMs = (int)expDur;
 
                                 string dk = uf + ":" + m.ToString(CultureInfo.InvariantCulture);
-                                fileEvents.Add(new UsageEvent(label, mdl, dtStr, fi, outTok, cr, cw, cost, 1, dk, tsMs, durMs));
+                                fileEvents.Add(UsageTiming.Measured(new UsageEvent(label, mdl, dtStr, fi, outTok, cr, cw, cost, 1, dk, tsMs, durMs)));
                             }
                         }
                     }
@@ -4330,7 +3798,7 @@ namespace TokLens
                 long startMs = ToUnixEpochMs(startObj, fallbackTime);
                 long endMs = ToUnixEpochMs(endObj, fallbackTime);
                 tsMsOut = endMs > 0 ? endMs : startMs;
-                durMsOut = ComputeSafeDurationMs(startMs, endMs);
+                durMsOut = UsageTiming.PairedDuration(startObj, endObj);
                 tsObj = startObj ?? endObj;
             }
             else
@@ -4344,10 +3812,8 @@ namespace TokLens
                 if (expDur == 0) expDur = GetLong(u, "duration_ms");
                 if (expDur == 0) expDur = GetLong(obj, "durationMs");
                 if (expDur == 0) expDur = GetLong(obj, "duration_ms");
-                if (expDur == 0) expDur = GetLong(obj, "latencyMs");
-                if (expDur == 0) expDur = GetLong(obj, "latency_ms");
                 if (expDur == 0 && meta != null) expDur = GetLong(meta, "durationMs");
-                if (expDur >= 100 && expDur <= 600000)
+                if (expDur > 0 && expDur <= int.MaxValue)
                     durMsOut = (int)expDur;
             }
 
@@ -4448,8 +3914,6 @@ namespace TokLens
                                 continue;
                             }
 
-                            if (durMs == 0 && lastAnchorMs > 0 && tsMs > lastAnchorMs)
-                                durMs = ComputeSafeDurationMs(lastAnchorMs, tsMs);
                             if (tsMs > 0)
                                 lastAnchorMs = tsMs;
 
@@ -4459,8 +3923,7 @@ namespace TokLens
                             if (!fileDedup.TryGetValue(key, out prev) ||
                                 (fi + outTok + cr + cw) >= (prev.FreshInput + prev.Output + prev.CacheRead + prev.CacheWrite))
                             {
-                                if (durMs == 0 && prev != null && prev.DurationMs > 0) durMs = prev.DurationMs;
-                                fileDedup[key] = new UsageEvent(toolName, mdl, dt, fi, outTok, cr, cw, cost, 1, key, tsMs, durMs);
+                                fileDedup[key] = UsageTiming.Measured(new UsageEvent(toolName, mdl, dt, fi, outTok, cr, cw, cost, 1, key, tsMs, durMs));
                             }
                         }
                     }
@@ -4625,7 +4088,7 @@ namespace TokLens
                     Dictionary<string, object> obj = AsDict(js.DeserializeObject(ReadAllTextLong(fp)));
                     string mdl, dt, did; long fi, outTok, cr, cw, tsMs; double cost; int durMs;
                     if (TryExtractGenericUsage(obj, "claude-sonnet-4-6", FileTimeTicksToLocal(fMtime), out mdl, out dt, out fi, out outTok, out cr, out cw, out cost, out did, out tsMs, out durMs))
-                        fileEvents.Add(new UsageEvent("Factory Droid", mdl, dt, fi, outTok, cr, cw, cost, 1, did, tsMs, durMs));
+                        fileEvents.Add(UsageTiming.Measured(new UsageEvent("Factory Droid", mdl, dt, fi, outTok, cr, cw, cost, 1, did, tsMs, durMs)));
                 }
                 catch { }
                 SaveDirtyCursor(fp, fSize, fMtime, fSize, "", fileEvents);
@@ -4677,7 +4140,7 @@ namespace TokLens
                                     if (TryExtractGenericUsage(AsDict(msgs[m]), "claude-sonnet-4-6", mtime, out mdl, out dt, out fi, out outTok, out cr, out cw, out cost, out did, out tsMs, out durMs))
                                     {
                                         string dk = !string.IsNullOrEmpty(did) ? did : (fp + ":" + m.ToString(CultureInfo.InvariantCulture));
-                                        fileEvents.Add(new UsageEvent("Amp", mdl, dt, fi, outTok, cr, cw, cost, 1, dk, tsMs, durMs));
+                                        fileEvents.Add(UsageTiming.Measured(new UsageEvent("Amp", mdl, dt, fi, outTok, cr, cw, cost, 1, dk, tsMs, durMs)));
                                     }
                                 }
                             }
@@ -5006,7 +4469,7 @@ namespace TokLens
                                     if (TryExtractGenericUsage(AsDict(logs[l]), "claude-sonnet-4-6", mtime, out mdl, out dt, out fi, out outTok, out cr, out cw, out cost, out did, out tsMs, out durMs))
                                     {
                                         string dk = !string.IsNullOrEmpty(did) ? did : (fp + ":" + h.ToString(CultureInfo.InvariantCulture) + ":" + l.ToString(CultureInfo.InvariantCulture));
-                                        fileEvents.Add(new UsageEvent("Continue.dev", mdl, dt, fi, outTok, cr, cw, cost, 1, dk, tsMs, durMs));
+                                        fileEvents.Add(UsageTiming.Measured(new UsageEvent("Continue.dev", mdl, dt, fi, outTok, cr, cw, cost, 1, dk, tsMs, durMs)));
                                     }
                                 }
                             }
@@ -5103,15 +4566,15 @@ namespace TokLens
                                 if (rpcSend == 0L) rpcSend = FastJson.ExtractLong(val, "\"clientStartTime\"", tiStart, tiEnd);
                                 long settle = FastJson.ExtractLong(val, "\"clientSettleTime\"", tiStart, tiEnd);
                                 if (settle == 0L) settle = FastJson.ExtractLong(val, "\"clientEndTime\"", tiStart, tiEnd);
-                                if (rpcSend > 0L) startMs = ToUnixEpochMs(rpcSend, mtime);
-                                if (settle > 0L) endMs = ToUnixEpochMs(settle, mtime);
+                                if (rpcSend > 0L) startMs = UsageTiming.Timestamp(rpcSend);
+                                if (settle > 0L) endMs = UsageTiming.Timestamp(settle);
                             }
 
                             string cAt = FastJson.ExtractRawScalar(val, "\"createdAt\"", 0, val.Length);
                             long createdMs = !string.IsNullOrEmpty(cAt) ? ToUnixEpochMs(cAt, mtime) : 0L;
 
                             long tsMs = endMs > 0L ? endMs : (createdMs > 0L ? createdMs : startMs);
-                            int durMs = ComputeSafeDurationMs(startMs > 0L ? startMs : createdMs, endMs);
+                            int durMs = UsageTiming.PairedDuration(startMs, endMs);
 
                             string dtStr;
                             if (!string.IsNullOrEmpty(cAt))
@@ -5137,7 +4600,7 @@ namespace TokLens
                                     tsMs = ToUnixEpochMs(null, mtime);
                             }
 
-                            dbEvents.Add(new UsageEvent("Cursor", mdl, dtStr, fi, outTok, cr, cw, 0.0, 1, bKey, tsMs, durMs));
+                            dbEvents.Add(UsageTiming.Measured(new UsageEvent("Cursor", mdl, dtStr, fi, outTok, cr, cw, 0.0, 1, bKey, tsMs, durMs)));
                         }
                     });
                 }
@@ -5548,80 +5011,12 @@ namespace TokLens
 
         private void ScanCodexSqliteArchiveAt(string homeRoot, string toolName)
         {
-            if (string.IsNullOrWhiteSpace(homeRoot)) return;
-            string stDb = Path.Combine(homeRoot, ".codex", "state_5.sqlite");
-            long cSize, cMtime;
-            if (!TryGetSqliteCombinedStat(stDb, out cSize, out cMtime)) return;
-            TrackVisitedFile(stDb);
-
-            FileCursorEntry cur;
-            List<UsageEvent> rawThreads;
-            if (_cursors.TryGetValue(stDb, out cur) && cur.FileSize == cSize && cur.MtimeTicks == cMtime)
-            {
-                rawThreads = cur.Events ?? new List<UsageEvent>();
-            }
-            else
-            {
-                Dictionary<string, string> oldDates = new Dictionary<string, string>(StringComparer.Ordinal);
-                if (cur != null && cur.Events != null)
-                {
-                    for (int i = 0; i < cur.Events.Count; i++)
-                    {
-                        UsageEvent oe = cur.Events[i];
-                        if (oe != null && !string.IsNullOrEmpty(oe.DedupKey) && !string.IsNullOrEmpty(oe.Date))
-                            oldDates[oe.DedupKey] = oe.Date;
-                    }
-                }
-
-                List<UsageEvent> freshThreads = new List<UsageEvent>();
-                bool dbOpened = false;
-                DateTime fallbackDt = FileTimeTicksToLocal(cMtime);
-                try
-                {
-                    using (WinSqlite db = WinSqlite.OpenReadOnly(stDb))
-                    {
-                        if (db != null)
-                        {
-                            dbOpened = true;
-                            db.Query("SELECT id, model, tokens_used, created_at FROM threads WHERE tokens_used > 0", delegate(WinSqlite.SqliteRow row)
-                            {
-                                string tid = row.GetString(0);
-                                string model = row.GetString(1);
-                                long tot = row.GetInt64(2);
-                                long createdAt = row.GetInt64(3);
-                                if (tot <= 0) return;
-
-                                long cr = (long)(tot * 0.963);
-                                long outTok = Math.Max(1L, (long)(tot * 0.004));
-                                long fi = Math.Max(0L, tot - cr - outTok);
-                                string mdl = PricingEngine.NormalizeModelId(model, "gpt-5.2-codex");
-                                string dtStr;
-                                if (createdAt > 0L)
-                                    dtStr = ToLocalDate(createdAt, fallbackDt);
-                                else if (!string.IsNullOrEmpty(tid) && oldDates.TryGetValue(tid, out dtStr) && !string.IsNullOrEmpty(dtStr))
-                                { }
-                                else
-                                    dtStr = ToLocalDate(null, fallbackDt);
-
-                                freshThreads.Add(new UsageEvent(toolName, mdl, dtStr, fi, outTok, cr, 0L, 0.0, 1, tid, 0L, -1));
-                            });
-                        }
-                    }
-                }
-                catch { }
-
-                if (!dbOpened && cur != null && cur.Events != null)
-                {
-                    _codexArchiveCandidates.AddRange(cur.Events);
-                    return;
-                }
-
-                rawThreads = MergeSqliteCursorEvents(cur, freshThreads);
-                SaveDirtyCursor(stDb, cSize, cMtime, cSize, "", rawThreads);
-            }
-
-            if (rawThreads != null && rawThreads.Count > 0)
-                _codexArchiveCandidates.AddRange(rawThreads);
+            string path = Path.Combine(homeRoot, ".codex", "state_5.sqlite");
+            long size, mtime;
+            if (TryGetFileStat(path, out size, out mtime)) TrackVisitedFile(path);
+            // tokens_used has no input/output/cache breakdown. It is an index,
+            // not a billable request ledger; historical 96.3%/0.4% estimates
+            // must never be resurrected as measured usage.
         }
 
         private struct ScoredRecentEvent
@@ -5630,8 +5025,66 @@ namespace TokLens
             public double CostUsd;
         }
 
+        private static string RequestSignature(UsageEvent ev)
+        {
+            return ev.TimestampMs.ToString(CultureInfo.InvariantCulture) + ":" + ev.FreshInput.ToString(CultureInfo.InvariantCulture) + "," + ev.Output.ToString(CultureInfo.InvariantCulture) + "," + ev.CacheRead.ToString(CultureInfo.InvariantCulture) + "," + ev.CacheWrite.ToString(CultureInfo.InvariantCulture);
+        }
+
+        private void DeduplicateRequests()
+        {
+            Dictionary<string, UsageEvent> unique = new Dictionary<string, UsageEvent>(StringComparer.Ordinal);
+            Dictionary<string, string> aliases = new Dictionary<string, string>(StringComparer.Ordinal);
+            Dictionary<string, HashSet<string>> threadRequests = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+            Dictionary<string, string> parents = new Dictionary<string, string>(StringComparer.Ordinal);
+            Dictionary<string, long> forks = new Dictionary<string, long>(StringComparer.Ordinal);
+            foreach (FileCursorEntry cursor in _cursors.Values)
+            {
+                string tid = ExtractMetaField(cursor.ExtraMeta, "tid", "");
+                string parent = ExtractMetaField(cursor.ExtraMeta, "parent", "");
+                long cutoff;
+                if (tid.Length > 0 && parent.Length > 0 && long.TryParse(ExtractMetaField(cursor.ExtraMeta, "fork_ms", "0"), out cutoff))
+                { parents[tid] = parent; forks[tid] = cutoff; }
+            }
+            foreach (UsageEvent ev in _events)
+            {
+                if (ev == null || !(ev.Tool ?? "").StartsWith("OpenAI Codex", StringComparison.Ordinal) || string.IsNullOrEmpty(ev.SessionId)) continue;
+                HashSet<string> signatures;
+                if (!threadRequests.TryGetValue(ev.SessionId, out signatures)) threadRequests[ev.SessionId] = signatures = new HashSet<string>(StringComparer.Ordinal);
+                signatures.Add(RequestSignature(ev));
+            }
+            int unkeyed = 0;
+            foreach (UsageEvent ev in _events)
+            {
+                if (ev == null) continue;
+                string parent;
+                HashSet<string> parentRequests;
+                if (!string.IsNullOrEmpty(ev.SessionId) && parents.TryGetValue(ev.SessionId, out parent) &&
+                    ev.TimestampMs > 0 && ev.TimestampMs <= forks[ev.SessionId] &&
+                    threadRequests.TryGetValue(parent, out parentRequests) && parentRequests.Contains(RequestSignature(ev))) continue;
+                string key = ev.DedupKey ?? "";
+                if (!UsageAccounting.HasRequestLedger(ev.Tool)) key = "other:" + (++unkeyed).ToString(CultureInfo.InvariantCulture);
+                bool codex = (ev.Tool ?? "").StartsWith("OpenAI Codex", StringComparison.Ordinal);
+                if (key.Length == 0) key = "unkeyed:" + (++unkeyed).ToString(CultureInfo.InvariantCulture);
+                if (codex && ev.TimestampMs > 0 && !string.IsNullOrEmpty(ev.SessionId))
+                {
+                    string signature = ev.SessionId + "|" + RequestSignature(ev), existing;
+                    if (aliases.TryGetValue(signature, out existing) &&
+                        !(existing.StartsWith("codex-response:", StringComparison.Ordinal) && key.StartsWith("codex-response:", StringComparison.Ordinal) && existing != key)) key = existing;
+                    else aliases[signature] = key;
+                }
+                UsageEvent previous;
+                if (!unique.TryGetValue(key, out previous) || ev.TimestampMs > previous.TimestampMs ||
+                    (ev.TimestampMs == previous.TimestampMs && ev.FreshInput + ev.Output + ev.CacheRead + ev.CacheWrite > previous.FreshInput + previous.Output + previous.CacheRead + previous.CacheWrite) ||
+                    (ev.TimestampMs == previous.TimestampMs && previous.Model == "unknown" && ev.Model != "unknown")) unique[key] = ev;
+            }
+            _events.Clear(); _events.AddRange(unique.Values);
+        }
+
         private ScanResult BuildResult(double elapsedSec)
         {
+            DeduplicateRequests();
+            long accountingTime = UsageAccounting.UtcMilliseconds();
+            Dictionary<string, long> reconciled = new Dictionary<string, long>(StringComparer.Ordinal);
             Dictionary<string, RecordBucket> agg = new Dictionary<string, RecordBucket>(StringComparer.Ordinal);
             List<ScoredRecentEvent> liveCandidates = new List<ScoredRecentEvent>(Math.Min(_events.Count, 8192));
             string latestDate = "";
@@ -5644,6 +5097,8 @@ namespace TokLens
                 _pricing.ComputeBucketCost(ev.Model, ev.Turns, ev.FreshInput, ev.Output, ev.CacheRead, ev.CacheWrite, ev.CacheWrite1h, ev.LoggedCostUsd, out actualUsd, out baseUsd, out rate);
 
                 string key = ev.Tool + "||" + ev.Model + "||" + ev.Date;
+                if (UsageAccounting.HasRequestLedger(ev.Tool) && !_failedExactTools.Contains(ev.Tool) && !_unverifiedPartitions.Contains(UsageAccounting.Partition(ev.Date, ev.Tool)))
+                    reconciled[UsageAccounting.Partition(ev.Date, ev.Tool)] = accountingTime;
                 RecordBucket b;
                 if (!agg.TryGetValue(key, out b))
                 {
@@ -5698,7 +5153,8 @@ namespace TokLens
                 rr.CacheRead = ClampSafeTokens(src.CacheRead);
                 rr.CacheWrite = ClampSafeTokens(src.CacheWrite);
                 rr.Output = ClampSafeTokens(src.Output);
-                rr.DurationMs = src.DurationMs >= 0 ? src.DurationMs : 0;
+                rr.TimingSource = src.TimingSource;
+                rr.DurationMs = UsageTiming.IsMeasured(src.TimingSource) && src.DurationMs > 0 ? src.DurationMs : 0;
                 double rcUsd = liveCandidates[i].CostUsd;
                 rr.CostUsd = (double.IsNaN(rcUsd) || double.IsInfinity(rcUsd) || rcUsd < 0.0) ? 0.0 : Math.Min(1000000000000.0, rcUsd);
                 recentList.Add(rr);
@@ -5714,7 +5170,7 @@ namespace TokLens
                 return string.CompareOrdinal(x.Model, y.Model);
             });
 
-            LocalUsageStore.MergeAndSaveDailyArchive(_home, list);
+            LocalUsageStore.MergeAndSaveDailyArchive(_home, list, reconciled.Keys, _failedExactTools);
             for (int i = 0; i < list.Count; i++)
             {
                 string d = list[i].Date;
@@ -5731,15 +5187,56 @@ namespace TokLens
             res.ChangedFilesCount = _dirtyCursors.Count;
             res.TotalFilesTracked = _totalTrackedFiles;
             res.ArchivedFilesCount = _archivedFilesCount;
+            res.AccountingUpdatedMs = accountingTime;
+            res.ReconciledPartitions = reconciled;
             res.Records = list;
             res.RecentRequests = recentList;
             res.Warnings.AddRange(_warnings);
+            foreach (string tool in _failedExactTools) res.Warnings.Add(tool + " 部分源记录无法读取，本次保留旧账本，不覆盖历史。");
             return res;
         }
     }
 
     public static class FormatterUtil
     {
+        // 金额 / 汇率 / 时间的规整（燃烧提醒与报表导出共用）
+        public static double NormalizeExchangeRate(double usdToCny)
+        {
+            if (double.IsNaN(usdToCny) || double.IsInfinity(usdToCny) || usdToCny <= 0.1)
+                return ExchangeRateService.DefaultRate;
+            return usdToCny;
+        }
+
+        public static double SanitizeMoney(double val)
+        {
+            if (double.IsNaN(val) || double.IsInfinity(val) || val <= 0.0)
+                return 0.0;
+            return val;
+        }
+
+        public static void NormalizeNowTime(DateTime nowInput, out DateTime localNow, out long nowEpochMs)
+        {
+            if (nowInput == DateTime.MinValue)
+            {
+                localNow = DateTime.Now;
+            }
+            else if (nowInput.Kind == DateTimeKind.Utc)
+            {
+                localNow = nowInput.ToLocalTime();
+            }
+            else if (nowInput.Kind == DateTimeKind.Local)
+            {
+                localNow = nowInput;
+            }
+            else
+            {
+                localNow = DateTime.SpecifyKind(nowInput, DateTimeKind.Local);
+            }
+
+            DateTime utcNow = localNow.ToUniversalTime();
+            nowEpochMs = (long)(utcNow - new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc)).TotalMilliseconds;
+        }
+
         public static string FormatTokens(long n)
         {
             if (n <= 0) return "0";
@@ -5762,23 +5259,23 @@ namespace TokLens
 
         public static string FormatDuration(int durationMs)
         {
-            if (durationMs < 150 || durationMs > 600000) return "—";
+            if (durationMs <= 0) return "—";
             if (durationMs < 1000) return durationMs.ToString(CultureInfo.InvariantCulture) + "ms";
             return (durationMs / 1000.0).ToString("F1", CultureInfo.InvariantCulture) + "s";
         }
 
         public static double ComputeTps(long outputTokens, int durationMs)
         {
-            if (outputTokens <= 0 || durationMs < 200 || durationMs > 600000) return 0.0;
+            if (outputTokens <= 0 || durationMs <= 0) return 0.0;
             double tps = outputTokens * 1000.0 / durationMs;
-            if (tps < 0.1 || tps > 2000.0) return 0.0;
+            if (double.IsNaN(tps) || double.IsInfinity(tps)) return 0.0;
             return tps;
         }
 
         public static string FormatTps(double tps)
         {
-            if (tps <= 0.0) return "—";
-            return tps.ToString("F1", CultureInfo.InvariantCulture) + " tok/s";
+            if (tps <= 0.0 || double.IsNaN(tps) || double.IsInfinity(tps)) return "—";
+            return UsageTiming.FormatNumber(tps) + " tok/s";
         }
 
         public static void ExportCsv(ScanResult res, double rate, string outPath)
@@ -5872,7 +5369,8 @@ namespace TokLens
                 for (int i = 0; i < sampleN; i++)
                 {
                     RecentRequestRecord rq = res.RecentRequests[i];
-                    double tps = ComputeTps(rq.Output, rq.DurationMs);
+                    int measuredDuration=UsageTiming.IsMeasured(rq.TimingSource)?rq.DurationMs:0;
+                    double tps = ComputeTps(rq.Output, measuredDuration);
                     Dictionary<string, object> rd = new Dictionary<string, object>();
                     rd["time"] = rq.TimeLabel;
                     rd["tool"] = rq.Tool;
@@ -5880,8 +5378,10 @@ namespace TokLens
                     rd["fresh_input"] = rq.FreshInput;
                     rd["cache_read"] = rq.CacheRead;
                     rd["output"] = rq.Output;
-                    rd["duration_ms"] = rq.DurationMs;
-                    rd["tps"] = Math.Round(tps, 1);
+                    rd["duration_ms"] = measuredDuration;
+                    rd["timing_source"] = rq.TimingSource;
+                    rd["tps_kind"] = tps > 0 ? "request_average" : "unavailable";
+                    rd["tps"] = tps;
                     rd["cost_cny"] = Math.Round(rq.CostUsd * rate, 4);
                     recentSample.Add(rd);
                 }

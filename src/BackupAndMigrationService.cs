@@ -596,6 +596,9 @@ namespace TokLens
 
             Dictionary<string, object> nodeObj = new Dictionary<string, object>();
             nodeObj["schema"] = SyncService.SchemaVersion;
+            nodeObj["scanner_rev"] = snap.ScannerRev;
+            nodeObj["accounting_updated_ms"] = snap.AccountingUpdatedMs;
+            nodeObj["reconciled_partitions"] = snap.ReconciledPartitions;
             nodeObj["machine_id"] = SyncService.SanitizeMachineId(snap.MachineId);
             nodeObj["machine_name"] = !string.IsNullOrWhiteSpace(snap.MachineName) ? snap.MachineName : snap.MachineId;
             nodeObj["machine_type"] = !string.IsNullOrWhiteSpace(snap.MachineType) ? snap.MachineType : "windows";
@@ -705,7 +708,6 @@ namespace TokLens
             d["is_dark_theme"] = cfg.IsDarkTheme;
             d["prefer_cny"] = cfg.PreferCny;
             d["minimize_to_tray"] = cfg.MinimizeToTray;
-            d["daily_budget_usd"] = SanitizeDouble(Math.Max(0.0, cfg.DailyBudgetUsd), 4);
 
             Dictionary<string, string> aliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             if (cfg.NodeAliases != null)
@@ -1296,6 +1298,15 @@ namespace TokLens
             snap.OsInfo = ReadDictString(d, "os", "OsInfo") ?? "";
             snap.SyncedAt = ReadDictString(d, "synced_at", "SyncedAt") ?? "";
             snap.IsLocal = false;
+            snap.ScannerRev = (int)ReadDictLong(d, "scanner_rev", "ScannerRev");
+            snap.AccountingUpdatedMs = ReadDictLong(d, "accounting_updated_ms", "AccountingUpdatedMs");
+            IDictionary proofs = d.Contains("reconciled_partitions") ? d["reconciled_partitions"] as IDictionary : null;
+            if (proofs != null) foreach (DictionaryEntry proof in proofs)
+            {
+                long timestamp;
+                if (long.TryParse(Convert.ToString(proof.Value, CultureInfo.InvariantCulture), out timestamp) && timestamp > 0)
+                    snap.ReconciledPartitions[Convert.ToString(proof.Key, CultureInfo.InvariantCulture)] = timestamp;
+            }
 
             object recContainer = null;
             if (d.Contains("records")) recContainer = d["records"];
@@ -1559,16 +1570,6 @@ namespace TokLens
                 return;
 
             bool changed = false;
-
-            if (localCfg.DailyBudgetUsd <= 0.0 && importedSanitizedCfg.ContainsKey("daily_budget_usd"))
-            {
-                double impBudget = ReadDictDouble(importedSanitizedCfg, "daily_budget_usd");
-                if (impBudget > 0.0)
-                {
-                    localCfg.DailyBudgetUsd = Math.Round(impBudget, 4);
-                    changed = true;
-                }
-            }
 
             if (importedSanitizedCfg.ContainsKey("node_aliases") && importedSanitizedCfg["node_aliases"] is IDictionary)
             {

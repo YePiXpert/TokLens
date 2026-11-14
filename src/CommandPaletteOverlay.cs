@@ -207,7 +207,7 @@ namespace TokLens
             _backdrop = new Border();
             _backdrop.HorizontalAlignment = HorizontalAlignment.Stretch;
             _backdrop.VerticalAlignment = VerticalAlignment.Stretch;
-            _backdrop.Background = DesignSystem.BrushHex("#88000000");
+            _backdrop.SetResourceReference(Border.BackgroundProperty, "BgScrim");
             _backdrop.MouseLeftButtonDown += delegate(object sender, MouseButtonEventArgs e)
             {
                 e.Handled = true;
@@ -313,7 +313,7 @@ namespace TokLens
             _watermarkText = new TextBlock();
             _watermarkText.Text = "输入命令、切换视图、筛选设备或工具...";
             _watermarkText.FontFamily = DesignSystem.FontUi;
-            _watermarkText.FontSize = 13.5;
+            _watermarkText.FontSize = DesignSystem.TextLabel;
             _watermarkText.VerticalAlignment = VerticalAlignment.Center;
             _watermarkText.Margin = new Thickness(2.0, 0.0, 0.0, 0.0);
             _watermarkText.IsHitTestVisible = false;
@@ -390,7 +390,7 @@ namespace TokLens
             TextBlock escLabel = new TextBlock();
             escLabel.Text = "ESC";
             escLabel.FontFamily = DesignSystem.FontMono;
-            escLabel.FontSize = 10.5;
+            escLabel.FontSize = DesignSystem.TextCaption;
             escLabel.FontWeight = FontWeights.SemiBold;
             escLabel.VerticalAlignment = VerticalAlignment.Center;
             escLabel.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -423,7 +423,7 @@ namespace TokLens
         {
             TextBox tb = new TextBox();
             tb.FontFamily = DesignSystem.FontUi;
-            tb.FontSize = 13.5;
+            tb.FontSize = DesignSystem.TextLabel;
             tb.BorderThickness = new Thickness(0.0);
             tb.Background = Brushes.Transparent;
             tb.Padding = new Thickness(0.0);
@@ -488,7 +488,7 @@ namespace TokLens
             TextBlock hints = new TextBlock();
             hints.Text = "↑↓ 选择  ·  ↵ 执行  ·  Esc 关闭";
             hints.FontFamily = DesignSystem.FontUi;
-            hints.FontSize = 11.0;
+            hints.FontSize = DesignSystem.TextCaption;
             hints.VerticalAlignment = VerticalAlignment.Center;
             hints.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             Grid.SetColumn(hints, 0);
@@ -496,7 +496,7 @@ namespace TokLens
 
             _footerCountText = new TextBlock();
             _footerCountText.FontFamily = DesignSystem.FontMono;
-            _footerCountText.FontSize = 10.5;
+            _footerCountText.FontSize = DesignSystem.TextCaption;
             _footerCountText.VerticalAlignment = VerticalAlignment.Center;
             _footerCountText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             Grid.SetColumn(_footerCountText, 1);
@@ -854,7 +854,7 @@ namespace TokLens
             TextBlock tb = new TextBlock();
             tb.Text = categoryName;
             tb.FontFamily = DesignSystem.FontUi;
-            tb.FontSize = 11.0;
+            tb.FontSize = DesignSystem.TextCaption;
             tb.FontWeight = FontWeights.SemiBold;
             tb.Padding = new Thickness(10.0, isFirst ? 4.0 : 10.0, 10.0, 4.0);
             tb.IsHitTestVisible = false;
@@ -921,7 +921,7 @@ namespace TokLens
             TextBlock titleTb = new TextBlock();
             titleTb.Text = string.IsNullOrEmpty(item.Title) ? "(未命名命令)" : item.Title;
             titleTb.FontFamily = DesignSystem.FontUi;
-            titleTb.FontSize = 13.0;
+            titleTb.FontSize = DesignSystem.TextLabel;
             titleTb.FontWeight = FontWeights.Medium;
             titleTb.TextTrimming = TextTrimming.CharacterEllipsis;
             titleTb.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
@@ -933,7 +933,7 @@ namespace TokLens
                 subTb = new TextBlock();
                 subTb.Text = item.Subtitle;
                 subTb.FontFamily = DesignSystem.FontUi;
-                subTb.FontSize = 11.5;
+                subTb.FontSize = DesignSystem.TextCaption;
                 subTb.Margin = new Thickness(0.0, 1.5, 0.0, 0.0);
                 subTb.TextTrimming = TextTrimming.CharacterEllipsis;
                 subTb.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -960,7 +960,7 @@ namespace TokLens
                 shortcutLabel = new TextBlock();
                 shortcutLabel.Text = item.ShortcutText;
                 shortcutLabel.FontFamily = DesignSystem.FontMono;
-                shortcutLabel.FontSize = 11.0;
+                shortcutLabel.FontSize = DesignSystem.TextCaption;
                 shortcutLabel.VerticalAlignment = VerticalAlignment.Center;
                 shortcutLabel.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
                 shortcutBadge.Child = shortcutLabel;
@@ -1039,7 +1039,7 @@ namespace TokLens
                 ? "暂无可用命令"
                 : "未找到与 \"" + query + "\" 匹配的命令";
             title.FontFamily = DesignSystem.FontUi;
-            title.FontSize = 12.5;
+            title.FontSize = DesignSystem.TextLabel;
             title.FontWeight = FontWeights.Medium;
             title.HorizontalAlignment = HorizontalAlignment.Center;
             title.TextTrimming = TextTrimming.CharacterEllipsis;
@@ -1050,7 +1050,7 @@ namespace TokLens
             TextBlock hint = new TextBlock();
             hint.Text = "试试输入中文关键词、拼音/英文首字母（如 sx、mx）或快捷键（如 F5）";
             hint.FontFamily = DesignSystem.FontUi;
-            hint.FontSize = 11.0;
+            hint.FontSize = DesignSystem.TextCaption;
             hint.Margin = new Thickness(0.0, 4.0, 0.0, 0.0);
             hint.HorizontalAlignment = HorizontalAlignment.Center;
             hint.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");

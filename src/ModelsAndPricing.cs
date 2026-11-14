@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
@@ -13,9 +13,9 @@ namespace TokLens
 {
     public static class AppConstants
     {
-        public const string Version = "2.2";
-        public const string VersionTag = "v2.2";
-        public const string ProductTitle = "知微 · TokLens v2.2";
+        public const string Version = "2.3.0";
+        public const string VersionTag = "v2.3.0";
+        public const string ProductTitle = "知微 · TokLens v2.3.0";
     }
 
     internal sealed class WinSqlite : IDisposable
@@ -63,6 +63,15 @@ namespace TokLens
         [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
         private static extern double sqlite3_column_double(IntPtr stmt, int iCol);
 
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern IntPtr sqlite3_backup_init(IntPtr dest, byte[] destName, IntPtr source, byte[] sourceName);
+
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_backup_step(IntPtr backup, int pages);
+
+        [DllImport("winsqlite3.dll", CallingConvention = CallingConvention.Cdecl)]
+        private static extern int sqlite3_backup_finish(IntPtr backup);
+
         private IntPtr _db = IntPtr.Zero;
         private string _tempDir = null;
 
@@ -78,6 +87,20 @@ namespace TokLens
             if (val == null) return "''";
             string clean = val.IndexOf('\0') >= 0 ? val.Replace("\0", "") : val;
             return "'" + clean.Replace("'", "''") + "'";
+        }
+
+        public bool BackupTo(string path)
+        {
+            using (WinSqlite dest = OpenReadWrite(path))
+            {
+                if (dest == null) return false;
+                byte[] main = Encoding.ASCII.GetBytes("main\0");
+                IntPtr backup = sqlite3_backup_init(dest._db, main, _db, main);
+                if (backup == IntPtr.Zero) return false;
+                int rc = sqlite3_backup_step(backup, -1);
+                int finishRc = sqlite3_backup_finish(backup);
+                return rc == SQLITE_DONE && finishRc == SQLITE_OK;
+            }
         }
 
         public static WinSqlite OpenReadWrite(string dbPath)
@@ -274,9 +297,9 @@ namespace TokLens
             IntPtr stmt;
             int rc = sqlite3_prepare_v2(db, sql, sql.Length - 1, out stmt, IntPtr.Zero);
             if (rc != SQLITE_OK) return false;
-            sqlite3_step(stmt);
+            int stepRc = sqlite3_step(stmt);
             sqlite3_finalize(stmt);
-            return true;
+            return stepRc == SQLITE_ROW || stepRc == SQLITE_DONE;
         }
 
         public bool Exec(string sql)
@@ -297,20 +320,28 @@ namespace TokLens
             }
         }
 
-        public void Query(string sql, Action<SqliteRow> onRow)
+        public bool ExecRequired(string sql)
         {
-            if (_db == IntPtr.Zero) return;
+            if (!Exec(sql)) throw new IOException("无法更新用量账本；事务已中止，原有记录将保留。");
+            return true;
+        }
+
+        public bool Query(string sql, Action<SqliteRow> onRow)
+        {
+            if (_db == IntPtr.Zero) return false;
             byte[] utf8 = Encoding.UTF8.GetBytes(sql + "\0");
             IntPtr stmt;
             int rc = sqlite3_prepare_v2(_db, utf8, utf8.Length - 1, out stmt, IntPtr.Zero);
-            if (rc != SQLITE_OK || stmt == IntPtr.Zero) return;
+            if (rc != SQLITE_OK || stmt == IntPtr.Zero) return false;
             try
             {
                 SqliteRow row = new SqliteRow(stmt);
-                while (sqlite3_step(stmt) == SQLITE_ROW)
+                int stepRc;
+                while ((stepRc = sqlite3_step(stmt)) == SQLITE_ROW)
                 {
                     onRow(row);
                 }
+                return stepRc == SQLITE_DONE;
             }
             finally
             {
@@ -553,6 +584,7 @@ namespace TokLens
         {
             get
             {
+                if (Source == "unpriced") return "未定价";
                 return string.Format(CultureInfo.InvariantCulture, "${0:G} / ${1:G}", InputPerM, OutputPerM);
             }
         }
@@ -570,8 +602,10 @@ namespace TokLens
         public double LoggedCostUsd;
         public int Turns;
         public string DedupKey;
+        public string SessionId = "";
         public long TimestampMs;
         public int DurationMs;
+        public string TimingSource = ""; // "request" only for an explicit elapsed time or paired request timestamps.
         public long CacheWrite1h;
 
         public UsageEvent(string tool, string model, string date, long fi, long outTok, long cr, long cw, double loggedCost, int turns)
@@ -608,7 +642,10 @@ namespace TokLens
 
         public UsageEvent Clone()
         {
-            return new UsageEvent(Tool, Model, Date, FreshInput, Output, CacheRead, CacheWrite, LoggedCostUsd, Turns, DedupKey, TimestampMs, DurationMs, CacheWrite1h);
+            UsageEvent copy = new UsageEvent(Tool, Model, Date, FreshInput, Output, CacheRead, CacheWrite, LoggedCostUsd, Turns, DedupKey, TimestampMs, DurationMs, CacheWrite1h);
+            copy.SessionId = SessionId;
+            copy.TimingSource = TimingSource;
+            return copy;
         }
     }
 
@@ -624,6 +661,7 @@ namespace TokLens
         public long CacheWrite;
         public long Output;
         public int DurationMs;
+        public string TimingSource = "";
         public double CostUsd;
 
         public long TotalTokens
@@ -650,6 +688,7 @@ namespace TokLens
         public long TotalTokens { get; set; }
         public string TotalTokensText { get; set; }
         public int DurationMs { get; set; }
+        public string TimingSource { get; set; }
         public string DurationText { get; set; }
         public double Tps { get; set; }
         public string TpsText { get; set; }
@@ -718,7 +757,9 @@ namespace TokLens
         public string OsInfo;
         public string SyncedAt;
         public bool IsLocal;
-        public int ScannerRev = 27;
+        public int ScannerRev = UsageAccounting.Revision;
+        public long AccountingUpdatedMs;
+        public Dictionary<string, long> ReconciledPartitions = new Dictionary<string, long>(StringComparer.Ordinal);
         public List<RecordBucket> Records = new List<RecordBucket>();
 
         public NodeSnapshot Clone()
@@ -731,6 +772,8 @@ namespace TokLens
             c.SyncedAt = SyncedAt;
             c.IsLocal = IsLocal;
             c.ScannerRev = ScannerRev;
+            c.AccountingUpdatedMs = AccountingUpdatedMs;
+            c.ReconciledPartitions = new Dictionary<string, long>(ReconciledPartitions, StringComparer.Ordinal);
             c.Records = new List<RecordBucket>(Records != null ? Records.Count : 0);
             if (Records != null)
             {
@@ -781,7 +824,18 @@ namespace TokLens
         public string EcoId = "";       // "google", "claude", "openai", "cursor", "windsurf", "coding_plan"
         public bool Enabled = false;    // 用户是否持有/开启该订阅
         public string PlanName = "";    // 例如 "Google AI Pro"、"Claude Max 5x"、"自定义月费"
-        public double MonthlyUsd = 20.0;// 等效月费（USD）
+        public double MonthlyUsd = 0.0; // Legacy only; never treated as verified payment.
+        public string Id = "";
+        public string OfferId = "";
+        public string Currency = "USD";
+        public double Amount;
+        public int BillingMonths = 1;
+        public string Region = "";
+        public string AccountLabel = "";
+        public string StartDate = "";
+        public string EndDate = "";
+        public string Note = "";
+        public bool FeeConfirmed;
 
         public SubscriptionPlanConfig Clone()
         {
@@ -790,6 +844,8 @@ namespace TokLens
             c.Enabled = this.Enabled;
             c.PlanName = this.PlanName ?? "";
             c.MonthlyUsd = this.MonthlyUsd;
+            c.Id=Id; c.OfferId=OfferId; c.Currency=Currency; c.Amount=Amount; c.BillingMonths=BillingMonths;
+            c.Region=Region; c.AccountLabel=AccountLabel; c.StartDate=StartDate; c.EndDate=EndDate; c.Note=Note; c.FeeConfirmed=FeeConfirmed;
             return c;
         }
     }
@@ -809,7 +865,6 @@ namespace TokLens
         public bool IsDarkTheme = true;
         public bool PreferCny = true;
         public bool MinimizeToTray = false;
-        public double DailyBudgetUsd = 0.0;
         public Dictionary<string, string> NodeAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         public bool SubscriptionsCustomized = false;
         public List<SubscriptionPlanConfig> Subscriptions = new List<SubscriptionPlanConfig>();
@@ -847,7 +902,6 @@ namespace TokLens
             IsDarkTheme = other.IsDarkTheme;
             PreferCny = other.PreferCny;
             MinimizeToTray = other.MinimizeToTray;
-            DailyBudgetUsd = other.DailyBudgetUsd;
             NodeAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             if (other.NodeAliases != null)
             {
@@ -945,6 +999,8 @@ namespace TokLens
         public int ChangedFilesCount;
         public int TotalFilesTracked;
         public int ArchivedFilesCount;
+        public long AccountingUpdatedMs;
+        public Dictionary<string, long> ReconciledPartitions = new Dictionary<string, long>(StringComparer.Ordinal);
         public List<RecordBucket> Records = new List<RecordBucket>();
         public List<RecentRequestRecord> RecentRequests = new List<RecentRequestRecord>();
         public List<string> Warnings = new List<string>();
@@ -979,7 +1035,6 @@ namespace TokLens
         private static string _lastCloudSource = "内置基准";
         private static string _lastCloudUpdated = "";
 
-        private static readonly Regex ParenRegex = new Regex(@"\s*\([^)]*\)\s*", RegexOptions.Compiled);
         private static readonly Regex SpaceUnderscoreRegex = new Regex(@"[\s_]+", RegexOptions.Compiled);
         private static readonly Regex TierSuffixRegex = new Regex(@"-(?:xhigh|high|medium|low|minimal|thinking|nothinking|reasoning|preview|latest|beta|exp|experimental|fast|max|auto|online|nitro|exacto|1m)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
         private static readonly Regex DateSuffixRegex = new Regex(@"-(?:20\d{6}|20\d{2}-\d{2}-\d{2}|\d{4})$", RegexOptions.Compiled);
@@ -1677,7 +1732,7 @@ namespace TokLens
                 if (colonIdx >= 0 && colonIdx < m.Length - 1)
                     m = m.Substring(colonIdx + 1).Trim();
             }
-            string clean = ParenRegex.Replace(m, "").Trim();
+            string clean = m.Replace("(", " ").Replace(")", " ").Trim();
             string slug = SpaceUnderscoreRegex.Replace(clean.ToLowerInvariant(), "-");
             return string.IsNullOrEmpty(slug) ? fallback : slug;
         }
@@ -1712,30 +1767,6 @@ namespace TokLens
             return false;
         }
 
-        private static bool IsPrefixBoundaryMatch(string text, string prefix)
-        {
-            if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(prefix)) return false;
-            if (!text.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) return false;
-            if (text.Length == prefix.Length) return true;
-            char next = text[prefix.Length];
-            // Do not treat decimal point between digits (e.g. claude-opus-4 vs claude-opus-4.6) as a prefix boundary
-            if (next != '-' && next != '_') return false;
-
-            // Prevent base model prefixes (e.g. gpt-5.4 or deepseek-v4) from shadowing distinct sub-tiers (-mini, -nano, -flash, -lite, -air, -pro)
-            string rest = text.Substring(prefix.Length).ToLowerInvariant();
-            if (rest.Contains("-mini") || rest.Contains("_mini") ||
-                rest.Contains("-nano") || rest.Contains("_nano") ||
-                rest.Contains("-lite") || rest.Contains("_lite") ||
-                rest.Contains("-flash") || rest.Contains("_flash") ||
-                rest.Contains("-air") || rest.Contains("_air") ||
-                rest.Contains("-pro") || rest.Contains("_pro") ||
-                rest.Contains("-highspeed") || rest.Contains("_highspeed"))
-            {
-                return false;
-            }
-            return true;
-        }
-
         public ModelRate Lookup(string rawModel)
         {
             string slug = NormalizeModelId(rawModel, "unknown");
@@ -1763,56 +1794,9 @@ namespace TokLens
                 }
             }
 
-            string curAlt = ConvertClaudeVersionForm(cur);
-            string slugAlt = ConvertClaudeVersionForm(slug);
-
-            string bestKey = null;
-            foreach (string key in _rates.Keys)
-            {
-                if (key.Length < 2) continue;
-                if (IsPrefixBoundaryMatch(slug, key) ||
-                    IsPrefixBoundaryMatch(cur, key) ||
-                    (!string.IsNullOrEmpty(slugAlt) && IsPrefixBoundaryMatch(slugAlt, key)) ||
-                    (!string.IsNullOrEmpty(curAlt) && IsPrefixBoundaryMatch(curAlt, key)))
-                {
-                    if (bestKey == null || key.Length > bestKey.Length)
-                        bestKey = key;
-                }
-            }
-            if (bestKey != null) return _rates[bestKey];
-
-            if (slug.Contains("minimax")) return _rates["minimax-m2.5"];
-            if (slug.Contains("kimi") || slug.Contains("moonshot") || slug.StartsWith("k3", StringComparison.Ordinal))
-                return slug.Contains("k2") ? _rates["kimi-k2.5"] : _rates["kimi-for-coding"];
-            if (slug.Contains("glm"))
-                return slug.Contains("flash") ? _rates["glm-4.5-flash"] : (slug.Contains("air") ? _rates["glm-4.5-air"] : _rates["glm-5"]);
-            if (slug.Contains("deepseek"))
-            {
-                if (slug.Contains("r1") || slug.Contains("reasoner")) return _rates["deepseek-r1"];
-                return slug.Contains("flash") ? _rates["deepseek-v4.1-flash"] : _rates["deepseek-v3.2"];
-            }
-            if (slug.Contains("qwen") || slug.Contains("qwq"))
-                return slug.Contains("max") ? _rates["qwen3-max"] : _rates["qwen3-coder-plus"];
-            if (slug.Contains("doubao")) return _rates["doubao-seed-code"];
-            if (slug.Contains("devstral")) return _rates["devstral"];
-            if (slug.Contains("codestral")) return _rates["codestral"];
-            if (slug.Contains("opus")) return _rates["claude-opus-4-6"];
-            if (slug.Contains("sonnet")) return _rates["claude-sonnet-4-6"];
-            if (slug.Contains("haiku")) return _rates["claude-haiku-4-5"];
-            if (slug.Contains("gemini"))
-            {
-                if (slug.Contains("flash-lite") || slug.Contains("lite")) return _rates["gemini-2.5-flash-lite"];
-                if (slug.Contains("flash")) return _rates["gemini-2.5-flash"];
-                return _rates["gemini-2.5-pro"];
-            }
-            if (slug.Contains("gpt") || slug.Contains("codex"))
-            {
-                if (slug.Contains("nano")) return _rates["gpt-5-nano"];
-                if (slug.Contains("mini")) return _rates["gpt-5-mini"];
-                return _rates["gpt-5.2-codex"];
-            }
-
-            return new ModelRate(1.0, 4.0, 0.1, 0.0, "fallback");
+            // A shared family name is not evidence for a model's price.
+            // Preserve measured tokens and expose the missing rate explicitly.
+            return new ModelRate(0.0, 0.0, 0.0, 0.0, "unpriced");
         }
 
         private static void ApplyLongContextTierIfApplicable(
@@ -1927,19 +1911,6 @@ namespace TokLens
             }
         }
 
-        /// <summary>返回当前价格库内所有合法模型标识（已排序），供平替模拟器自定义搜索选择器使用。</summary>
-        public List<string> GetAllModelIds()
-        {
-            List<string> list = new List<string>(_rates.Count);
-            foreach (string key in _rates.Keys)
-            {
-                if (string.IsNullOrWhiteSpace(key)) continue;
-                if (key.StartsWith("__", StringComparison.Ordinal)) continue;
-                list.Add(key);
-            }
-            list.Sort(StringComparer.OrdinalIgnoreCase);
-            return list;
-        }
     }
 
     public sealed class ExchangeRateInfo

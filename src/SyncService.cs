@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -330,7 +330,6 @@ namespace TokLens
             cfg.IsDarkTheme = true;
             cfg.PreferCny = true;
             cfg.MinimizeToTray = false;
-            cfg.DailyBudgetUsd = 0.0;
             if (cfg.NodeAliases == null)
                 cfg.NodeAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -377,12 +376,6 @@ namespace TokLens
                             cfg.PreferCny = Convert.ToBoolean(d["prefer_cny"], CultureInfo.InvariantCulture);
                         if (d.ContainsKey("minimize_to_tray") && d["minimize_to_tray"] != null)
                             cfg.MinimizeToTray = Convert.ToBoolean(d["minimize_to_tray"], CultureInfo.InvariantCulture);
-                        if (d.ContainsKey("daily_budget_usd") && d["daily_budget_usd"] != null)
-                        {
-                            double budget = Convert.ToDouble(d["daily_budget_usd"], CultureInfo.InvariantCulture);
-                            if (!double.IsNaN(budget) && !double.IsInfinity(budget) && budget >= 0.0)
-                                cfg.DailyBudgetUsd = budget;
-                        }
                         if (d.ContainsKey("node_aliases") && d["node_aliases"] is IDictionary)
                         {
                             IDictionary rawAliases = (IDictionary)d["node_aliases"];
@@ -404,21 +397,7 @@ namespace TokLens
                             {
                                 Dictionary<string, object> subMap = rawSubs[si] as Dictionary<string, object>;
                                 if (subMap == null) continue;
-                                SubscriptionPlanConfig sp = new SubscriptionPlanConfig();
-                                sp.EcoId = subMap.ContainsKey("eco_id") && subMap["eco_id"] != null
-                                    ? Convert.ToString(subMap["eco_id"], CultureInfo.InvariantCulture).Trim()
-                                    : "";
-                                sp.Enabled = subMap.ContainsKey("enabled") && subMap["enabled"] != null &&
-                                    Convert.ToBoolean(subMap["enabled"], CultureInfo.InvariantCulture);
-                                sp.PlanName = subMap.ContainsKey("plan_name") && subMap["plan_name"] != null
-                                    ? Convert.ToString(subMap["plan_name"], CultureInfo.InvariantCulture).Trim()
-                                    : "";
-                                if (subMap.ContainsKey("monthly_usd") && subMap["monthly_usd"] != null)
-                                {
-                                    double musd = Convert.ToDouble(subMap["monthly_usd"], CultureInfo.InvariantCulture);
-                                    if (!double.IsNaN(musd) && !double.IsInfinity(musd) && musd >= 0.0)
-                                        sp.MonthlyUsd = musd;
-                                }
+                                SubscriptionPlanConfig sp = SubscriptionCatalog.ReadConfig(subMap);
                                 if (!string.IsNullOrEmpty(sp.EcoId))
                                     cfg.Subscriptions.Add(sp);
                             }
@@ -449,10 +428,6 @@ namespace TokLens
             d["is_dark_theme"] = cfg.IsDarkTheme;
             d["prefer_cny"] = cfg.PreferCny;
             d["minimize_to_tray"] = cfg.MinimizeToTray;
-            double cleanBudget = (double.IsNaN(cfg.DailyBudgetUsd) || double.IsInfinity(cfg.DailyBudgetUsd) || cfg.DailyBudgetUsd < 0.0)
-                ? 0.0
-                : Math.Round(cfg.DailyBudgetUsd, 4);
-            d["daily_budget_usd"] = cleanBudget;
 
             Dictionary<string, string> cleanAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
             if (cfg.NodeAliases != null)
@@ -472,13 +447,7 @@ namespace TokLens
                 {
                     SubscriptionPlanConfig sp = cfg.Subscriptions[si];
                     if (sp == null || string.IsNullOrWhiteSpace(sp.EcoId)) continue;
-                    Dictionary<string, object> sm = new Dictionary<string, object>();
-                    sm["eco_id"] = sp.EcoId.Trim();
-                    sm["enabled"] = sp.Enabled;
-                    sm["plan_name"] = sp.PlanName ?? "";
-                    sm["monthly_usd"] = (double.IsNaN(sp.MonthlyUsd) || double.IsInfinity(sp.MonthlyUsd) || sp.MonthlyUsd < 0.0)
-                        ? 0.0
-                        : Math.Round(sp.MonthlyUsd, 4);
+                    Dictionary<string, object> sm = SubscriptionCatalog.WriteConfig(sp);
                     subList.Add(sm);
                 }
             }
@@ -921,14 +890,6 @@ namespace TokLens
             return false;
         }
 
-        public static bool TryReadGitHubCliToken(out string token)
-        {
-            // 优先读取 gh CLI 真实登录的存储令牌（避免被其他项目的受限 GH_TOKEN 环境变量静默劫持）；若未登录 gh 再回退环境变量
-            if (TryReadGitHubCliTokenForUser(null, true, out token))
-                return true;
-            return TryReadGitHubCliTokenForUser(null, false, out token);
-        }
-
         private static int CompareGistCandidates(GitHubGistCandidate a, GitHubGistCandidate b)
         {
             if (ReferenceEquals(a, b)) return 0;
@@ -1253,6 +1214,8 @@ namespace TokLens
             dst.SyncedAt = src.SyncedAt;
             dst.IsLocal = src.IsLocal;
             dst.ScannerRev = src.ScannerRev;
+            dst.AccountingUpdatedMs = src.AccountingUpdatedMs;
+            dst.ReconciledPartitions = new Dictionary<string, long>(src.ReconciledPartitions, StringComparer.Ordinal);
             if (src.Records != null)
             {
                 List<RecordBucket> srcRecords = src.Records;
@@ -1344,6 +1307,8 @@ namespace TokLens
             dst.OsInfo = src.OsInfo;
             dst.SyncedAt = src.SyncedAt;
             dst.ScannerRev = src.ScannerRev;
+            dst.AccountingUpdatedMs = src.AccountingUpdatedMs;
+            dst.ReconciledPartitions = new Dictionary<string, long>(src.ReconciledPartitions, StringComparer.Ordinal);
             List<RecordBucket> copied = new List<RecordBucket>(src.Records.Count);
             for (int i = 0; i < src.Records.Count; i++)
             {
@@ -1368,184 +1333,41 @@ namespace TokLens
         public static NodeSnapshot MergeNodeSnapshotsHighWater(NodeSnapshot primary, NodeSnapshot historical)
         {
             if (primary == null && historical == null) return null;
-
-            NodeSnapshot res = new NodeSnapshot();
-            if (primary != null)
+            NodeSnapshot identity = primary ?? historical;
+            NodeSnapshot res = CloneSnapshotSafe(identity, identity.MachineId);
+            res.Records.Clear();
+            res.ScannerRev = Math.Max(primary != null ? primary.ScannerRev : 0, historical != null ? historical.ScannerRev : 0);
+            res.AccountingUpdatedMs = Math.Max(primary != null ? primary.AccountingUpdatedMs : 0, historical != null ? historical.AccountingUpdatedMs : 0);
+            res.SyncedAt = PickNewerTimestamp(primary != null ? primary.SyncedAt : null, historical != null ? historical.SyncedAt : null);
+            res.ReconciledPartitions = new Dictionary<string, long>(StringComparer.Ordinal);
+            Dictionary<string, RecordBucket> pMap = BuildBucketMap(primary != null ? primary.Records : null, res.MachineId, res.MachineName, res.MachineType);
+            Dictionary<string, RecordBucket> hMap = BuildBucketMap(historical != null ? historical.Records : null, res.MachineId, res.MachineName, res.MachineType);
+            Dictionary<string, bool> owners = new Dictionary<string, bool>(StringComparer.Ordinal);
+            HashSet<string> partitions = new HashSet<string>(StringComparer.Ordinal);
+            if (primary != null && primary.ScannerRev >= UsageAccounting.ReconciledRevision) partitions.UnionWith(primary.ReconciledPartitions.Keys);
+            if (historical != null && historical.ScannerRev >= UsageAccounting.ReconciledRevision) partitions.UnionWith(historical.ReconciledPartitions.Keys);
+            foreach (string partition in partitions)
             {
-                string fallbackMid = historical != null ? historical.MachineId : null;
-                res.MachineId = SanitizeMachineId(!string.IsNullOrWhiteSpace(primary.MachineId) ? primary.MachineId : fallbackMid);
-                res.MachineName = !string.IsNullOrWhiteSpace(primary.MachineName)
-                    ? primary.MachineName
-                    : (historical != null && !string.IsNullOrWhiteSpace(historical.MachineName) ? historical.MachineName : res.MachineId);
-                res.MachineType = !string.IsNullOrWhiteSpace(primary.MachineType)
-                    ? primary.MachineType
-                    : (historical != null && !string.IsNullOrWhiteSpace(historical.MachineType) ? historical.MachineType : "windows");
-                res.OsInfo = !string.IsNullOrWhiteSpace(primary.OsInfo)
-                    ? primary.OsInfo
-                    : (historical != null && !string.IsNullOrWhiteSpace(historical.OsInfo) ? historical.OsInfo : "");
-                res.SyncedAt = PickNewerTimestamp(primary.SyncedAt, historical != null ? historical.SyncedAt : null);
-                res.IsLocal = primary.IsLocal;
-                res.ScannerRev = primary.ScannerRev > 0 ? primary.ScannerRev : (historical != null ? historical.ScannerRev : 27);
+                long pTime = 0, hTime = 0;
+                if (primary != null && primary.ScannerRev >= UsageAccounting.ReconciledRevision) primary.ReconciledPartitions.TryGetValue(partition, out pTime);
+                if (historical != null && historical.ScannerRev >= UsageAccounting.ReconciledRevision) historical.ReconciledPartitions.TryGetValue(partition, out hTime);
+                if (pTime <= 0 && hTime <= 0) continue;
+                bool preferPrimary = pTime >= hTime;
+                owners[partition] = preferPrimary;
+                res.ReconciledPartitions[partition] = Math.Max(pTime, hTime);
             }
-            else
+            HashSet<string> keys = new HashSet<string>(pMap.Keys, StringComparer.Ordinal);
+            keys.UnionWith(hMap.Keys);
+            foreach (string key in keys)
             {
-                res.MachineId = SanitizeMachineId(historical.MachineId);
-                res.MachineName = !string.IsNullOrWhiteSpace(historical.MachineName) ? historical.MachineName : res.MachineId;
-                res.MachineType = !string.IsNullOrWhiteSpace(historical.MachineType) ? historical.MachineType : "vps";
-                res.OsInfo = historical.OsInfo ?? "";
-                res.SyncedAt = historical.SyncedAt ?? "";
-                res.IsLocal = historical.IsLocal;
-                res.ScannerRev = historical.ScannerRev;
+                RecordBucket p, h;
+                pMap.TryGetValue(key, out p); hMap.TryGetValue(key, out h);
+                RecordBucket sample = p ?? h;
+                bool preferPrimary;
+                RecordBucket chosen = owners.TryGetValue(UsageAccounting.Partition(sample.Date, sample.Tool), out preferPrimary)
+                    ? (preferPrimary ? p : h) : UsageAccounting.PickWholeBucket(p, h);
+                if (chosen != null) res.Records.Add(chosen);
             }
-
-            Dictionary<string, RecordBucket> primaryMap = BuildBucketMap(primary != null ? primary.Records : null, res.MachineId, res.MachineName, res.MachineType);
-            Dictionary<string, RecordBucket> histMap = BuildBucketMap(historical != null ? historical.Records : null, res.MachineId, res.MachineName, res.MachineType);
-
-            bool upgradingLegacyScanner = primary != null && primary.ScannerRev >= 27 && (historical == null || historical.ScannerRev < 27);
-            bool primHasAgy = false;
-            bool primHasCodex = false;
-            if (upgradingLegacyScanner)
-            {
-                foreach (KeyValuePair<string, RecordBucket> kv in primaryMap)
-                {
-                    string t = kv.Value != null ? (kv.Value.Tool ?? "") : "";
-                    if (string.Equals(t, "Google Antigravity", StringComparison.Ordinal))
-                        primHasAgy = true;
-                    else if (string.Equals(t, "OpenAI Codex", StringComparison.Ordinal))
-                        primHasCodex = true;
-                }
-            }
-
-            // 检测同日同工具模型重分类：避免 local_highwater / Gist 合并时把旧错模型与新准确模型叠加翻倍
-            Dictionary<string, int> primDtTurns = new Dictionary<string, int>(StringComparer.Ordinal);
-            Dictionary<string, long> primDtTokens = new Dictionary<string, long>(StringComparer.Ordinal);
-            foreach (KeyValuePair<string, RecordBucket> kv in primaryMap)
-            {
-                RecordBucket b = kv.Value;
-                string dtTool = (b.Date ?? "") + "|" + (b.Tool ?? "");
-                int t;
-                primDtTurns.TryGetValue(dtTool, out t);
-                primDtTurns[dtTool] = t + b.Turns;
-                long tok;
-                primDtTokens.TryGetValue(dtTool, out tok);
-                primDtTokens[dtTool] = tok + b.TotalTokens;
-            }
-
-            Dictionary<string, int> histDtTurns = new Dictionary<string, int>(StringComparer.Ordinal);
-            Dictionary<string, long> histDtTokens = new Dictionary<string, long>(StringComparer.Ordinal);
-            foreach (KeyValuePair<string, RecordBucket> kv in histMap)
-            {
-                RecordBucket b = kv.Value;
-                string dtTool = (b.Date ?? "") + "|" + (b.Tool ?? "");
-                int t;
-                histDtTurns.TryGetValue(dtTool, out t);
-                histDtTurns[dtTool] = t + b.Turns;
-                long tok;
-                histDtTokens.TryGetValue(dtTool, out tok);
-                histDtTokens[dtTool] = tok + b.TotalTokens;
-            }
-
-            HashSet<string> reclassifiedDtTools = new HashSet<string>(StringComparer.Ordinal);
-            foreach (KeyValuePair<string, int> kv in histDtTurns)
-            {
-                string dtTool = kv.Key;
-                int ht = kv.Value;
-                if (ht <= 0) continue;
-                int pt;
-                primDtTurns.TryGetValue(dtTool, out pt);
-                long htok;
-                histDtTokens.TryGetValue(dtTool, out htok);
-                long ptok;
-                primDtTokens.TryGetValue(dtTool, out ptok);
-                if (pt >= ht && (double)ptok >= (double)htok * 0.98)
-                {
-                    bool hasExcess = false;
-                    foreach (KeyValuePair<string, RecordBucket> hkv in histMap)
-                    {
-                        RecordBucket hb = hkv.Value;
-                        if (((hb.Date ?? "") + "|" + (hb.Tool ?? "")) != dtTool) continue;
-                        RecordBucket pb;
-                        if (!primaryMap.TryGetValue(hkv.Key, out pb) || hb.Turns > pb.Turns || hb.TotalTokens > pb.TotalTokens)
-                        {
-                            hasExcess = true;
-                            break;
-                        }
-                    }
-                    if (hasExcess)
-                        reclassifiedDtTools.Add(dtTool);
-                }
-            }
-
-            foreach (KeyValuePair<string, RecordBucket> kv in primaryMap)
-            {
-                RecordBucket p = kv.Value;
-                string dtTool = (p.Date ?? "") + "|" + (p.Tool ?? "");
-                bool bypassLegacy = upgradingLegacyScanner &&
-                    ((primHasAgy && string.Equals(p.Tool, "Google Antigravity", StringComparison.Ordinal)) ||
-                     (primHasCodex && string.Equals(p.Tool, "OpenAI Codex", StringComparison.Ordinal)));
-                if (bypassLegacy || reclassifiedDtTools.Contains(dtTool))
-                {
-                    res.Records.Add(p);
-                    continue;
-                }
-                RecordBucket h;
-                if (histMap.TryGetValue(kv.Key, out h))
-                {
-                    RecordBucket m = new RecordBucket();
-                    m.MachineId = res.MachineId;
-                    m.MachineName = res.MachineName;
-                    m.MachineType = res.MachineType;
-                    m.Date = p.Date;
-                    m.Tool = p.Tool;
-                    m.Model = p.Model;
-
-                    bool primaryCoversAll = p.Turns >= h.Turns &&
-                                            p.FreshInput >= h.FreshInput &&
-                                            p.CacheRead >= h.CacheRead &&
-                                            p.CacheWrite >= h.CacheWrite &&
-                                            p.Output >= h.Output;
-
-                    m.Turns = Math.Max(p.Turns, h.Turns);
-                    m.FreshInput = Math.Max(p.FreshInput, h.FreshInput);
-                    m.CacheRead = Math.Max(p.CacheRead, h.CacheRead);
-                    m.CacheWrite = Math.Max(p.CacheWrite, h.CacheWrite);
-                    m.Output = Math.Max(p.Output, h.Output);
-
-                    long pSumTok = p.FreshInput + p.CacheRead + p.CacheWrite + p.Output;
-                    if (primaryCoversAll && (p.CostUsd > 0.0 || pSumTok == 0L))
-                    {
-                        m.CostUsd = p.CostUsd;
-                        m.BaselineUsd = (p.BaselineUsd > 0.0 || pSumTok == 0L) ? p.BaselineUsd : Math.Max(p.CostUsd, h.BaselineUsd);
-                        m.RateLabel = !string.IsNullOrWhiteSpace(p.RateLabel) ? p.RateLabel : (h.RateLabel ?? "");
-                    }
-                    else
-                    {
-                        m.CostUsd = Math.Max(p.CostUsd, h.CostUsd);
-                        m.BaselineUsd = Math.Max(p.BaselineUsd, h.BaselineUsd);
-                        m.RateLabel = !string.IsNullOrWhiteSpace(p.RateLabel) ? p.RateLabel : (h.RateLabel ?? "");
-                    }
-                    res.Records.Add(m);
-                }
-                else
-                {
-                    res.Records.Add(p);
-                }
-            }
-
-            foreach (KeyValuePair<string, RecordBucket> kv in histMap)
-            {
-                if (!primaryMap.ContainsKey(kv.Key))
-                {
-                    RecordBucket hb = kv.Value;
-                    bool bypassLegacy = upgradingLegacyScanner &&
-                        ((primHasAgy && string.Equals(hb.Tool, "Google Antigravity", StringComparison.Ordinal)) ||
-                         (primHasCodex && string.Equals(hb.Tool, "OpenAI Codex", StringComparison.Ordinal)));
-                    string dtTool = (hb.Date ?? "") + "|" + (hb.Tool ?? "");
-                    if (!bypassLegacy && !reclassifiedDtTools.Contains(dtTool))
-                        res.Records.Add(hb);
-                }
-            }
-
             res.Records.Sort(CompareRecordBuckets);
             return res;
         }
@@ -1598,6 +1420,11 @@ namespace TokLens
             snap.OsInfo = Environment.OSVersion.VersionString;
             snap.SyncedAt = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
             snap.IsLocal = true;
+            if (localRes != null)
+            {
+                snap.AccountingUpdatedMs = localRes.AccountingUpdatedMs;
+                snap.ReconciledPartitions = new Dictionary<string, long>(localRes.ReconciledPartitions, StringComparer.Ordinal);
+            }
 
             if (localRes != null && localRes.Records != null)
             {
@@ -1654,7 +1481,9 @@ namespace TokLens
 
             Dictionary<string, object> root = new Dictionary<string, object>();
             root["schema"] = SchemaVersion;
-            root["scanner_rev"] = snap.ScannerRev > 0 ? snap.ScannerRev : 27;
+            root["scanner_rev"] = snap.ScannerRev;
+            root["accounting_updated_ms"] = snap.AccountingUpdatedMs;
+            root["reconciled_partitions"] = snap.ReconciledPartitions;
             root["machine_id"] = snap.MachineId;
             root["machine_name"] = snap.MachineName;
             root["machine_type"] = snap.MachineType ?? "windows";
@@ -1687,6 +1516,19 @@ namespace TokLens
                 {
                     try { snap.ScannerRev = Convert.ToInt32(d["scanner_rev"], CultureInfo.InvariantCulture); }
                     catch { snap.ScannerRev = 0; }
+                }
+
+                if (d.ContainsKey("accounting_updated_ms")) snap.AccountingUpdatedMs = Convert.ToInt64(d["accounting_updated_ms"], CultureInfo.InvariantCulture);
+                object proof;
+                if (d.TryGetValue("reconciled_partitions", out proof))
+                {
+                    Dictionary<string, object> partitions = proof as Dictionary<string, object>;
+                    if (partitions != null) foreach (KeyValuePair<string, object> kv in partitions)
+                    {
+                        long timestamp;
+                        if (long.TryParse(Convert.ToString(kv.Value, CultureInfo.InvariantCulture), out timestamp) && timestamp > 0)
+                            snap.ReconciledPartitions[kv.Key] = timestamp;
+                    }
                 }
 
                 if (d.ContainsKey("records"))

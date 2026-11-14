@@ -1,6 +1,6 @@
 @echo off
 setlocal
-echo [TokLens v2.2] Building portable single-file TokLens.exe (with embedded Linux VPS agent)...
+echo [TokLens v2.3.0] Building portable single-file TokLens.exe (with embedded Linux VPS agent)...
 
 set "FWDIR=%SystemRoot%\Microsoft.NET\Framework64\v4.0.30319"
 if not exist "%FWDIR%\csc.exe" (

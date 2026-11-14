@@ -261,9 +261,9 @@ namespace TokLens
                 }
             }
 
-            Title = "三源模型价格库与自定义单价工作台 — " + AppConstants.ProductTitle;
-            Width = 780;
-            Height = 560;
+            Title = "计价规则 — " + AppConstants.ProductTitle;
+            Width = 940;
+            Height = 620;
             MinWidth = 700;
             MinHeight = 480;
             WindowStartupLocation = (Owner != null) ? WindowStartupLocation.CenterOwner : WindowStartupLocation.CenterScreen;
@@ -291,17 +291,6 @@ namespace TokLens
             PreviewKeyDown += OnWindowPreviewKeyDown;
 
             ReloadCatalogAndBind(null, true);
-        }
-
-        public void ApplyStudioTheme(bool isDark)
-        {
-            _isDark = isDark;
-            DesignSystem.ApplyTheme(this, _isDark);
-            ModernControlsFactory.UpdateSegmentedGroup(_filterBtns, _activeFilterIndex);
-            string keepModel = (_modelIdInput != null && !string.IsNullOrWhiteSpace(_modelIdInput.Text))
-                ? _modelIdInput.Text.Trim()
-                : null;
-            ReloadCatalogAndBind(keepModel, false);
         }
 
         // -------------------- Window Shell & Layout --------------------
@@ -366,8 +355,8 @@ namespace TokLens
             leftSp.Children.Add(iconBadge);
 
             TextBlock titleTb = new TextBlock();
-            titleTb.Text = "模型价格库与自定义单价工作台";
-            titleTb.FontSize = 13;
+            titleTb.Text = "计价规则";
+            titleTb.FontSize = DesignSystem.TextLabel;
             titleTb.FontWeight = FontWeights.SemiBold;
             titleTb.VerticalAlignment = VerticalAlignment.Center;
             titleTb.Margin = new Thickness(0, 0, 10, 0);
@@ -464,7 +453,7 @@ namespace TokLens
             Grid inputHost = new Grid();
             _searchPlaceholder = new TextBlock();
             _searchPlaceholder.Text = "搜索模型 ID 或厂商 (Ctrl+F)...";
-            _searchPlaceholder.FontSize = 12;
+            _searchPlaceholder.FontSize = DesignSystem.TextBody;
             _searchPlaceholder.VerticalAlignment = VerticalAlignment.Center;
             _searchPlaceholder.IsHitTestVisible = false;
             _searchPlaceholder.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -472,7 +461,7 @@ namespace TokLens
 
             _searchBox = new TextBox();
             _searchBox.FontFamily = DesignSystem.FontUi;
-            _searchBox.FontSize = 12;
+            _searchBox.FontSize = DesignSystem.TextBody;
             _searchBox.BorderThickness = new Thickness(0);
             _searchBox.Background = Brushes.Transparent;
             _searchBox.Padding = new Thickness(0);
@@ -540,7 +529,7 @@ namespace TokLens
             // Col 3: Right Match Counter
             _matchCountText = new TextBlock();
             _matchCountText.Text = "";
-            _matchCountText.FontSize = 11;
+            _matchCountText.FontSize = DesignSystem.TextCaption;
             _matchCountText.HorizontalAlignment = HorizontalAlignment.Right;
             _matchCountText.VerticalAlignment = VerticalAlignment.Center;
             _matchCountText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -571,10 +560,10 @@ namespace TokLens
                 _grid, "输出 ($/1M)", "OutputText", "OutputPerM",
                 new DataGridLength(98), true, true, true));
             _grid.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(
-                _grid, "缓存读取 ($/1M)", "CacheReadText", "CacheReadPerM",
+                _grid, "缓存读 ($/1M)", "CacheReadText", "CacheReadPerM",
                 new DataGridLength(108), true, true, false));
             _grid.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(
-                _grid, "缓存写入 ($/1M)", "CacheWriteText", "CacheWritePerM",
+                _grid, "缓存写 ($/1M)", "CacheWriteText", "CacheWritePerM",
                 new DataGridLength(108), true, true, false));
 
             _grid.SelectionChanged += OnGridSelectionChanged;
@@ -592,7 +581,7 @@ namespace TokLens
 
             _emptyTitleText = new TextBlock();
             _emptyTitleText.Text = "未找到匹配的模型";
-            _emptyTitleText.FontSize = 13;
+            _emptyTitleText.FontSize = DesignSystem.TextLabel;
             _emptyTitleText.FontWeight = FontWeights.Medium;
             _emptyTitleText.HorizontalAlignment = HorizontalAlignment.Center;
             _emptyTitleText.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
@@ -600,7 +589,7 @@ namespace TokLens
 
             _emptySubText = new TextBlock();
             _emptySubText.Text = "可切换上方筛选条件，或直接为任意自部署/私有模型创建自定义单价";
-            _emptySubText.FontSize = 12;
+            _emptySubText.FontSize = DesignSystem.TextBody;
             _emptySubText.Margin = new Thickness(0, 4, 0, 10);
             _emptySubText.HorizontalAlignment = HorizontalAlignment.Center;
             _emptySubText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -743,7 +732,7 @@ namespace TokLens
 
             TextBlock quickLbl = new TextBlock();
             quickLbl.Text = "快捷倍率:";
-            quickLbl.FontSize = 11;
+            quickLbl.FontSize = DesignSystem.TextCaption;
             quickLbl.VerticalAlignment = VerticalAlignment.Center;
             quickLbl.Margin = new Thickness(0, 0, 6, 0);
             quickLbl.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -781,7 +770,7 @@ namespace TokLens
 
             TextBlock editorTitle = new TextBlock();
             editorTitle.Text = "自定义单价覆盖编辑器";
-            editorTitle.FontSize = 12;
+            editorTitle.FontSize = DesignSystem.TextBody;
             editorTitle.FontWeight = FontWeights.SemiBold;
             editorTitle.VerticalAlignment = VerticalAlignment.Center;
             editorTitle.Margin = new Thickness(0, 0, 10, 0);
@@ -791,7 +780,7 @@ namespace TokLens
 
             _officialHintText = new TextBlock();
             _officialHintText.Text = "单击上方任意模型行即可载入四维单价";
-            _officialHintText.FontSize = 11;
+            _officialHintText.FontSize = DesignSystem.TextCaption;
             _officialHintText.VerticalAlignment = VerticalAlignment.Center;
             _officialHintText.TextTrimming = TextTrimming.CharacterEllipsis;
             _officialHintText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -883,7 +872,7 @@ namespace TokLens
 
             TextBlock pathNote = new TextBlock();
             pathNote.Text = "持久化至 %APPDATA%\\TokLens\\custom_prices.json（若 ~/.toklens 同名配置存在将自动同步），保存后全局账单即时重算";
-            pathNote.FontSize = 11;
+            pathNote.FontSize = DesignSystem.TextCaption;
             pathNote.VerticalAlignment = VerticalAlignment.Center;
             pathNote.Margin = new Thickness(0, 0, 12, 0);
             pathNote.TextTrimming = TextTrimming.CharacterEllipsis;
@@ -901,7 +890,7 @@ namespace TokLens
             StackPanel sp = new StackPanel();
             TextBlock lbl = new TextBlock();
             lbl.Text = labelText;
-            lbl.FontSize = 11;
+            lbl.FontSize = DesignSystem.TextCaption;
             lbl.FontWeight = FontWeights.Medium;
             lbl.Margin = new Thickness(0, 0, 0, 4);
             lbl.TextTrimming = TextTrimming.CharacterEllipsis;
@@ -910,7 +899,7 @@ namespace TokLens
 
             TextBox tb = ModernControlsFactory.CreateTextInput(initialText, 30);
             tb.FontFamily = DesignSystem.FontMono;
-            tb.FontSize = 12;
+            tb.FontSize = DesignSystem.TextBody;
             sp.Children.Add(tb);
 
             Grid.SetColumn(sp, colIndex);
@@ -922,7 +911,7 @@ namespace TokLens
         {
             Button btn = ModernControlsFactory.CreateButton(text, "secondary");
             btn.Height = 22;
-            btn.FontSize = 11;
+            btn.FontSize = DesignSystem.TextCaption;
             btn.Padding = new Thickness(8, 0, 8, 0);
             btn.ToolTip = tooltip;
             return btn;
@@ -941,7 +930,7 @@ namespace TokLens
 
             _footerRightMetaText = new TextBlock();
             _footerRightMetaText.Text = "Ctrl+F 搜索 · Enter 保存 · Esc 关闭";
-            _footerRightMetaText.FontSize = 11;
+            _footerRightMetaText.FontSize = DesignSystem.TextCaption;
             _footerRightMetaText.VerticalAlignment = VerticalAlignment.Center;
             _footerRightMetaText.Margin = new Thickness(12, 0, 0, 0);
             _footerRightMetaText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
@@ -962,7 +951,7 @@ namespace TokLens
 
             _statusText = new TextBlock();
             _statusText.Text = "已汇总三源云端价格库、内置模型与自定义单价规则";
-            _statusText.FontSize = 11;
+            _statusText.FontSize = DesignSystem.TextCaption;
             _statusText.VerticalAlignment = VerticalAlignment.Center;
             _statusText.TextTrimming = TextTrimming.CharacterEllipsis;
             _statusText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");

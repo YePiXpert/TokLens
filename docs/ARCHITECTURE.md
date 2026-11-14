@@ -1,6 +1,6 @@
-# 知微 · TokLens v2.2 系统架构白皮书
+# 知微 · TokLens v2.3 系统架构白皮书
 
-> **版本基线**：`v2.2`（Schema: `toklens.node.v2` / Local Store: `toklens.store.v2.5`）  
+> **版本基线**：`v2.3`（Schema: `toklens.node.v2` / Local Store: `toklens.store.v2.10`）  
 > **架构定位**：本地优先（Local-First）、零外部运行时依赖、跨 Windows / WSL2 / Linux VPS / macOS 的实时 AI Token 遥测与等效账单引擎
 
 ---
@@ -9,7 +9,7 @@
 
 目前市面上的 AI Token 统计工具普遍面临两难困境：要么需要部署本地反向代理（篡改 `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL`，一旦代理挂起即阻断开发流且无法统计历史对话），要么基于 Electron / Node.js / Python 虚拟环境打包出上百 MB 的臃肿安装包。
 
-**知微 · TokLens v2.2** 在工程上确立了三条严苛的底层约束：
+**知微 · TokLens** 在工程上确立了三条严苛的底层约束：
 
 1. **零外部运行时安装（Zero Runtime Dependency）**
    - **Windows 桌面端 (`TokLens.exe`)**：直接基于每台 Windows 10 / 11 操作系统出厂内置的 **`.NET Framework 4.x` (`csc.exe`)** 与原生 **WPF** 编译，不依赖 `.NET 6/8 Desktop Runtime`、WebView2 或第三方 NuGet DLL。单可执行文件体积控制在 **`~400 KB`** 量级，双击即开。
@@ -55,9 +55,18 @@ flowchart TD
 | `src/MainWindow.cs` | `Program`, `MainWindow` | 单实例入口、无头 CLI 导出与 `--self-test-ui` 布局回归验证、主窗口多视图状态编排、自愈型 `FileSystemWatcher` 与后台定时调度。 |
 | `src/RequestInspectorPanel.cs` | `RequestInspectorPanel` | `300px` 实时请求取证侧栏（双币成本与缓存省钱拆解、四维 Token 构成瀑布条、延迟与 TPS 吞吐仪表、单条 JSON 导出）。 |
 | `src/CommandPaletteOverlay.cs` | `CommandPaletteOverlay`, `PaletteCommandItem` | `Ctrl+K` 键盘优先全局命令面板（内置 GBK 中文拼音首字母提取与多维模糊打分索引）。 |
-| `src/MiniHudWindow.cs` | `MiniHudWindow` | 桌面极简悬浮胶囊 HUD（`WS_EX_TOOLWINDOW` 免打扰、呼吸状态灯、位置锁定、多档透明度与预算超标琥珀色提醒）。 |
+| `src/CompactHudWindow.cs` | `MiniHudWindow` | 桌面悬浮胶囊（`WS_EX_TOOLWINDOW` 不进 Alt+Tab）：本机工具 / 模型、有计时来源的请求均速、今日 API 估值；可拖动、锁定、调透明度。 |
+| `src/UsageTiming.cs` | `UsageTiming`, `HudTelemetry` | 请求计时来源判定与悬浮胶囊数据。 |
+| `src/SubscriptionCostsView.cs` | `SubscriptionCostsView` | 订阅与费用页：月度订阅支出、按「当前 / 待处理 / 历史」分组的订阅列表、两步登记弹窗、按模型来源的 API 参考估值。 |
+| `src/SubscriptionCatalog.cs` | `SubscriptionCatalog`, `SubscriptionOffer` | 订阅服务商与参考套餐目录（只作参考价，不推断用户已购）。 |
+| `src/UsageHeatmapView.cs` | `UsageHeatmapView` | 每日汇总页顶部的近 365 天每日用量日历。 |
+| `src/ProjectAttributionView.cs` | `ProjectAttributionView` | 按工作区统计本机用量（Claude Code 按 message.id + requestId 去重，与主扫描器口径一致）。 |
+| `src/SessionBloatAnalyzerView.cs` | `ContextBloatAnalyzer`, `SessionBloatAnalyzerView` | 会话分析：长会话上下文增长曲线与压缩可省估算。 |
+| `src/DiagnosticsDoctorView.cs` | `TelemetryDoctorScanner`, `DiagnosticsDoctorView` | 环境检查：各 AI 工具日志目录、WSL2、本地账本与 GitHub CLI 状态。 |
+| `src/BurnRateGuard.cs` | `BurnRateGuard`, `BurnRateAlert` | 近 15 分钟花费远超近 7 日均速时的 Agent 高频燃烧提醒。 |
+| `src/ReportExporter.cs` | `ReportExporter` | Markdown 报告与 CSV 对账明细导出。 |
 | `src/PricingStudioWindow.cs` | `PricingStudioWindow` | 可视化模型定价工作台（检视 2,000+ 官方/云端基准单价、编辑 `~/.toklens/custom_prices.json` 本地覆盖并即时重算全局账单）。 |
-| `src/SyncWindow.cs` | `SyncWindow` | 多端云同步配置、配对码导入导出与 Linux VPS 一键部署面板。 |
+| `src/SyncWindow.cs` | `SyncSettingsView` | 设置 › 同步与偏好页：云同步与身份、配对码、Linux VPS 一键部署、扫描偏好与本地归档状态。 |
 | `src/HtmlExporter.cs` | `HtmlExporter` | 零外部静态资源依赖的单文件交互式多设备 HTML 汇总报表生成器。 |
 | `vps/toklens_agent.py` | `MultiHarnessScanner`, `PricingLookup` | Linux VPS / macOS 纯 Python 3 标准库探针，内置 `~/.toklens/ledger.db` 高水位归档、Remote SSH 扫描与 `crontab` 自托管。 |
 
@@ -109,7 +118,7 @@ flowchart TB
 
 ### 3.1 Tier 1：增量字节游标（`file_cursors`）与精准去重
 
-Windows 端在 `%APPDATA%\TokLens\toklens.db`（Schema `toklens.store.v2.5`）中维护三张核心表：`kv_meta`、`file_cursors` 与 `daily_archive`。
+Windows 端在 `%APPDATA%\TokLens\toklens.db`（Schema `toklens.store.v2.10`）中维护三张核心表：`kv_meta`、`file_cursors` 与 `daily_archive`。
 
 - **零冗余增量扫描**：`file_cursors` 以文件完整路径为键，持久化 `file_size`、`mtime_ticks`、`byte_offset` 与紧凑序列化后的 `events_data`。
   - 当文件 `(file_size, mtime_ticks)` 未发生改变时，扫描器直接从内存游标字典 `_memCursors` 复用历史事件，**磁盘 I/O 为零**；
@@ -203,12 +212,13 @@ flowchart LR
 
 ## 五、Obsidian / Paper Zinc 设计系统与全高多视图架构
 
-TokLens v2.2 在桌面交互层摒弃了传统工具软件堆叠挤压的「上下分栏 + 弹窗套弹窗」模式，全面重构为对标 **Linear、Vercel Geist、OpenRouter Activity 与 OrbStack** 的现代高密度桌面架构。
+TokLens 在桌面交互层摒弃了传统工具软件堆叠挤压的「上下分栏 + 弹窗套弹窗」模式，全面重构为对标 **Linear、Vercel Geist、OpenRouter Activity 与 OrbStack** 的现代高密度桌面架构。
 
 ### 5.1 双主题语义令牌与零分配渲染管线（`DesignSystem`）
 - **Obsidian（深色）与 Paper Zinc（浅色）双色板**：
   - 深色模式采用低眩光高对比度锌黑基底（窗口 `#09090B`、侧边栏 `#121215`、卡片 `#16161A`、微边框 `#232329`、主强调靛蓝 `#6366F1` / `#818CF8`）；
   - 浅色模式采用清爽纸白层级（窗口 `#F8F9FA`、纯白卡片 `#FFFFFF`、边框 `#E4E4E7`、深靛蓝 `#4F46E5`）。
+- **字号与颜色令牌**：字号只用 `DesignSystem.TextCaption / TextBody / TextLabel / TextTitle / TextHeading / TextDisplay`（11 / 12 / 13 / 15 / 20 / 28）六档；颜色来自 `DarkTokens` / `LightTokens` 两张主题色表，XAML 侧以同名 `DynamicResource` 引用，代码绘图用 `DesignSystem.ThemeBrush(key, isDark)`，界面代码中不再出现十六进制色值（导出文件除外）。
 - **冻结画刷缓存池（`BrushCache`）**：所有十六进制颜色经 `DesignSystem.BrushHex` 解析后立即调用 `SolidColorBrush.Freeze()` 冻结为线程安全不可变对象并驻留字典，杜绝高频刷新时的托管堆 GC 抖动。
 - **供应商语义色与确定性哈希**：`GetProviderColorHex` 为 Anthropic Claude、OpenAI Codex、Cursor、Google Gemini / Antigravity、DeepSeek / OpenClaw、Kimi、Qwen、GLM / ZCode 赋予专属高辨识度主题色，未知长尾工具则通过 **32 位 FNV-1a 哈希**稳定映射至主题色板。
 
@@ -216,8 +226,8 @@ TokLens v2.2 在桌面交互层摒弃了传统工具软件堆叠挤压的「上�
 - 结合 WPF `WindowChrome` 与 `dwmapi.dll` 原生属性（`DWMWA_USE_IMMERSIVE_DARK_MODE`、`DWMWCP_ROUND` 硬件级圆角裁剪、`DWMWA_BORDER_COLOR` 硬件级 `1px` 主题边框色），消除传统 Win32 白边与阴影割裂。
 - **原生 Snap Layouts 分屏悬停钩子**：在自绘标题栏最大化按钮上通过 `HwndSource.AddHook` 精准响应 `WM_NCHITTEST` 并返回 `HTMAXBUTTON (9)`，使无边框自定义窗口依然支持鼠标悬停最大化按钮呼出 **Windows 11 原生分屏布局菜单**，并在最大化时按当前显示器 DPI 缩放矩阵动态补偿 `SM_CXSIZEFRAME + SM_CXPADDEDBORDER`。
 
-### 5.3 六大全高主视图与 `0.0px` 零像素位移契约
-1. **一体化导航骨架**：由严格锁死高度的全局顶栏、可折叠侧边导航栏（展开 `200px` / 紧凑图标态 `58px`）及右侧全高内容舞台组成，划分为 **概览看板、实时请求流、模型与工具、设备与集群、每日流水与导出、同步与设置** 六大独立视图。
+### 5.3 导航结构与 `0.0px` 零像素位移契约
+1. **一体化导航骨架**：锁死 `48px` 高度的顶栏（页面标题、搜索 / 跳转、同步状态）、可折叠侧边栏（展开 `200px` / 图标态 `58px`，窗口窄于 `1100px` 时自动收起）、页面工具条（设备 / 时间范围 / 币种 / 导出，只在受影响的页面出现）与内容区。侧栏 5 个入口：**概览、用量（请求明细 / 模型与工具 / 项目 / 会话分析 / 每日汇总）、订阅与费用、设备、设置（同步与偏好 / 环境检查 / 计价规则）**。
 2. **全自动几何稳定性门禁（`--self-test-ui`）**：工程内置无头 WPF 布局回归自检模式，在 CI 流水线（`.github/workflows/ci.yml`）中自动测量模拟多节点切换、时间跨度切换、视图切换及深浅色主题翻转前后的关键容器像素高度，断言位移误差严格小于 `0.05px`。
 3. **无感状态保持表格引擎（`ModernDataGridFactory.UpdateItemsPreservingState`）**：
    - 全数字与金额列强制启用 OpenType 等宽数字特性（`FontNumeralAlignment.Tabular` + `Cascadia Mono / JetBrains Mono`），数值跳动时列宽与小数点纹丝不动；
@@ -225,5 +235,5 @@ TokLens v2.2 在桌面交互层摒弃了传统工具软件堆叠挤压的「上�
 4. **四大高阶生产力子系统**：
    - **`RequestInspectorPanel`（实时请求取证侧栏）**：点击任意实时请求即可在右侧 `300px` 抽屉透视双币种单次成本、Prompt Cache 省钱金额与比例、四维 Token 构成瀑布条、延迟档位与 `tok/s` 吞吐仪表，并支持一键导出取证 JSON。
    - **`CommandPaletteOverlay`（`Ctrl+K` 全局命令面板）**：支持中英文关键词、快捷键与中文拼音首字母（如输入 `tb` 匹配「同步」、`dc` 匹配「导出」）毫秒级模糊检索跳转。
-   - **`MiniHudWindow`（极简桌面悬浮胶囊 HUD）**：采用 `WS_EX_TOOLWINDOW` 扩展样式隐藏出 `Alt+Tab` 队列，三段式等宽胶囊常驻桌面一角实时呈现「今日花费 · 总 Token · 最新活跃模型与 TPS」，支持自由拖拽、位置锁定、三档透明度（`100% / 85% / 65%`）及超每日预算琥珀色呼吸提醒。
+   - **`MiniHudWindow`（桌面悬浮胶囊，`src/CompactHudWindow.cs`）**：采用 `WS_EX_TOOLWINDOW` 扩展样式隐藏出 `Alt+Tab` 队列，常驻桌面一角显示本机工具 / 模型、有计时来源的请求均速与今日 API 估值，支持拖拽、位置锁定与透明度调节。
    - **`PricingStudioWindow`（模型定价工作台）** 与 **`ToastManager`（非模态通知栈）**：所有后台同步、复制与导出反馈均以右下角轻量滑入卡片呈现，彻底终结模态 `MessageBox` 对心流的打断。
