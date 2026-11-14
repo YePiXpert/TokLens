@@ -39,6 +39,11 @@ internal static class ProductAccountingTests
         Check(!SubscriptionCatalog.Overlaps(Plan("tencent","CNY",39,1),Plan("tencent-hy","CNY",28,1)),"independent Tencent product subscriptions can coexist on the same account");
         SyncConfig config=new SyncConfig();config.Subscriptions.Add(old);config.Subscriptions.Add(yearly);config.Subscriptions.Add(free);SyncService.SaveConfig(config);
         SyncConfig loaded=SyncService.LoadConfig();Check(loaded.Subscriptions.Count==3&&loaded.Subscriptions[1].Amount==948&&loaded.Subscriptions[1].Currency=="CNY"&&loaded.Subscriptions[1].BillingMonths==12&&loaded.Subscriptions[1].AccountLabel=="main","disk config round trip preserves actual fee, currency, account and cycle");
+        string cfgPath=SyncService.ConfigFilePath,cfgSaved=File.ReadAllText(cfgPath);
+        File.WriteAllText(cfgPath,"{\"minimize_to_tray\":false}");Check(SyncService.LoadConfig().MinimizeToTray,"closing the window keeps TokLens resident by default, also after upgrading from the old opt-in setting");
+        File.WriteAllText(cfgPath,"{\"close_to_tray\":false}");Check(!SyncService.LoadConfig().MinimizeToTray,"an explicit choice to quit on close is kept");
+        Check(new SyncConfig().MinimizeToTray,"new configs stay resident in the tray when the window is closed");
+        File.WriteAllText(cfgPath,cfgSaved);
         SyncConfig clone=new SyncConfig();clone.CopyFrom(loaded);
         Check(clone.Subscriptions[1].StartDate=="2026-11-01"&&clone.Subscriptions[1].FeeConfirmed,"settings copies preserve subscription history");
         HashSet<string> ids=new HashSet<string>();bool glm=false,kimi=false,ali=false,mini=false;

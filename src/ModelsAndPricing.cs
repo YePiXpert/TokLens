@@ -864,7 +864,8 @@ namespace TokLens
         public string WebDavPass = "";
         public bool IsDarkTheme = true;
         public bool PreferCny = true;
-        public bool MinimizeToTray = false;
+        // 点 ❌ 时缩到托盘继续运行（悬浮条与监控不中断）；托盘菜单「彻底退出」才结束进程
+        public bool MinimizeToTray = true;
         // 可选功能：订阅记账与回本比例，默认关闭
         public bool ShowSubscriptions = false;
         public Dictionary<string, string> NodeAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);

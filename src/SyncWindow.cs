@@ -1359,8 +1359,8 @@ namespace TokLens
             trayDock.Children.Add(_minToTraySwitch);
 
             trayDock.Children.Add(MakeRowTitleAndDesc(
-                "关闭主窗口时最小化驻留到系统托盘",
-                "点击右上角关闭按钮时不退出进程，保持后台日志监听与 5 分钟云端自动同步"));
+                "关闭主窗口时常驻系统托盘",
+                "点右上角 ❌ 只隐藏窗口，悬浮条、日志监听和自动同步继续运行；托盘右键「彻底退出」才结束（默认开启）"));
             rowTray.Child = trayDock;
             sp.Children.Add(rowTray);
 

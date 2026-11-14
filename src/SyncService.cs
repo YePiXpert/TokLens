@@ -329,7 +329,7 @@ namespace TokLens
             cfg.MachineName = defaultHost;
             cfg.IsDarkTheme = true;
             cfg.PreferCny = true;
-            cfg.MinimizeToTray = false;
+            cfg.MinimizeToTray = true;
             if (cfg.NodeAliases == null)
                 cfg.NodeAliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -374,8 +374,10 @@ namespace TokLens
                             cfg.IsDarkTheme = Convert.ToBoolean(d["is_dark_theme"], CultureInfo.InvariantCulture);
                         if (d.ContainsKey("prefer_cny") && d["prefer_cny"] != null)
                             cfg.PreferCny = Convert.ToBoolean(d["prefer_cny"], CultureInfo.InvariantCulture);
-                        if (d.ContainsKey("minimize_to_tray") && d["minimize_to_tray"] != null)
-                            cfg.MinimizeToTray = Convert.ToBoolean(d["minimize_to_tray"], CultureInfo.InvariantCulture);
+                        // 旧版只写 minimize_to_tray 且默认关闭（点 ❌ 直接退出）。升级后统一按新的默认常驻托盘，
+                        // 只认新键 close_to_tray，用户之后在设置或托盘菜单里的选择会写进它
+                        if (d.ContainsKey("close_to_tray") && d["close_to_tray"] != null)
+                            cfg.MinimizeToTray = Convert.ToBoolean(d["close_to_tray"], CultureInfo.InvariantCulture);
                         if (d.ContainsKey("show_subscriptions") && d["show_subscriptions"] != null)
                             cfg.ShowSubscriptions = Convert.ToBoolean(d["show_subscriptions"], CultureInfo.InvariantCulture);
                         if (d.ContainsKey("node_aliases") && d["node_aliases"] is IDictionary)
@@ -429,6 +431,7 @@ namespace TokLens
 
             d["is_dark_theme"] = cfg.IsDarkTheme;
             d["prefer_cny"] = cfg.PreferCny;
+            d["close_to_tray"] = cfg.MinimizeToTray;
             d["minimize_to_tray"] = cfg.MinimizeToTray;
             d["show_subscriptions"] = cfg.ShowSubscriptions;
 

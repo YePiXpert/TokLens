@@ -657,6 +657,9 @@ namespace TokLens
 
             PreviewKeyDown += OnMainWindowPreviewKeyDown;
             Closing += OnMainWindowClosing;
+            // 关机 / 注销时不拦截关闭，否则「关闭时常驻托盘」会挡住系统结束会话
+            if (Application.Current != null)
+                Application.Current.SessionEnding += delegate { _explicitExitRequested = true; };
             SizeChanged += delegate(object s, SizeChangedEventArgs e) { ApplyResponsiveSidebar(e.NewSize.Width); };
 
             UpdateFxUiState(_fxIsLive, false);
@@ -747,7 +750,7 @@ namespace TokLens
                     try
                     {
                         _trayIcon.BalloonTipTitle = AppConstants.ProductTitle;
-                        _trayIcon.BalloonTipText = "已最小化至系统托盘继续静默监控实时 Token 账单。双击托盘图标或按 Ctrl+Alt+T 可随时唤起。";
+                        _trayIcon.BalloonTipText = "TokLens 仍在后台运行，悬浮条和用量监控不受影响。双击托盘图标或按 Ctrl+Alt+T 打开；要退出请在托盘图标右键选「彻底退出」。";
                         _trayIcon.ShowBalloonTip(2500);
                     }
                     catch { }
@@ -2216,6 +2219,18 @@ namespace TokLens
             // 最右侧：窗口控制按钮（最小化 / 最大化 / 关闭）
             StackPanel captionBtns = ModernWindowChrome.CreateCaptionButtons(this, true, out _maxCaptionBtn, out _maxCaptionPath);
             captionBtns.Margin = new Thickness(8, 0, 0, 0);
+            // 关闭按钮的提示跟随「关闭时常驻托盘」设置
+            Button closeCaptionBtn = captionBtns.Children.Count > 0 ? captionBtns.Children[captionBtns.Children.Count - 1] as Button : null;
+            if (closeCaptionBtn != null)
+            {
+                closeCaptionBtn.ToolTip = "关闭";
+                closeCaptionBtn.ToolTipOpening += delegate(object s, ToolTipEventArgs e)
+                {
+                    closeCaptionBtn.ToolTip = (_syncCfg != null && _syncCfg.MinimizeToTray && _trayIcon != null)
+                        ? "关闭到托盘（后台继续运行）"
+                        : "退出 TokLens";
+                };
+            }
             DockPanel.SetDock(captionBtns, Dock.Right);
             topDock.Children.Add(captionBtns);
 
