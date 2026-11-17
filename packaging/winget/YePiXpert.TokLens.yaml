@@ -1,7 +1,7 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.singleton.1.6.0.schema.json
 
 PackageIdentifier: YePiXpert.TokLens
-PackageVersion: 2.4.1
+PackageVersion: 2.4.2
 PackageLocale: en-US
 Publisher: YePiXpert
 PublisherUrl: https://github.com/YePiXpert
@@ -26,7 +26,7 @@ Tags:
   - cursor
   - codex
   - finops
-ReleaseNotesUrl: https://github.com/YePiXpert/TokLens/releases/tag/v2.4.1
+ReleaseNotesUrl: https://github.com/YePiXpert/TokLens/releases/tag/v2.4.2
 Installers:
   - Architecture: x64
     InstallerType: zip
@@ -34,7 +34,7 @@ Installers:
     NestedInstallerFiles:
       - RelativeFilePath: TokLens.exe
         PortableCommandAlias: toklens
-    InstallerUrl: https://github.com/YePiXpert/TokLens/releases/download/v2.4.1/TokLens-v2.4.1-win-x64-portable.zip
-    InstallerSha256: 8844C7DF9B6F71DDDF1AF76697ED84AB1DC948DFF5A8276AC6481817E3AA2658
+    InstallerUrl: https://github.com/YePiXpert/TokLens/releases/download/v2.4.2/TokLens-v2.4.2-win-x64-portable.zip
+    InstallerSha256: FB2A088A62F0212B50C6E5275E3C3DD75D835EB62660CA28FA0490252C5F9E47
 ManifestType: singleton
 ManifestVersion: 1.6.0
