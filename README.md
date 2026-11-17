@@ -1,116 +1,112 @@
-﻿# 知微 · TokLens v2.3.0
+# 知微 · TokLens
 
-用量核算修订版（scanner rev 29）：以原始请求和实际后台模型为准，保留有独立生成记录的上下文压缩调用，修正模型档位、请求去重和历史账本回灌。升级前自动备份本地 SQLite；能从源记录核实的历史按分区重算，已丢失源记录的历史不会凭比例补造。Windows 与 VPS / macOS 探针需分别更新；旧版远端节点的汇总无法在本机凭空校正。
+TokLens 从 AI 编程工具已有的本地日志中统计 Token、会话和 API 参考估值。Windows 提供桌面面板、托盘和可选悬浮控件；Linux、macOS 可运行 Python 探针，把统计快照同步到同一账本。
 
-**跨 Windows、macOS、WSL2 与 Linux VPS 的全场景 AI Token 实时遥测与 FinOps 智算账单透镜（绿色单文件旗舰版）**
+**它能说明已采集记录用了多少；不能仅靠本地 Token 数推算订阅剩余额度，也不把 API 估值当成实际扣款。** 当前版本以 [version.txt](version.txt) 为准。
 
-- **Windows 桌面旗舰 + 终端双引擎（单文件零依赖）**：`TokLens.exe`（纯原生 WPF + 系统内置 `winsqlite3.dll` + Win32 Per-Monitor DPI v2，零外部运行时安装依赖，内嵌跨平台 Python 探针）
-- **Linux VPS / macOS 零依赖探针**：`vps/toklens_agent.py`（仅依赖系统内置 Python 3 标准库，支持 Linux `crontab` 与 macOS `LaunchAgent` 后台守护自动同步：`vps/install_macos_launchd.sh`）
-- **深度文档**：[跨设备同步与 GitHub CLI 令牌原理解析](docs/SYNC_AND_GH_TOKEN_GUIDE.md) · [系统架构与高水位账本白皮书](docs/ARCHITECTURE.md) · [版本演进日志](CHANGELOG.md)
+## 第一次使用
 
----
+1. 从 [Releases](https://github.com/YePiXpert/TokLens/releases) 下载 `TokLens.exe`，或解压对应版本的 Windows 便携包。
+2. 运行你平时使用的 AI 编程工具，完成一次请求，再启动 TokLens。
+3. 在「环境检查」核对发现了哪些日志、哪些来源无记录或读取失败。没有记录不等于零用量；日志格式变化、权限不足、远程运行、工具未保存日志都会影响覆盖。
+4. 在「请求明细」抽查工具、模型、Token 构成、服务档位及估值来源。需要跨设备时再配置 Gist 或 WebDAV；本机统计无需先登录同步服务。
 
-## 核心问答：为什么到家自动读取的 `gh` 令牌和单位不一样？
+Windows 10/11 使用系统 .NET Framework/WPF 与 SQLite。远端探针使用 Python 标准库；读取 `.jsonl.zst` 归档需要支持 Zstandard 的 Python 版本，推荐 Python 3.14。较旧 Python 仍可读普通 JSONL，无法解析的压缩文件不会被伪造成零用量。
 
-这是 **GitHub CLI (`gh`) 的标准设备独立 OAuth 安全设计**，完全正常且**无需把单位的令牌拷贝到家里**：
+## 常驻控件
 
-1. **每台电脑独立签发 `gho_...` 设备令牌**：当你在单位电脑与家里电脑分别执行 `gh auth login` 时，GitHub OAuth 服务器会为每一台设备单独颁发一串不同的 `gho_...` 授权令牌（便于日后单独吊销某台旧设备而不影响其他电脑）。
-2. **认同一个 `@用户名` GitHub 账号，不认同一串密码字符串**：TokLens 多端云同步认的是**令牌背后的 GitHub 账号身份（如 `@YePiXpert`）以及 `gist` 权限范围**。只要家里与单位登录的是同一个 GitHub 账号，两串不同的 `gho_...` 令牌天然拥有读写同一个私有账单 Gist（含 `toklens_sync_v1.json` 锚点文件）的完整权限，Gist ID 留空点击同步即可自动寻回并无损合并！
-3. **仅在以下 4 种情况会导致两边没有汇合（应用内已内置自动诊断与一键修复）**：
-   - 环境变量 `GH_TOKEN` / `GITHUB_TOKEN` 覆盖了 `gh` 登录态（常见于单位配置了企业内部 Token）；
-   - `gh auth status` 登录了多个账号（个人号 + 工作号），当前激活账号不一致（可在「同步与设置」下拉选择目标 `@用户名`）；
-   - 某台电脑早期登录 `gh` 时未包含 `gist` 权限（执行 `gh auth refresh -h github.com -s gist` 即可秒级补齐）；
-   - 本地残留已失效的旧 `Gist ID` 返回 `404`（v2.2 已支持自动清空失效 ID 并重新寻回/重建私有 Gist）。
+`Ctrl+M` 显示或隐藏悬浮控件。默认采用状态胶囊，也可切到极简球。单击展开或收起详情；不再把鼠标经过当成打开复杂面板的操作。
 
-> 在软件内任意界面按 **`F1`** 切换到「跨设备同步与令牌原理解析」标签页，或进入 **「设置 › 环境检查 (`Ctrl+0`)」** 即可核验本机令牌指纹、归属账号与 `gist` 权限。
+- 明确显示本机最新请求，或固定到选定会话。固定会话不会被其他工具的新请求偷偷替换。
+- 上下文优先使用会话日志里的上限；只能取得模型标称上限时标为参照。上下文占用不等于订阅额度。
+- 详情显示数据更新时间、上下文、服务档位、今日 API 参考估值；未连接官方额度时明确标识，不显示推算百分比。
+- 活跃、空闲、过期、读取失败分别展示。右键可调整样式、位置锁定等偏好。
+- 可从托盘恢复主窗口。关闭主窗口默认隐藏到托盘；托盘「彻底退出」结束进程。常驻行为可在设置关闭。
 
----
+日志只证明最近有记录，不证明流式生成仍在进行。请求平均输出速率仅在日志有可靠计时来源时计算；缺失时显示未知，不制造实时 TPS。
 
-## v2.3 界面与费用口径
+## Fast / Priority 与价格口径
 
-### 导航
+服务档位属于每次请求的历史事实，不能用当前 `/fast` 开关回填过去的账单。TokLens 分开保存：
 
-左侧 5 个入口，「用量」和「设置」的子页面直接列在侧栏里：
+| 字段 | 含义 |
+|---|---|
+| 请求档位 | 当时请求或会话设置要求的档位 |
+| 实际档位 | 响应中明确报告的档位；没有响应证据则未知 |
+| 档位证据 | 取自哪个日志字段 |
+| 估值依据、价格版本 | 日志报告金额、已知档位参考价、请求档位估算、未知档位参考价或未定价 |
 
-- **概览**（`Ctrl+1`）：用量、缓存、工具和设备汇总。时间范围选「今日」时，趋势图显示近 14 天作参照。
-- **用量**：请求明细（`Ctrl+2`）、模型与工具（`Ctrl+3`）、项目（`Ctrl+4`）、会话分析（`Ctrl+7`）、每日汇总（`Ctrl+9`，含近 365 天每日用量日历）。
-- **订阅与费用**（`Ctrl+5`，可选，默认关闭）：在「同步与偏好 → 扫描与偏好」打开后出现；登记实际订阅、查看到期与续费，并估算本周期回本比例。
-- **设备**（`Ctrl+8`）：本机与 VPS / 其他设备的用量记录。
-- **设置**（`Ctrl+,`）：同步与偏好、环境检查（`Ctrl+0`）、计价规则。
+`priority` 归一为 Fast，`default` 归一为 Standard；模型名、推理强度和服务档位分开处理。只出现 `-fast` 后缀但没有对应价格时，不删掉后缀偷偷套普通价。
 
-设备、时间范围、币种和导出放在页面顶部的工具条里，只出现在受它们影响的页面：项目页固定统计本机全部历史，订阅页在页面内选择时间范围，设置页没有工具条。窗口窄于 1100px 时侧栏自动收成图标。
+- **实际档位已知**：优先用实际档位及请求日期匹配价格。
+- **只有请求 Fast 的证据**：可以按该档位估值，但明确标为“按请求档位估算”，不宣称实际已走 Fast。
+- **两个档位都未知**：只提供注明限制的 Standard 参考估值，不推断 Fast。
+- **明确档位没有匹配价格**：保留 Token，金额标为未定价，不按固定倍率猜测。
+- **日志已有报告金额**：保留原金额，不再叠加 Fast 乘数。
 
-已删除：平替模拟器（`Ctrl+6`）、每日预算提醒、SVG 分享海报、README 徽章、剪贴板战报卡。
+API 参考估值按输入、输出、缓存读写以及有证据的长上下文规则计算；订阅的额度消耗倍率不用于 API 费用计算。可比较的请求会显示 Standard 参考值与档位额外估值；这些也不是实际扣款。未知值保持未知，不当作零。
 
-### 后台常驻
+内置快照在 [pricing/service_tier_prices.json](pricing/service_tier_prices.json)，每条规则附来源、版本和生效日期。快照从核验日起使用，不自动宣称适用于更早历史。用户可在配置目录放同名 JSON 添加经过核实的规则；不要把套餐额度倍率填成 API 单价。格式见 [架构与数据契约](docs/ARCHITECTURE.md)。
 
-点主窗口右上角 ❌ 只是隐藏窗口，TokLens 继续在系统托盘运行：悬浮球、日志监听和自动同步都不中断。双击托盘图标或按 `Ctrl+Alt+T` 重新打开；要结束进程，在托盘图标右键选「彻底退出 TokLens」。不想常驻可以在「同步与偏好 → 扫描与偏好」或托盘菜单里关掉「关闭主窗口时常驻系统托盘」。
+## 覆盖范围与边界
 
-### 悬浮球与 TPS
+扫描器包含 Claude Code、Codex、Antigravity、Gemini CLI、Cursor、Windsurf、Cline / Roo / Kilo、OpenCode、ZCode、Qwen、Kimi、Aider、Goose、Crush、Zed 等来源的适配。**适配器存在不代表每个平台、版本和日志字段都已完整覆盖。** 以本机环境检查及可追溯的请求记录为准；未知模型、未定价与读取失败均应保留可见。
 
-`Ctrl+M` 切换悬浮球：一颗 58px 的深色玻璃球。外圈光环是上下文占用——最近一次请求的上下文 ÷ 该模型的上限（上限来自云端价格库，80% 变琥珀色、95% 变红，提示可以 /compact；查不到上限时只显示绝对值）；球心数字单击切换「上下文 / 今日估值 / 速率（近 15 分钟折算每小时）」，也可以在右键菜单里选。一分钟内有请求时光环呼吸，空闲 5 分钟变灰变淡，Agent 失控时整个球变红并显示「!」。鼠标停留展开卡片：模型与工具、上下文、今日估值、速率、缓存命中、近 2 小时柱状图和最近 5 次请求；双击打开主窗口，右键锁定位置或调透明度。拖到屏幕左右边缘会吸附并缩进一半，悬停滑出；位置和球心内容都会记住。只统计本机。
+Windows 桌面可查看概览、请求、模型与工具、项目、会话、设备和每日汇总。订阅登记为可选功能；实付订阅与 API 估值分开。登记订阅不会接通官方额度查询，也无法证明某次日志请求是经该订阅付费。
 
-TPS 只使用日志明确提供的请求耗时或同一请求的起止时间，分子仅为输出 Token，不计输入或缓存；显示的是**请求均速**，可能包含等待，不能冒充流式实时生成速度。缺少可靠计时显示 `—`，超过五分钟的记录进入空闲状态。旧缓存未记录计时来源的值不会被升级为可靠 TPS。首次升级会备份 SQLite 并重新解析仍存在的日志。
+CSV、JSON、Markdown 和离线 HTML 支持不同粒度的导出；以页面实际提供的导出入口为准。JSON 汇总快照不包含对话正文。来源文件、工作区和会话等本机信息仍可能暴露项目名称，分享导出前应核对内容。
 
-### 订阅记录与价格
+## 多设备与历史
 
-订阅记账是可选功能，默认关闭，在「同步与偏好 → 扫描与偏好」中开启。登记分两步：先选服务商和套餐，再填实付金额与周期，到期日自动计算。旧版记录放在「待处理」，核对补全后才计入月度合计。目录快照核验于 **2026-11-14**，每个服务商可打开官方价格来源。月付、季付、年付分开记录，金额用原币种，年付填全年扣款总额；地区、促销、税费和团队席位按实际订单填写。每个账户跨设备只登记一次，重叠周期会阻止重复保存；续订新增记录，目录更新不覆盖历史实付。
+桌面端支持 Gist 和 WebDAV；远端探针的部署命令可在同步设置生成。macOS 可使用 `vps/install_macos_launchd.sh` 配置 LaunchAgent，Linux 可使用定时任务。只部署单个 `toklens_agent.py` 时，其内置价格快照仍可工作。
 
-旧版自动推荐的套餐不作为已购订阅，旧人工配置保留为待核对记录；旧“国产 Coding Plan”必须选定具体服务商后才能计入费用。回本比例 = 本周期内对应用量按 API 单价折算的价值 ÷ 本周期实付：Cursor、Copilot 等工具里的请求算给该工具，其余按模型厂商对应，同服务商多个账户周期重叠时平分。模型来源不能证明付费渠道，用 API Key 按量付费的请求也会算进去，所以只作参考；不推算套餐剩余额度。
+同一 GitHub 账号在不同设备可以有不同的 `gh` 令牌；同步看账号和权限，不要求令牌字符串相同。确保具有 Gist 权限、设备 ID 唯一，并连接到同一账本。详细说明见 [同步指南](docs/SYNC_AND_GH_TOKEN_GUIDE.md)。
 
-已核验预设来源：[OpenAI](https://learn.chatgpt.com/docs/pricing)、[Claude](https://claude.com/pricing)、[Google AI 美国区](https://gemini.google/us/subscriptions/?hl=en)、[智谱 GLM](https://www.bigmodel.cn/glm-coding)、[Kimi](https://www.kimi.com/help/membership/membership-pricing)、[阿里云 Token Plan](https://help.aliyun.com/zh/model-studio/token-plan-personal-overview)、[MiniMax M Plan](https://www.minimax.cn/m-plan)、[Cursor](https://cursor.com/pricing)、[Devin / Windsurf](https://devin.ai/pricing)、[GitHub Copilot](https://github.com/features/copilot/plans)、[TRAE](https://www.trae.ai/pricing)、[Zed](https://zed.dev/pricing)、[腾讯云 Token Plan](https://cloud.tencent.com/document/product/1823/130060/)、[CodeBuddy 中国版](https://www.codebuddy.cn/pricing/)、[百度千帆](https://cloud.baidu.com/doc/qianfan/s/Dmrabu8b6)。火山方舟的动态价格本次未能核实，保留套餐名称和官方入口，按订单填写金额。其他平台、地区或历史方案支持自定义登记，不预填未核实价格。
+本地 SQLite、请求游标、云端快照和备份帮助保留已经采集的历史；未采集就删除的日志无法恢复。升级解析器前自动备份数据库；源日志仍在时可按完整分区重算，源日志丢失时保留旧汇总及未知档位，不凭比例补造。
 
-### 全局命令面板
+**升级时请同时更新 Windows 与所有远端探针。** 新快照在兼容原有字段的基础上追加档位和估值依据；旧客户端不会理解这些维度，混用旧版本可能破坏分类。
 
-`Ctrl+K` 支持中文、英文及拼音首字母搜索。计价规则入口位于“设置”，保留用量行的价格编辑快捷入口。
+## 更新应用
 
-### 3. 全覆盖 26+ AI 工具生态 + 双层高水位防清理账本 + 时光机备份
-- **免代理全量采集**：原生支持 Claude Code、Claude Desktop、OpenAI Codex、Google Antigravity、Gemini CLI、Cursor、Windsurf、VS Code (Cline / Roo Code / Kilo Code / Continue)、ZCode、Kimi Code、WorkBuddy / CodeBuddy、OpenClaw、Qwen Code、Factory Droid、Sourcegraph Amp、Goose、Crush、Aider、OpenCode、Zed，以及本机 **WSL2** 与 **Remote SSH** 会话。
-- **永不归零的高水位账本 + 时光机**：本地 SQLite 游标库 + 云端 `MAX(...)` 高水位无损合并 + 每日自动生成 `.toklens.gz` 时光机压缩快照（自动保留最近 10 份），清空日志或重装系统均不丢失历史账单。
+应用内「检查更新」检查 GitHub Release。下载可取消；只有同一 Release 的 `TokLens.exe` 与 `SHA256SUMS.txt` 校验匹配后才准备替换。应用重启完成替换，保留旧程序备份供失败时回滚；配置和历史账本独立保留。
 
-### 4. 导出
-支持导出：**离线 HTML 看板**、**Markdown 报告（含趋势摘要）**、**Excel 可直接打开的 CSV 对账明细** 与 **只含聚合数据的 JSON 汇总快照**。导出入口在页面工具条右侧的「导出」。
+可从设置或托盘菜单打开「检查更新」。默认每天在后台检查一次，仅提示有新版，不自动下载或安装；可在设置中关闭「每天检查应用更新（仅提示）」。
 
----
+没有发布新版、网络失败或校验不通过时，继续运行当前版本。SHA-256 校验验证下载完整性；它不等同于独立代码签名。Python 探针需要单独更新，不因桌面更新而自动修改远端服务器。
 
-## 快速安装与多端接入
+## 快捷键与命令行
 
-### Windows 桌面端运行与包管理器支持
-- **绿色单文件直开**：双击运行 `TokLens.exe`（或从 Releases 解压便携包）；附带标准清单支持 [WinGet](packaging/winget/YePiXpert.TokLens.yaml) 与 [Scoop](packaging/scoop/toklens.json)。
-- **源码零依赖一键编译**：在 Windows 10/11 下直接运行 `build.bat`（自动调用系统内置 `.NET Framework 4.x csc.exe`，无需安装 Visual Studio）。
-
-### Linux VPS 与 macOS 守护进程一键接入
-- **Linux VPS (`crontab`)**：在桌面端「同步与设置」输入服务器名称并点击「复制一键部署命令」，SSH 粘贴执行即可完成历史扫描与定时同步。
-- **macOS (`LaunchAgent`)**：在 Mac 终端运行 `bash vps/install_macos_launchd.sh` 即可配置原生 `launchd` 后台低功耗定时同步。
-
----
-
-## 全局快捷键速查
-
-| 快捷键 | 功能说明 |
-| :--- | :--- |
-| `Ctrl+K` | 唤起全局命令面板（支持中文 / 拼音首字母 / 英文极速检索） |
-| `Ctrl+1` ~ `Ctrl+5`、`Ctrl+7` ~ `Ctrl+9`、`Ctrl+0` | 切换对应页面；`Ctrl+6` 已移除 |
-| `Ctrl+,` | 打开「同步与设置」视图 |
-| `Ctrl+M` | 显示 / 隐藏桌面悬浮球 (`MiniHudWindow`) |
-| `Ctrl+Alt+T` | 系统级全局热键：从后台/托盘唤起主窗口 |
-| `F1` / `?` | 打开「快捷键速查 & GitHub 跨设备令牌原理解析」交互指南 |
-| `F5` / `Ctrl+R` | 立即执行后台增量扫描并同步云端账单与实时汇率 |
-| `Ctrl+F` | 聚焦当前视图搜索过滤框 |
-| `Ctrl+E` / `Ctrl+S` | 导出并打开交互式 HTML 看板 / 导出多端 CSV 财务对账单 |
-| `Esc` | 清空搜索框、收起右侧单笔账单透视抽屉或重置单日/工具筛选 |
-
----
-
-## 终端无头 CLI 引擎 (`TokLens.exe`)
-
-支持在 PowerShell / CMD / Windows Terminal 中直接作为极客 CLI 工具运行（自动通过 Win32 `AttachConsole` 输出彩色 ANSI 表格，零弹窗）：
+| 快捷键 | 操作 |
+|---|---|
+| `Ctrl+K` | 搜索页面和命令 |
+| `Ctrl+M` | 显示 / 隐藏悬浮控件 |
+| `Ctrl+Alt+T` | 从后台恢复主窗口 |
+| `Ctrl+,` | 设置 |
+| `Ctrl+0` | 环境检查 |
+| `F5` / `Ctrl+R` | 刷新扫描与同步 |
+| `F1` | 快捷键和同步指南 |
 
 ```powershell
-.\TokLens.exe --help                         # 查看完整 CLI 命令帮助
-.\TokLens.exe --version                      # 查看版本号与运行环境信息
-.\TokLens.exe --summary --days 30            # 展示最近 30 天工具与设备消耗对齐表
-.\TokLens.exe --status                       # 单行极简今日花费输出（适合嵌入 Prompt / 状态栏）
-.\TokLens.exe --sync-now                     # 无头触发本地增量扫描与 Gist / WebDAV 双向同步
-.\TokLens.exe --export-html Report.html      # 导出独立单文件交互式网页看板
+.\TokLens.exe --help
+.\TokLens.exe --version
+.\TokLens.exe --summary --days 30
+.\TokLens.exe --status
+.\TokLens.exe --sync-now
+.\TokLens.exe --export-html Report.html
 ```
+
+## 开发、验证与打包
+
+```powershell
+.\build.bat --nopause
+powershell -ExecutionPolicy Bypass -File tests\run_tests.ps1
+python -m unittest discover -s tests -p "test_*.py" -v
+powershell -ExecutionPolicy Bypass -File packaging\package_release.ps1 -SkipBuild -UpdateManifests
+powershell -ExecutionPolicy Bypass -File packaging\package_release.ps1 -VerifyOnly
+```
+
+`version.txt` 是版本源；构建脚本同步 C#、程序集和 Python 版本，并把同一份档位价格快照嵌入桌面与探针。CI 运行 C# 套件、Python 单元测试和共享核算样例，验证版本、ZIP 内容、SHA-256 与包管理清单，再允许标签发布。
+
+便携包名为 `TokLens-v<完整版本>-win-x64-portable.zip`。`packaging/scoop` 与 `packaging/winget` 是清单文件；生成或更新文件不代表已经提交到包管理器的公共仓库。发布前须使用最终构建重新生成对应哈希。
+
+更多：[更新日志](CHANGELOG.md) · [架构与数据契约](docs/ARCHITECTURE.md)

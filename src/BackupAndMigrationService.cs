@@ -589,7 +589,7 @@ namespace TokLens
                         r.Output,
                         SanitizeDouble(r.CostUsd, 6),
                         SanitizeDouble(r.BaselineUsd, 6),
-                        r.RateLabel ?? ""
+                        r.RateLabel ?? "", r.RequestedServiceTier,r.ActualServiceTier,r.TierEvidence,r.CostBasis,r.PricingVersion,r.Provider,r.StandardEquivalentUsd,r.ServiceTierPremiumUsd
                     });
                 }
             }
@@ -1339,6 +1339,7 @@ namespace TokLens
                         r.CostUsd = SanitizeDouble(Math.Max(0.0, Convert.ToDouble(row[8], CultureInfo.InvariantCulture)), -1);
                         r.BaselineUsd = SanitizeDouble(Math.Max(0.0, Convert.ToDouble(row[9], CultureInfo.InvariantCulture)), -1);
                         r.RateLabel = row.Count > 10 ? (Convert.ToString(row[10], CultureInfo.InvariantCulture) ?? "") : "";
+                        UsageServiceTier.ReadCloud(row,r);
                         snap.Records.Add(r);
                         continue;
                     }
@@ -1361,6 +1362,16 @@ namespace TokLens
                         r.CostUsd = Math.Max(0.0, ReadDictDoublePair(rd, "cost_usd", "CostUsd"));
                         r.BaselineUsd = Math.Max(0.0, ReadDictDoublePair(rd, "baseline_usd", "BaselineUsd"));
                         r.RateLabel = ReadDictString(rd, "rate_label", "RateLabel") ?? "";
+                        r.RequestedServiceTier=UsageServiceTier.Normalize(ReadDictString(rd,"requested_service_tier","RequestedServiceTier"));
+                        r.ActualServiceTier=UsageServiceTier.Normalize(ReadDictString(rd,"actual_service_tier","ActualServiceTier"));
+                        r.TierEvidence=ReadDictString(rd,"tier_evidence","TierEvidence")??"";
+                        r.CostBasis=ReadDictString(rd,"cost_basis","CostBasis")??"legacy_unknown";
+                        r.PricingVersion=ReadDictString(rd,"pricing_version","PricingVersion")??"";
+                        r.Provider=ReadDictString(rd,"provider","Provider")??"unknown";
+                        if((rd.Contains("standard_equivalent_usd")&&rd["standard_equivalent_usd"]!=null)||(rd.Contains("StandardEquivalentUsd")&&rd["StandardEquivalentUsd"]!=null))
+                            r.StandardEquivalentUsd=ReadDictDoublePair(rd,"standard_equivalent_usd","StandardEquivalentUsd");
+                        if((rd.Contains("service_tier_premium_usd")&&rd["service_tier_premium_usd"]!=null)||(rd.Contains("ServiceTierPremiumUsd")&&rd["ServiceTierPremiumUsd"]!=null))
+                            r.ServiceTierPremiumUsd=ReadDictDoublePair(rd,"service_tier_premium_usd","ServiceTierPremiumUsd");
                         if (!string.IsNullOrEmpty(r.Date) || !string.IsNullOrEmpty(r.Model))
                             snap.Records.Add(r);
                     }

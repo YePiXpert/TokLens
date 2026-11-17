@@ -170,7 +170,7 @@ namespace TokLens
             }
         }
 
-        private sealed class ModelAggRow
+        private sealed class ModelAggRow : UsageRecordMetadata
         {
             public string Model;
             public Dictionary<string, double> ToolCostMap;
@@ -1025,6 +1025,18 @@ namespace TokLens
             }
         }
 
+        private static void AddUsageEvidence(Dictionary<string, object> target, UsageRecordMetadata record)
+        {
+            target["provider"] = record.Provider;
+            target["requested_service_tier"] = record.RequestedServiceTier;
+            target["actual_service_tier"] = record.ActualServiceTier;
+            target["tier_evidence"] = record.TierEvidence;
+            target["cost_basis"] = record.CostBasis;
+            target["pricing_version"] = record.PricingVersion;
+            target["standard_equivalent_usd"] = record.StandardEquivalentUsd;
+            target["service_tier_premium_usd"] = record.ServiceTierPremiumUsd;
+        }
+
         private static bool ExportJsonHeadless(TextWriter stdOut, TextWriter stdErr, AggregatedDataset ds, string rawPath, bool verbose)
         {
             try
@@ -1063,6 +1075,7 @@ namespace TokLens
             string monthPrefix = DateTime.Now.ToString("yyyy-MM-", CultureInfo.InvariantCulture);
 
             int totTurns = 0;
+            long unpricedTurns = 0;
             long totFi = 0L, totCr = 0L, totCw = 0L, totOut = 0L;
             double totCost = 0.0, totBase = 0.0;
             double todayUsd = 0.0, monthUsd = 0.0;
@@ -1070,6 +1083,7 @@ namespace TokLens
 
             Dictionary<string, ToolAggRow> toolMap = new Dictionary<string, ToolAggRow>(StringComparer.OrdinalIgnoreCase);
             Dictionary<string, ModelAggRow> modelMap = new Dictionary<string, ModelAggRow>(StringComparer.OrdinalIgnoreCase);
+            HashSet<string> distinctModels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             Dictionary<string, DayAggRow> dayMap = new Dictionary<string, DayAggRow>(StringComparer.Ordinal);
             List<Dictionary<string, object>> recordItems = new List<Dictionary<string, object>>(ds.AllRecords.Count);
 
@@ -1081,11 +1095,13 @@ namespace TokLens
                 string date = string.IsNullOrEmpty(r.Date) ? "未知日期" : r.Date;
                 string tool = string.IsNullOrEmpty(r.Tool) ? "未知工具" : r.Tool;
                 string model = string.IsNullOrEmpty(r.Model) ? "unknown" : r.Model;
-                double cost = SafeDouble(r.CostUsd);
-                double baseCost = SafeDouble(r.BaselineUsd);
+                distinctModels.Add(model);
+                double cost = UsagePresentation.IsUnpriced(r) ? 0 : SafeDouble(r.CostUsd);
+                double baseCost = UsagePresentation.IsUnpriced(r) ? 0 : SafeDouble(r.BaselineUsd);
                 long recTot = r.TotalTokens;
 
                 totTurns += r.Turns;
+                if (UsagePresentation.IsUnpriced(r)) unpricedTurns += Math.Max(0, r.Turns);
                 totFi += r.FreshInput;
                 totCr += r.CacheRead;
                 totCw += r.CacheWrite;
@@ -1120,11 +1136,19 @@ namespace TokLens
                 ta.CostUsd += cost;
 
                 ModelAggRow ma;
-                if (!modelMap.TryGetValue(model, out ma))
+                string modelKey = model + "||" + UsageServiceTier.DimensionKey(r);
+                if (!modelMap.TryGetValue(modelKey, out ma))
                 {
                     ma = new ModelAggRow();
+                    r.CopyMetadataTo(ma);
                     ma.Model = model;
-                    modelMap[model] = ma;
+                    modelMap[modelKey] = ma;
+                }
+                else
+                {
+                    ma.StandardEquivalentUsd = SumComparable(ma.StandardEquivalentUsd, r.StandardEquivalentUsd);
+                    ma.ServiceTierPremiumUsd = SumComparable(ma.ServiceTierPremiumUsd, r.ServiceTierPremiumUsd);
+                    if (ma.TierEvidence != r.TierEvidence) ma.TierEvidence = "mixed";
                 }
                 ma.Turns += r.Turns;
                 ma.FreshInput += r.FreshInput;
@@ -1167,9 +1191,10 @@ namespace TokLens
                 rd["cache_write"] = r.CacheWrite;
                 rd["output"] = r.Output;
                 rd["total_tokens"] = recTot;
-                rd["cost_usd"] = Math.Round(cost, 6);
-                rd["baseline_usd"] = Math.Round(baseCost, 6);
+                rd["cost_usd"] = UsagePresentation.ExportMoney(cost, r);
+                rd["baseline_usd"] = UsagePresentation.ExportMoney(baseCost, r);
                 rd["rate_label"] = r.RateLabel ?? "";
+                AddUsageEvidence(rd, r);
                 recordItems.Add(rd);
             }
 
@@ -1243,8 +1268,9 @@ namespace TokLens
                 md["output"] = m.Output;
                 md["total_tokens"] = m.TotalTokens;
                 md["cache_hit_pct"] = Math.Round(mHit, 1);
-                md["cost_usd"] = Math.Round(m.CostUsd, 4);
-                md["cost_cny"] = Math.Round(m.CostUsd * rate, 2);
+                md["cost_usd"] = UsagePresentation.ExportMoney(m.CostUsd, m);
+                md["cost_cny"] = UsagePresentation.ExportMoney(m.CostUsd * rate, m);
+                AddUsageEvidence(md, m);
                 md["share_pct"] = totCost > 0.0 ? Math.Round(m.CostUsd * 100.0 / totCost, 2) : 0.0;
                 byModel.Add(md);
             }
@@ -1296,7 +1322,8 @@ namespace TokLens
                     rqd["tps"] = requestTps;
                     rqd["timing_source"] = rq.TimingSource;
                     rqd["tps_kind"] = requestTps > 0 ? "request_average" : "unavailable";
-                    rqd["cost_usd"] = Math.Round(SafeDouble(rq.CostUsd), 6);
+                    rqd["cost_usd"] = UsagePresentation.ExportMoney(rq.CostUsd, rq);
+                    AddUsageEvidence(rqd, rq);
                     recentSample.Add(rqd);
                 }
             }
@@ -1309,18 +1336,22 @@ namespace TokLens
             Dictionary<string, object> summary = new Dictionary<string, object>();
             summary["node_count"] = ds.AllNodes.Count;
             summary["tool_count"] = toolMap.Count;
-            summary["model_count"] = modelMap.Count;
+            summary["model_count"] = distinctModels.Count;
+            summary["model_tier_group_count"] = modelMap.Count;
             summary["turns"] = totTurns;
+            summary["unpriced_requests"] = unpricedTurns;
+            summary["costs_complete"] = unpricedTurns == 0;
             summary["fresh_input"] = totFi;
             summary["cache_read"] = totCr;
             summary["cache_write"] = totCw;
             summary["output"] = totOut;
             summary["total_tokens"] = totTokens;
             summary["cache_hit_pct"] = Math.Round(cacheHitPct, 2);
-            summary["cost_usd"] = Math.Round(totCost, 4);
-            summary["cost_cny"] = Math.Round(totCost * rate, 2);
-            summary["baseline_usd"] = Math.Round(totBase, 4);
-            summary["saved_usd"] = Math.Round(savedUsd, 4);
+            bool allUnpriced = unpricedTurns > 0 && unpricedTurns == totTurns;
+            summary["cost_usd"] = allUnpriced ? null : (object)Math.Round(totCost, 4);
+            summary["cost_cny"] = allUnpriced ? null : (object)Math.Round(totCost * rate, 2);
+            summary["baseline_usd"] = allUnpriced ? null : (object)Math.Round(totBase, 4);
+            summary["saved_usd"] = allUnpriced ? null : (object)Math.Round(savedUsd, 4);
             summary["today_usd"] = Math.Round(todayUsd, 4);
             summary["today_tokens"] = todayTokens;
             summary["month_usd"] = Math.Round(monthUsd, 4);
@@ -1346,6 +1377,9 @@ namespace TokLens
             JavaScriptSerializer js = NewJson();
             return js.Serialize(root);
         }
+
+        private static double? SumComparable(double? a, double? b)
+        { return a.HasValue && b.HasValue ? a.Value + b.Value : (double?)null; }
 
         private static void WriteStatusLine(TextWriter w, AggregatedDataset ds, CliOptions opts)
         {

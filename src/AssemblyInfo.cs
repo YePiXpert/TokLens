@@ -18,5 +18,5 @@ using System.Windows;
     ResourceDictionaryLocation.SourceAssembly
 )]
 
-[assembly: AssemblyVersion("2.3.0.0")]
-[assembly: AssemblyFileVersion("2.3.0.0")]
+[assembly: AssemblyVersion(TokLens.BuildVersion.AssemblyVersion)]
+[assembly: AssemblyFileVersion(TokLens.BuildVersion.AssemblyVersion)]

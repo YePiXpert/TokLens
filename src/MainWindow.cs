@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.ComponentModel;
@@ -26,7 +26,7 @@ using Shapes = System.Windows.Shapes;
 using Drawing = System.Drawing;
 using WinForms = System.Windows.Forms;
 
-// 程序集版本与元数据（知微 · TokLens v2.2 / 2.2.0.0）已集中声明于 src\AssemblyInfo.cs，避免全目录 *.cs 编译产生 CS0579 重复特性。
+// 程序集元数据由 version.txt 生成，避免全目录 *.cs 编译产生重复特性。
 
 namespace TokLens
 {
@@ -367,6 +367,9 @@ namespace TokLens
         private readonly bool _skipAutoScan;
         private SyncConfig _syncCfg;
         private ScanResult _scanResult;
+        private UsageStatusPanel _usageStatusPanel;
+        private string _lastScanError = "";
+        private DateTime _lastDashboardDate = DateTime.MinValue;
         private NodeSnapshot _localNode;
         private List<NodeSnapshot> _remoteNodes = new List<NodeSnapshot>();
 
@@ -736,6 +739,65 @@ namespace TokLens
             RunSilentScanAsync(_homeDir, true, _scanResult == null);
             StartExchangeRateSyncAsync(false);
             StartCloudPricingSyncAsync(false);
+            CheckAppUpdatesInBackground();
+            _appUpdateTimer = new DispatcherTimer { Interval = TimeSpan.FromHours(1) };
+            _appUpdateTimer.Tick += delegate { CheckAppUpdatesInBackground(); };
+            _appUpdateTimer.Start();
+            DispatcherTimer resultTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(6) };
+            resultTimer.Tick += delegate
+            {
+                resultTimer.Stop();
+                string result = AppUpdateService.TakeInstallResult();
+                if (!string.IsNullOrEmpty(result)) ShowToastSafe(result.StartsWith("OK|", StringComparison.Ordinal) ? "应用已更新" : "更新未完成", result.Substring(result.IndexOf('|') + 1), result.StartsWith("OK|", StringComparison.Ordinal) ? "success" : "warning");
+            };
+            resultTimer.Start();
+        }
+
+        private AppUpdateWindow _appUpdateWindow;
+        private DispatcherTimer _appUpdateTimer;
+        private volatile bool _appUpdateCheckRunning;
+        private void OpenAppUpdateDialog()
+        {
+            if (_skipAutoScan) return;
+            try
+            {
+                RestoreAndActivateFromTray();
+                if (_appUpdateWindow != null) { _appUpdateWindow.Activate(); return; }
+                _appUpdateWindow = new AppUpdateWindow(_isDark, AppConstants.Version, delegate
+                {
+                    _explicitExitRequested = true;
+                    Application.Current.Shutdown();
+                });
+                _appUpdateWindow.Owner = this;
+                _appUpdateWindow.Closed += delegate { _appUpdateWindow = null; };
+                _appUpdateWindow.Show();
+            }
+            catch (Exception ex) { _appUpdateWindow = null; ShowToastSafe("无法打开应用更新", ex.Message, "warning"); }
+        }
+
+        private void CheckAppUpdatesInBackground()
+        {
+            if (_skipAutoScan || _appUpdateCheckRunning) return;
+            AppUpdatePreferences preference = AppUpdatePreferences.Load();
+            if (!preference.IsDue(DateTime.UtcNow)) return;
+            _appUpdateCheckRunning = true;
+            Task.Run(delegate
+            {
+                try
+                {
+                    AppUpdateRelease release = AppUpdateService.Check(AppConstants.Version, CancellationToken.None);
+                    Dispatcher.BeginInvoke(new Action(delegate
+                    {
+                        AppUpdatePreferences current = AppUpdatePreferences.Load();
+                        current.LastSuccessfulCheckUtc = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture);
+                        try { current.Save(); } catch { }
+                        if (current.Enabled && release.IsNewer && _toastManager != null)
+                            _toastManager.ShowWithAction("发现 TokLens " + release.Version, "查看更新说明并选择安装", "info", "查看更新", OpenAppUpdateDialog);
+                    }));
+                }
+                catch { /* Startup stays quiet offline. Manual checks show actionable errors. */ }
+                finally { _appUpdateCheckRunning = false; }
+            });
         }
 
         private void OnMainWindowClosing(object sender, CancelEventArgs e)
@@ -753,7 +815,7 @@ namespace TokLens
                     try
                     {
                         _trayIcon.BalloonTipTitle = AppConstants.ProductTitle;
-                        _trayIcon.BalloonTipText = "TokLens 仍在后台运行，悬浮球和用量监控不受影响。双击托盘图标或按 Ctrl+Alt+T 打开；要退出请在托盘图标右键选「彻底退出」。";
+                        _trayIcon.BalloonTipText = "TokLens 仍在后台运行，状态胶囊和用量监控不受影响。双击托盘图标或按 Ctrl+Alt+T 打开；要退出请在托盘图标右键选「彻底退出」。";
                         _trayIcon.ShowBalloonTip(2500);
                     }
                     catch { }
@@ -778,6 +840,7 @@ namespace TokLens
             if (_livePulseTimer != null) _livePulseTimer.Stop();
             if (_cloudAutoTimer != null) _cloudAutoTimer.Stop();
             if (_cloudDebounceTimer != null) _cloudDebounceTimer.Stop();
+            if (_appUpdateTimer != null) _appUpdateTimer.Stop();
             DisposeSystemTray();
         }
 
@@ -827,7 +890,7 @@ namespace TokLens
                 };
                 _trayMenu.Items.Add(syncRefreshItem);
 
-                _trayHudToggleItem = new WinForms.ToolStripMenuItem("显示 / 隐藏桌面悬浮球 (Ctrl+M)");
+                _trayHudToggleItem = new WinForms.ToolStripMenuItem("显示 / 隐藏桌面状态胶囊 (Ctrl+M)");
                 _trayHudToggleItem.Click += delegate(object s, EventArgs e)
                 {
                     Dispatcher.BeginInvoke(new Action(delegate()
@@ -836,6 +899,10 @@ namespace TokLens
                     }));
                 };
                 _trayMenu.Items.Add(_trayHudToggleItem);
+
+                WinForms.ToolStripMenuItem updateItem = new WinForms.ToolStripMenuItem("检查应用更新…");
+                updateItem.Click += delegate { Dispatcher.BeginInvoke(new Action(OpenAppUpdateDialog)); };
+                _trayMenu.Items.Add(updateItem);
 
                 WinForms.ToolStripMenuItem guideItem = new WinForms.ToolStripMenuItem("快捷键与 GitHub 令牌原理解析 (F1)");
                 guideItem.Click += delegate(object s, EventArgs e)
@@ -895,7 +962,7 @@ namespace TokLens
 
         private static string TruncateTrayText(string raw)
         {
-            if (string.IsNullOrEmpty(raw)) return "TokLens v2.3";
+            if (string.IsNullOrEmpty(raw)) return "TokLens " + AppConstants.VersionTag;
             // .NET Framework 4.x NotifyIcon.Text 严格要求长度 < 64，截断保护在 60 字符以内
             if (raw.Length <= 60) return raw;
             return raw.Substring(0, 59) + "…";
@@ -915,7 +982,7 @@ namespace TokLens
 
                 if (_trayTodaySummaryItem != null)
                 {
-                    _trayTodaySummaryItem.Text = string.Format(CultureInfo.InvariantCulture, "今日花费: {0}  |  Token: {1}", money, tok);
+                    _trayTodaySummaryItem.Text = string.Format(CultureInfo.InvariantCulture, "今日记录 / 估值: {0}  |  Token: {1}", money, tok);
                 }
                 if (_trayMinimizeToggleItem != null && _syncCfg != null)
                 {
@@ -1236,14 +1303,17 @@ namespace TokLens
                                 : 0L;
                             bool hasChanges = forceUiRefresh ||
                                               _scanResult == null ||
+                                              _lastDashboardDate != DateTime.Today ||
                                               res.ChangedFilesCount > 0 ||
                                               topTs != _lastTopRequestTs;
 
                             bool gotNewTopRequest = _lastTopRequestTs > 0L && topTs > _lastTopRequestTs;
                             _scanResult = res;
+                            _lastScanError = "";
                             _localNode = localSnap;
                             _lastTopRequestTs = topTs;
                             UpdatePriceUiState(false);
+                            RefreshMiniHud();
 
                             if (gotNewTopRequest)
                             {
@@ -1272,6 +1342,7 @@ namespace TokLens
                             else
                             {
                                 UpdateTopSubContextText();
+                                if (_usageStatusPanel != null) _usageStatusPanel.Render(_scanResult, _latestSpecialistActiveRows, _isCny, _usdToCny, _lastScanError);
                             }
 
                             if (triggerCloudSyncIfEnabled && _syncCfg != null && _syncCfg.AutoSync && _syncCfg.IsConfigured)
@@ -1291,11 +1362,15 @@ namespace TokLens
                         }
                     }));
                 }
-                catch
+                catch (Exception scanException)
                 {
                     Dispatcher.BeginInvoke(new Action(delegate()
                     {
                         _isScanning = false;
+                        _lastScanError = scanException.GetType().Name + ": " + scanException.Message;
+                        if (_lastScanError.Length > 180) _lastScanError = _lastScanError.Substring(0, 180);
+                        RefreshMiniHud();
+                        if (_usageStatusPanel != null) _usageStatusPanel.Render(_scanResult, _latestSpecialistActiveRows, _isCny, _usdToCny, _lastScanError);
                         if (_sidebarRefreshBtn != null)
                             _sidebarRefreshBtn.IsEnabled = true;
 
@@ -1604,10 +1679,11 @@ namespace TokLens
             // 测试侧边栏折叠 (58px) 与展开 (200px) 稳定性
             ToggleSidebarCollapsed();
             root.UpdateLayout();
-            if (Math.Abs(_sidebarBorder.ActualWidth - SidebarCollapsedWidth) > 0.05 ||
+            // UseLayoutRounding can move a nominal DIP edge by half a pixel (58 -> 57.6 at 125% DPI).
+            if (Math.Abs(_sidebarBorder.ActualWidth - SidebarCollapsedWidth) > 0.5 ||
                 Math.Abs(_topContextBarBorder.ActualHeight - baseTopH) > 0.05)
             {
-                throw new InvalidOperationException("Sidebar collapse geometry mismatch!");
+                throw new InvalidOperationException("Sidebar collapse geometry mismatch: actual=" + _sidebarBorder.ActualWidth + ", expected=" + SidebarCollapsedWidth + ", top=" + _topContextBarBorder.ActualHeight + ", expectedTop=" + baseTopH);
             }
             ToggleSidebarCollapsed();
             root.UpdateLayout();
@@ -2034,7 +2110,7 @@ namespace TokLens
             };
             leftUtils.Children.Add(_sidebarRefreshBtn);
 
-            _sidebarHudBtn = ModernControlsFactory.CreateIconGhostButton(UiIcons.Capsule, "显示 / 隐藏桌面悬浮球 (Ctrl+M)");
+            _sidebarHudBtn = ModernControlsFactory.CreateIconGhostButton(UiIcons.Capsule, "显示 / 隐藏桌面状态胶囊 (Ctrl+M)");
             _sidebarHudBtn.Margin = new Thickness(3, 0, 0, 0);
             _sidebarHudBtn.Click += delegate(object s, RoutedEventArgs e)
             {
@@ -3255,7 +3331,7 @@ namespace TokLens
             // Row 0: 顶部 4 张 Bento KPI 卡片（大数字统一 24px SemiBold FgPrimary + 等宽数字，告别彩虹红绿灯）
             UniformGrid kpiGrid = new UniformGrid { Columns = 4 };
 
-            // KPI 1: 累计等效账单 + 今日实时微胶囊
+            // KPI 1: 累计记录 / 估值 + 今日实时微胶囊
             _kpiCardCost = ModernControlsFactory.CreateCard(new Thickness(14, 11, 14, 10));
             _kpiCardCost.Margin = new Thickness(0, 0, 10, 0);
             StackPanel c1Sp = new StackPanel();
@@ -3276,7 +3352,7 @@ namespace TokLens
             DockPanel.SetDock(_kpiTodayPill, Dock.Right);
             c1Head.Children.Add(_kpiTodayPill);
 
-            TextBlock c1Lbl = new TextBlock { Text = "累计等效账单", FontSize = DesignSystem.TextBody, FontWeight = FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center };
+            TextBlock c1Lbl = new TextBlock { Text = "累计记录 / 估值", FontSize = DesignSystem.TextBody, FontWeight = FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center };
             c1Lbl.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             c1Head.Children.Add(c1Lbl);
             c1Sp.Children.Add(c1Head);
@@ -3378,7 +3454,7 @@ namespace TokLens
             DockPanel.SetDock(_kpiSavePctBadge, Dock.Right);
             c4Head.Children.Add(_kpiSavePctBadge);
 
-            TextBlock c4Lbl = new TextBlock { Text = "缓存累计省下费用", FontSize = DesignSystem.TextBody, FontWeight = FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center };
+            TextBlock c4Lbl = new TextBlock { Text = "缓存参考节省", FontSize = DesignSystem.TextBody, FontWeight = FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center };
             c4Lbl.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             c4Head.Children.Add(c4Lbl);
             c4Sp.Children.Add(c4Head);
@@ -3722,6 +3798,14 @@ namespace TokLens
             recentCard.Child = recentGrid;
             Grid.SetRow(recentCard, 2);
             g.Children.Add(recentCard);
+
+            foreach (UIElement child in g.Children) Grid.SetRow(child, Grid.GetRow(child) + 1);
+            g.RowDefinitions.Insert(0, new RowDefinition { Height = GridLength.Auto });
+            _usageStatusPanel = new UsageStatusPanel(
+                delegate { RunSilentScanAsync(_homeDir, true, false); },
+                delegate { SwitchActiveView(ViewDoctor); });
+            Grid.SetRow(_usageStatusPanel, 0);
+            g.Children.Add(_usageStatusPanel);
 
             return g;
         }
@@ -4269,6 +4353,10 @@ namespace TokLens
                 delegate() { return _homeDir; },
                 callbacks);
             _settingsView.AddHeaderAction(BuildSettingsMoreButton());
+            Button updateButton = ModernControlsFactory.CreateButton("检查应用更新", "secondary");
+            updateButton.ToolTip = "当前 " + AppConstants.VersionTag + " · 查看新版本、下载并重启安装";
+            updateButton.Click += delegate { OpenAppUpdateDialog(); };
+            _settingsView.AddHeaderAction(updateButton);
 
             return _settingsView;
         }
@@ -4383,6 +4471,7 @@ namespace TokLens
                 DataGridColumn modelCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "模型", "Model", "Model", new DataGridLength(1.45, DataGridLengthUnitType.Star), false, true, true);
                 modelCol.MinWidth = 140.0;
                 dg.Columns.Add(modelCol);
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "服务档位", "ServiceTierLabel", "ServiceTierLabel", new DataGridLength(116), false, false, false));
                 dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "输出", "OutputText", "Output", new DataGridLength(80), true, true, false));
                 dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "总 Token", "TotalTokensText", "TotalTokens", new DataGridLength(96), true, true, true));
                 dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "花费", "FormattedCost", "CostUsd", new DataGridLength(92), true, true, true));
@@ -4395,6 +4484,7 @@ namespace TokLens
                 DataGridColumn modelCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "模型名称", "Model", "Model", new DataGridLength(1.3, DataGridLengthUnitType.Star), false, true, true);
                 modelCol.MinWidth = 112.0;
                 dg.Columns.Add(modelCol);
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "服务档位", "ServiceTierLabel", "ServiceTierLabel", new DataGridLength(116), false, false, false));
                 dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "新输入", "FreshInputText", "FreshInput", new DataGridLength(64), true, true, false));
                 dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存读", "CacheReadText", "CacheRead", new DataGridLength(68), true, true, false));
                 dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存写", "CacheWriteText", "CacheWrite", new DataGridLength(70), true, true, false));
@@ -4493,6 +4583,8 @@ namespace TokLens
             DataGrid dg = ModernDataGridFactory.CreateModernDataGrid();
 
             dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "模型名称", "Model", "Model", new DataGridLength(1.65, DataGridLengthUnitType.Star), false, true, true));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "服务档位", "ServiceTierLabel", "ServiceTierLabel", new DataGridLength(116), false, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "金额来源", "CostBasisLabel", "CostBasisLabel", new DataGridLength(150), false, true, false));
             dg.Columns.Add(ModernDataGridFactory.MakeBadgeColumn("所属工具", "Tool", "Tool", new DataGridLength(138)));
             dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "调用次数", "Turns", "Turns", new DataGridLength(80), true, true, false));
             dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "纯新增输入", "FreshInputText", "FreshInput", new DataGridLength(96), true, true, false));
@@ -4501,7 +4593,7 @@ namespace TokLens
             dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存命中", "CacheHitText", "CacheRead", new DataGridLength(82), true, true, false));
             // 关键修复：单价 ($/M) 列的 SortMemberPath 严格绑定 InputPerM，彻底修正旧版错排为 CostUsd 的 Bug！
             dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "单价 ($/M)", "RateLabel", "InputPerM", new DataGridLength(108), true, true, false));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "等效账单", "FormattedCost", "CostUsd", new DataGridLength(104), true, true, true));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "记录 / 估值", "FormattedCost", "CostUsd", new DataGridLength(104), true, true, true));
             dg.Columns.Add(ModernDataGridFactory.MakeShareBarColumn("账单占比", "ShareText", "BarRatio", "BarRatio", new DataGridLength(122)));
 
             ContextMenu cm = new ContextMenu();
@@ -5488,6 +5580,10 @@ namespace TokLens
             double totCostUsd = 0.0, totBaseUsd = 0.0;
             double scopedTodayUsd = 0.0;
             double recent7dUsd = 0.0;
+            int unpricedRows = 0, pricedRows = 0, comparableRequests = 0, todayRows = 0, todayUnpricedRows = 0;
+            long unpricedRequests = 0;
+            double comparableBaseUsd = 0, comparableCostUsd = 0;
+            bool forecastIncomplete = false;
             string sevenDaysAgoStr = DateTime.Now.Date.AddDays(-6).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 
             for (int i = 0; i < machineFiltered.Count; i++)
@@ -5496,7 +5592,11 @@ namespace TokLens
                 if (_selectedTool != null && !string.Equals(r.Tool, _selectedTool, StringComparison.Ordinal))
                     continue;
                 if (string.Equals(r.Date, todayDateStr, StringComparison.Ordinal))
-                    scopedTodayUsd += r.CostUsd;
+                {
+                    todayRows++;
+                    if (UsagePresentation.IsUnpriced(r)) todayUnpricedRows++;
+                    else scopedTodayUsd += r.CostUsd;
+                }
             }
 
             // 基于当前设备视角的全时间段记录计算近 7 日平均与当月（30天）预测
@@ -5508,7 +5608,10 @@ namespace TokLens
                 if (_selectedTool != null && !string.Equals(r.Tool, _selectedTool, StringComparison.Ordinal))
                     continue;
                 if (!string.IsNullOrEmpty(r.Date) && r.Date != "未知日期" && string.CompareOrdinal(r.Date, sevenDaysAgoStr) >= 0)
-                    recent7dUsd += r.CostUsd;
+                {
+                    if (UsagePresentation.IsUnpriced(r)) forecastIncomplete = true;
+                    else recent7dUsd += r.CostUsd;
+                }
             }
 
             Dictionary<string, ModelRowView> modelMap = new Dictionary<string, ModelRowView>(StringComparer.Ordinal);
@@ -5522,46 +5625,56 @@ namespace TokLens
                 totCr += r.CacheRead;
                 totCw += r.CacheWrite;
                 totOut += r.Output;
-                totCostUsd += r.CostUsd;
+                if (UsagePresentation.IsUnpriced(r)) { unpricedRows++; unpricedRequests += Math.Max(0, r.Turns); }
+                else { pricedRows++; totCostUsd += r.CostUsd; }
                 totBaseUsd += r.BaselineUsd;
+                if (!UsagePresentation.IsUnpriced(r) && (r.CostBasis ?? "").StartsWith("estimated_", StringComparison.Ordinal))
+                {
+                    comparableBaseUsd += r.BaselineUsd; comparableCostUsd += r.CostUsd; comparableRequests += Math.Max(0, r.Turns);
+                }
                 if (!string.IsNullOrEmpty(r.Model))
                     uniqueModels.Add(r.Model);
 
-                string mKey = (r.Tool ?? "") + "||" + (r.Model ?? "");
+                string mKey = (r.Tool ?? "") + "||" + (r.Model ?? "") + "||" + UsageServiceTier.DimensionKey(r);
                 ModelRowView mv;
                 if (!modelMap.TryGetValue(mKey, out mv))
                 {
                     mv = new ModelRowView();
+                    r.CopyMetadataTo(mv);
                     mv.Tool = r.Tool ?? "未知工具";
                     mv.Model = r.Model ?? "unknown";
                     mv.RateLabel = r.RateLabel ?? "";
                     if (pricing != null)
                     {
-                        ModelRate mr = pricing.Lookup(mv.Model);
+                        UsageEvent quote = new UsageEvent { Model = mv.Model, FreshInput = 1, Date = r.Date };
+                        r.CopyMetadataTo(quote);
+                        ModelRate mr; double quoteCost, quoteBase;
+                        pricing.ComputeEventCost(quote, out quoteCost, out quoteBase, out mr);
                         mv.InputPerM = mr.InputPerM;
                         if (string.IsNullOrWhiteSpace(mv.RateLabel))
                             mv.RateLabel = mr.Label;
                     }
                     modelMap[mKey] = mv;
                 }
+                else if (!string.Equals(mv.RateLabel, r.RateLabel, StringComparison.Ordinal)) mv.RateLabel = "多种费率 · 见明细";
                 mv.Turns += r.Turns;
                 mv.FreshInput += r.FreshInput;
                 mv.CacheRead += r.CacheRead;
                 mv.CacheWrite += r.CacheWrite;
                 mv.Output += r.Output;
                 mv.TotalTokens += r.TotalTokens;
-                mv.CostUsd += r.CostUsd;
+                if (!UsagePresentation.IsUnpriced(r)) mv.CostUsd += r.CostUsd;
             }
 
             // 7. 更新 4 张 Bento KPI 卡片
             long totAllTokens = totFi + totCr + totCw + totOut;
             long totPromptTokens = totFi + totCr + totCw;
             double cacheHitPct = totPromptTokens > 0 ? (totCr * 100.0 / totPromptTokens) : 0.0;
-            double savedUsd = Math.Max(0.0, totBaseUsd - totCostUsd);
-            double savedPct = totBaseUsd > 0.0001 ? Math.Min(99.9, savedUsd * 100.0 / totBaseUsd) : 0.0;
+            double savedUsd = Math.Max(0.0, comparableBaseUsd - comparableCostUsd);
+            double savedPct = comparableBaseUsd > 0.0001 ? Math.Min(99.9, savedUsd * 100.0 / comparableBaseUsd) : 0.0;
 
-            _kpiCostVal.Text = FormatterUtil.FormatMoney(totCostUsd, _isCny, _usdToCny);
-            _kpiTodayPillText.Text = "今日 " + FormatterUtil.FormatMoney(scopedTodayUsd, _isCny, _usdToCny);
+            _kpiCostVal.Text = unpricedRows > 0 && pricedRows == 0 ? "—" : FormatterUtil.FormatMoney(totCostUsd, _isCny, _usdToCny);
+            _kpiTodayPillText.Text = "今日 " + (todayUnpricedRows > 0 && todayUnpricedRows == todayRows ? "—" : FormatterUtil.FormatMoney(scopedTodayUsd, _isCny, _usdToCny)) + (todayUnpricedRows > 0 ? " *" : "");
             // 时间范围本身就是「今日」时，右上角的「今日 $X」与主数字重复，隐藏
             _kpiTodayPill.Visibility = (_rangeDays == 1 && _selectedDate == null) ? Visibility.Collapsed : Visibility.Visible;
 
@@ -5569,19 +5682,21 @@ namespace TokLens
             double forecast30dUsd = avgDailyUsd * 30.0;
             _kpiCardCost.ToolTip = string.Format(
                 CultureInfo.InvariantCulture,
-                "等效账单与月度预测\n• 当前筛选合计：{0} ({1})\n• 今日实时消耗：{2}\n• 近 7 天日均：{3} / 天\n• 30 天滚动预测：{4}",
+                "记录 / API 估值与月度预测\n• 当前筛选合计：{0} ({1})\n• 今日实时消耗：{2}\n• 近 7 天日均：{3} / 天\n• 30 天滚动预测：{4}",
                 FormatterUtil.FormatMoney(totCostUsd, true, _usdToCny),
                 FormatterUtil.FormatMoney(totCostUsd, false, _usdToCny),
                 FormatterUtil.FormatMoney(scopedTodayUsd, _isCny, _usdToCny),
                 FormatterUtil.FormatMoney(avgDailyUsd, _isCny, _usdToCny),
                 FormatterUtil.FormatMoney(forecast30dUsd, _isCny, _usdToCny));
+            if (unpricedRows > 0 || forecastIncomplete) _kpiCardCost.ToolTip += "\n金额与预测仅含已计价部分；未计价请求不是免费请求。";
 
             _kpiCostSub.Text = string.Format(
                 CultureInfo.InvariantCulture,
                 "{0:N0} 次请求 · {1} 个模型 · 月预测 {2}",
                 totTurns,
                 uniqueModels.Count,
-                FormatterUtil.FormatMoney(forecast30dUsd, _isCny, _usdToCny));
+                forecastIncomplete ? "—（价格不完整）" : FormatterUtil.FormatMoney(forecast30dUsd, _isCny, _usdToCny));
+            if (unpricedRows > 0) _kpiCostSub.Text = unpricedRequests.ToString("N0", CultureInfo.InvariantCulture) + " 次未计价 · 金额仅含已计价部分";
 
             _kpiTokVal.Text = FormatterUtil.FormatTokens(totAllTokens);
             _kpiTokSub.Text = string.Format(
@@ -5614,9 +5729,11 @@ namespace TokLens
                 FormatterUtil.FormatTokens(totCr),
                 FormatterUtil.FormatTokens(totPromptTokens));
 
-            _kpiSaveVal.Text = FormatterUtil.FormatMoney(savedUsd, _isCny, _usdToCny);
+            _kpiSaveVal.Text = comparableRequests > 0 ? FormatterUtil.FormatMoney(savedUsd, _isCny, _usdToCny) : "—";
+            _kpiSavePctBadge.Visibility = comparableRequests > 0 ? Visibility.Visible : Visibility.Collapsed;
             _kpiSavePctText.Text = string.Format(CultureInfo.InvariantCulture, "省 {0:F0}%", savedPct);
-            _kpiSaveSub.Text = "无缓存基准 " + FormatterUtil.FormatMoney(totBaseUsd, _isCny, _usdToCny);
+            _kpiSaveSub.Text = comparableRequests > 0 ? comparableRequests.ToString("N0", CultureInfo.InvariantCulture) + " 次可比请求 · 非实付节省" : "暂无可比的请求级 API 估值";
+            _kpiSaveVal.ToolTip = "同档位、同价格版本的无缓存基准 " + FormatterUtil.FormatMoney(comparableBaseUsd, _isCny, _usdToCny) + "；不以日志实付或来源未知的历史金额推算缓存节省。";
 
             // 8. 更新中部消耗排行与单日胶囊
             bool anyFilterActive = (_selectedTool != null || _selectedMachineId != null || _selectedDate != null);
@@ -5668,14 +5785,15 @@ namespace TokLens
                     : "—";
 
                 m.DisplayCost = _isCny ? (m.CostUsd * _usdToCny) : m.CostUsd;
-                m.FormattedCost = FormatterUtil.FormatMoney(m.CostUsd, _isCny, _usdToCny);
+                m.FormattedCost = m.CostBasis == "unpriced" ? "—" : FormatterUtil.FormatMoney(m.CostUsd, _isCny, _usdToCny);
                 double share = totCostUsd > 0.0 ? (m.CostUsd * 100.0 / totCostUsd) : 0.0;
                 m.ShareText = share.ToString("F1", CultureInfo.InvariantCulture) + "%";
                 m.BarRatio = maxModelCost > 0.0 ? Math.Max(0.02, m.CostUsd / maxModelCost) : 0.0;
 
                 if (string.IsNullOrEmpty(_modelSearchQuery) ||
                     (m.Model != null && m.Model.IndexOf(_modelSearchQuery, StringComparison.OrdinalIgnoreCase) >= 0) ||
-                    (m.Tool != null && m.Tool.IndexOf(_modelSearchQuery, StringComparison.OrdinalIgnoreCase) >= 0))
+                    (m.Tool != null && m.Tool.IndexOf(_modelSearchQuery, StringComparison.OrdinalIgnoreCase) >= 0) ||
+                    m.ServiceTierLabel.IndexOf(_modelSearchQuery, StringComparison.OrdinalIgnoreCase) >= 0)
                 {
                     filteredModels.Add(m);
                 }
@@ -5777,6 +5895,8 @@ namespace TokLens
             _latestSpecialistMachineRows = machineFiltered;
             _latestSpecialistActiveRows = activeRows;
             _latestReferenceDate = latestKnownDate;
+            _lastDashboardDate = DateTime.Today;
+            if (_usageStatusPanel != null) _usageStatusPanel.Render(_scanResult, activeRows, _isCny, _usdToCny, _lastScanError);
 
             HashSet<string> allKnownModelIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < allRecords.Count; i++)
@@ -5788,19 +5908,19 @@ namespace TokLens
 
             RefreshActiveSpecialistView(true);
 
-            // 14. 同步桌面悬浮球与异常燃烧速率提醒
+            // 14. 同步桌面状态胶囊与异常燃烧速率提醒
             if (_miniHud != null)
             {
                 RefreshMiniHud();
             }
 
-            if (!_skipAutoScan && _scanResult != null)
+            if (!_skipAutoScan && _scanResult != null && _scanResult.WindowRequestsComplete)
             {
                 try
                 {
                     List<BurnRateAlert> alerts = _burnGuard.Evaluate(
                         allRecords,
-                        _scanResult.RecentRequests,
+                        _scanResult.WindowRequests ?? _scanResult.RecentRequests,
                         _isCny,
                         _usdToCny);
                     if (alerts != null)
@@ -5870,6 +5990,7 @@ namespace TokLens
                     int measuredDuration=UsageTiming.IsMeasured(rq.TimingSource)?rq.DurationMs:0;
                     double tps = FormatterUtil.ComputeTps(rq.Output, measuredDuration);
                     LiveRequestRowView row = new LiveRequestRowView();
+                    rq.CopyMetadataTo(row);
                     row.TimestampMs = rq.TimestampMs;
                     row.Date = rq.Date;
                     row.TimeText = formattedTime;
@@ -5892,12 +6013,13 @@ namespace TokLens
                     row.TpsText = FormatterUtil.FormatTps(tps);
                     row.CostUsd = rq.CostUsd;
                     row.DisplayCost = _isCny ? (rq.CostUsd * _usdToCny) : rq.CostUsd;
-                    row.FormattedCost = FormatterUtil.FormatMoney(rq.CostUsd, _isCny, _usdToCny);
+                    row.FormattedCost = rq.CostBasis == "unpriced" ? "—" : FormatterUtil.FormatMoney(rq.CostUsd, _isCny, _usdToCny);
 
                     if (overviewPreviewRows.Count < 30)
                         overviewPreviewRows.Add(row);
 
                     if (string.IsNullOrEmpty(_liveSearchQuery) ||
+                        UsagePresentation.TierLabel(row).IndexOf(_liveSearchQuery, StringComparison.OrdinalIgnoreCase) >= 0 ||
                         (row.Model != null && row.Model.IndexOf(_liveSearchQuery, StringComparison.OrdinalIgnoreCase) >= 0) ||
                         (row.Tool != null && row.Tool.IndexOf(_liveSearchQuery, StringComparison.OrdinalIgnoreCase) >= 0) ||
                         (row.TimeText != null && row.TimeText.IndexOf(_liveSearchQuery, StringComparison.OrdinalIgnoreCase) >= 0) ||
@@ -7058,13 +7180,14 @@ namespace TokLens
             items.Add(new PaletteCommandItem("nav-settings", "视图导航", "设置 / 同步与偏好", "Gist / WebDAV 同步、配对码、扫描与显示偏好", "Ctrl+,", UiIcons.Settings, delegate() { SwitchActiveView(ViewSettings); }));
 
             // 2. 效率工具与工作台
-            items.Add(new PaletteCommandItem("tool-hud", "桌面工作台", "显示 / 隐藏桌面悬浮球", "外圈上下文占用，球心可切换今日估值 / 速率，悬停看详情", "Ctrl+M", UiIcons.Capsule, delegate() { ToggleMiniHudWindow(); }));
+            items.Add(new PaletteCommandItem("tool-hud", "桌面工作台", "显示 / 隐藏桌面状态胶囊", "显示所选会话与上下文，单击展开详情，支持固定会话、拖动和位置锁定", "Ctrl+M", UiIcons.Capsule, delegate() { ToggleMiniHudWindow(); }));
+            items.Add(new PaletteCommandItem("app-update", "应用维护", "检查应用更新", "查看新版本说明，下载并重启安装", "", UiIcons.Refresh, OpenAppUpdateDialog));
             items.Add(new PaletteCommandItem("tool-pricing", "桌面工作台", "设置 / 计价规则", "浏览模型单价，或配置私有中转的自定义费率", "", UiIcons.Models, delegate() { OpenPricingStudioDialog(null); }));
             items.Add(new PaletteCommandItem("tool-token-guide", "帮助与排障", "为什么家里和单位自动读取的 gh 令牌不一样？", "深度图解 GitHub 设备独立 OAuth 令牌 (gho_...) 与同账号 Gist 汇聚原理", "F1", UiIcons.Key, delegate() { OpenShortcutAndGuideDialog(1); }));
             items.Add(new PaletteCommandItem("tool-shortcuts", "帮助与排障", "打开全局键盘快捷键速查表", "双列键盘速查矩阵，支持全键盘流极速操控", "F1", UiIcons.Help, delegate() { OpenShortcutAndGuideDialog(0); }));
             items.Add(new PaletteCommandItem("tool-scan", "数据与同步", "立即增量扫描本地日志并触发多端同步", "增量扫描本机日志，并刷新汇率", "F5", UiIcons.Refresh, delegate() { RunSilentScanAsync(_homeDir, true, true); StartExchangeRateSyncAsync(false); }));
             items.Add(new PaletteCommandItem("tool-backup-now", "数据与同步", "立即创建本地时光机压缩快照 (.toklens.gz)", "将本机与缓存多节点高水位账本安全归档至 backups 目录", "", UiIcons.History, delegate() { CreateManualTimeMachineSnapshot(); }));
-            items.Add(new PaletteCommandItem("tool-theme", "界面偏好", _isDark ? "切换至浅色主题 (Paper Zinc)" : "切换至深色主题 (Obsidian Zinc)", "同时切换窗口标题栏与悬浮球详情卡片", "", _isDark ? UiIcons.Sun : UiIcons.Moon, delegate() { ToggleThemeFromUi(); }));
+            items.Add(new PaletteCommandItem("tool-theme", "界面偏好", _isDark ? "切换至浅色主题 (Paper Zinc)" : "切换至深色主题 (Obsidian Zinc)", "同时切换窗口标题栏与状态胶囊详情卡片", "", _isDark ? UiIcons.Sun : UiIcons.Moon, delegate() { ToggleThemeFromUi(); }));
             items.Add(new PaletteCommandItem("tool-currency", "界面偏好", _isCny ? "切换为美元计价 ($ USD)" : "切换为人民币计价 (¥ CNY)", "全局 KPI、图表、模型表与单笔透视同步切换", "", UiIcons.Swap, delegate()
             {
                 _isCny = !_isCny;
@@ -7086,9 +7209,8 @@ namespace TokLens
         private void RefreshMiniHud()
         {
             if (_miniHud == null) return;
-            HudTelemetry t = HudTelemetry.FromScan(_scanResult, DateTime.Now, _isCny, _usdToCny);
-            if (DateTime.UtcNow < _hudAlertUntilUtc) { t.Alert = true; t.AlertText = _hudAlertText; }
-            _miniHud.UpdateTelemetry(t);
+            _miniHud.UpdateSource(_scanResult, _isCny, _usdToCny, _lastScanError);
+            _miniHud.SetAlert(_hudAlertText, _hudAlertUntilUtc);
         }
 
         private void EnsureMiniHudCreated()
@@ -7130,7 +7252,7 @@ namespace TokLens
             }
             catch (Exception ex)
             {
-                ShowToastSafe("切换桌面悬浮球失败", ex.Message, "warning");
+                ShowToastSafe("切换桌面状态胶囊失败", ex.Message, "warning");
             }
         }
 
@@ -7188,23 +7310,8 @@ namespace TokLens
                         try
                         {
                             PricingEngine pe = new PricingEngine(_homeDir);
-                            if (_scanResult != null && _scanResult.Records != null)
-                            {
-                                for (int i = 0; i < _scanResult.Records.Count; i++)
-                                {
-                                    RecordBucket rb = _scanResult.Records[i];
-                                    if (rb == null) continue;
-                                    double cost;
-                                    double baseline;
-                                    ModelRate mr;
-                                    pe.ComputeBucketCost(rb.Model, rb.Turns, rb.FreshInput, rb.Output, rb.CacheRead, rb.CacheWrite, 0.0, out cost, out baseline, out mr);
-                                    rb.CostUsd = cost;
-                                    rb.BaselineUsd = baseline;
-                                    rb.RateLabel = mr.Label;
-                                }
-                                _localNode = SyncService.BuildLocalSnapshot(_scanResult, _syncCfg);
-                                Program.ApplyNodeAliasToSnapshot(_localNode, _syncCfg);
-                            }
+                            // Reprice local requests in the scanner; a daily bucket loses per-request
+                            // context lengths and must not overwrite logged charges or Fast evidence.
                             _remoteNodes = LoadAndRecalculateRemoteNodes(_syncCfg.MachineId, _homeDir, _syncCfg);
                         }
                         catch { }
@@ -7212,7 +7319,7 @@ namespace TokLens
                         UpdatePriceUiState(false);
                         RefreshDashboardView();
                         RunSilentScanAsync(_homeDir, true, false);
-                        ShowToastSafe("自定义模型单价已生效", "全站本地与远端节点等效账单已完成重算", "success");
+                        ShowToastSafe("自定义模型单价已保存", "正在按单笔请求重新估值，保留日志金额和服务档位证据", "success");
                     });
                 dlg.ShowDialog();
             }
@@ -7429,6 +7536,16 @@ namespace TokLens
             moreBtn.ToolTip = "时光机备份、开机自启";
 
             ContextMenu menu = new ContextMenu();
+            MenuItem autoUpdateItem = new MenuItem { Header = "每天检查应用更新（仅提示）", IsCheckable = true, IsChecked = AppUpdatePreferences.Load().Enabled };
+            autoUpdateItem.Click += delegate
+            {
+                AppUpdatePreferences preferences = AppUpdatePreferences.Load();
+                preferences.Enabled = autoUpdateItem.IsChecked;
+                try { preferences.Save(); }
+                catch (Exception ex) { autoUpdateItem.IsChecked = !autoUpdateItem.IsChecked; ShowToastSafe("无法保存更新偏好", ex.Message, "warning"); }
+            };
+            menu.Items.Add(autoUpdateItem);
+            menu.Items.Add(new Separator());
             MenuItem backupItem = new MenuItem { Header = "时光机备份…" };
             backupItem.Click += delegate(object s, RoutedEventArgs e)
             {

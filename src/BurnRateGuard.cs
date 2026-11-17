@@ -52,7 +52,8 @@ namespace TokLens
     }
 
     /// <summary>
-    /// 异常燃烧速率守卫：近 15 分钟花费远超近 7 日均速时提醒排查 Agent 死循环。
+    /// API 估值突增提示。只比较实际有请求的近期时间段，不把睡眠时间稀释进基线。
+    /// 此提示不能判断 Agent 是否失控，也不能代表订阅用户实际被扣款。
     /// 同时提供报表导出共用的金额 / 汇率 / 时间规整工具方法。
     /// </summary>
     public sealed class BurnRateGuard
@@ -81,7 +82,6 @@ namespace TokLens
         {
             public DateTime LocalNow;
             public long NowEpochMs;
-            public double Past7DaysCostUsd;
             public double HistHourlyAvgUsd;
             public double Last15MinCostUsd;
             public int Last15MinRequests;
@@ -89,6 +89,9 @@ namespace TokLens
             public double BurnRate15MinPerHrUsd;
             public bool IsRunawayBurn;
             public PairSpendStat Top15MinPair;
+            public int BaselineWindows;
+            public long FirstRecentMs;
+            public long LastRecentMs;
         }
 
         public void Reset()
@@ -146,7 +149,7 @@ namespace TokLens
                         {
                             compareText = string.Format(
                                 CultureInfo.InvariantCulture,
-                                "折合 {0}/小时，达近 7 日均速的 {1:F1} 倍",
+                                "折合 {0}/小时，是此前活跃时段中位速率的 {1:F1} 倍",
                                 burnHrStr,
                                 m.BurnRate15MinPerHrUsd / m.HistHourlyAvgUsd);
                         }
@@ -154,18 +157,18 @@ namespace TokLens
                         {
                             compareText = string.Format(
                                 CultureInfo.InvariantCulture,
-                                "折合燃烧速率高达 {0}/小时",
+                                "折合 {0}/小时（近期活跃基线不足，采用固定阈值）",
                                 burnHrStr);
                         }
 
                         BurnRateAlert evRunaway = new BurnRateAlert();
                         evRunaway.RuleCode = "RUNAWAY_15M";
-                        evRunaway.Variant = "danger";
-                        evRunaway.IsCritical = true;
-                        evRunaway.Title = "疑似 Agent 高频燃烧预警";
+                        evRunaway.Variant = "warning";
+                        evRunaway.IsCritical = false;
+                        evRunaway.Title = "近期 API 估值升高";
                         evRunaway.Message = string.Format(
                             CultureInfo.InvariantCulture,
-                            "近 15 分钟密集触发 {0} 次请求，累计消耗 {1}（{2}）！最大开销来源：{3} + {4}（{5}，占 {6:F0}%），请立即排查是否陷入死循环。",
+                            "本机近 15 分钟 {0} 次请求，API 估值 {1}（{2}）。主要来源：{3} + {4}（{5}，占 {6:F0}%）。可查看近期会话确认是否符合预期；这是估值提醒，不代表实付或 Agent 失控。",
                             m.Last15MinRequests,
                             cost15Str,
                             compareText,
@@ -195,25 +198,7 @@ namespace TokLens
             EvaluatedMetrics m = new EvaluatedMetrics();
             FormatterUtil.NormalizeNowTime(nowInput, out m.LocalNow, out m.NowEpochMs);
 
-            string past7StartStr = m.LocalNow.Date.AddDays(-7).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-            string yesterdayStr = m.LocalNow.Date.AddDays(-1).ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
-
-            if (allRecords != null)
-            {
-                for (int i = 0; i < allRecords.Count; i++)
-                {
-                    RecordBucket r = allRecords[i];
-                    if (r == null || string.IsNullOrEmpty(r.Date))
-                        continue;
-
-                    if (string.CompareOrdinal(r.Date, past7StartStr) >= 0 &&
-                        string.CompareOrdinal(r.Date, yesterdayStr) <= 0)
-                    {
-                        m.Past7DaysCostUsd += FormatterUtil.SanitizeMoney(r.CostUsd);
-                    }
-                }
-            }
-
+            double[] precedingWindows = new double[7]; // 15–120 minutes ago, seven complete comparison windows.
             Dictionary<string, PairSpendStat> recent15PairMap = new Dictionary<string, PairSpendStat>(StringComparer.OrdinalIgnoreCase);
             if (recentRequests != null)
             {
@@ -224,14 +209,21 @@ namespace TokLens
                         continue;
 
                     long ageMs = m.NowEpochMs - rq.TimestampMs;
-                    if (ageMs < -ClockSkewToleranceMs || ageMs > Window15MinMs)
+                    if (ageMs < -ClockSkewToleranceMs || ageMs >= 8 * Window15MinMs)
                         continue;
 
                     double rqCost = FormatterUtil.SanitizeMoney(rq.CostUsd);
+                    if (ageMs >= Window15MinMs)
+                    {
+                        precedingWindows[(int)(ageMs / Window15MinMs) - 1] += rqCost;
+                        continue;
+                    }
                     long rqTokens = Math.Max(0L, rq.TotalTokens);
                     m.Last15MinCostUsd += rqCost;
                     m.Last15MinRequests++;
                     m.Last15MinTokens += rqTokens;
+                    if (m.FirstRecentMs == 0 || rq.TimestampMs < m.FirstRecentMs) m.FirstRecentMs = rq.TimestampMs;
+                    m.LastRecentMs = Math.Max(m.LastRecentMs, rq.TimestampMs);
                     AccumulatePair(recent15PairMap, rq.Tool, rq.Model, rqCost, rqTokens, 1);
                 }
             }
@@ -239,13 +231,20 @@ namespace TokLens
             m.Top15MinPair = SelectTopPair(recent15PairMap);
             m.BurnRate15MinPerHrUsd = m.Last15MinCostUsd * 4.0;
 
-            // 过去 7 天日均小时速率 = (过去 7 天总花费 / 7 天) / 24 小时
-            m.HistHourlyAvgUsd = m.Past7DaysCostUsd > 0.0 ? (m.Past7DaysCostUsd / (7.0 * 24.0)) : 0.0;
+            List<double> active = new List<double>();
+            foreach (double cost in precedingWindows) if (cost > 0) active.Add(cost * 4);
+            active.Sort(); m.BaselineWindows = active.Count;
+            if (active.Count >= 3)
+            {
+                int middle = active.Count / 2;
+                m.HistHourlyAvgUsd = active.Count % 2 == 1 ? active[middle] : (active[middle - 1] + active[middle]) / 2;
+            }
 
-            if (m.Last15MinCostUsd >= RunawayMin15MinCostUsd)
+            // A single expensive call is not evidence of a runaway loop. Require sustained activity.
+            if (m.Last15MinCostUsd >= RunawayMin15MinCostUsd && m.Last15MinRequests >= 8 && m.LastRecentMs - m.FirstRecentMs >= 60000)
             {
                 m.IsRunawayBurn = m.HistHourlyAvgUsd > 0.0
-                    ? m.BurnRate15MinPerHrUsd > (m.HistHourlyAvgUsd * RunawayMultiplierOver7DayAvg)
+                    ? m.BurnRate15MinPerHrUsd > Math.Max(RunawayFallbackHourlyUsd, m.HistHourlyAvgUsd * RunawayMultiplierOver7DayAvg)
                     : m.BurnRate15MinPerHrUsd >= RunawayFallbackHourlyUsd;
             }
             else

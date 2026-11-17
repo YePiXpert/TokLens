@@ -15,6 +15,7 @@ internal static class ProductUiTests
     private static int checks;
     private static void Check(bool ok,string name){checks++;if(!ok)throw new Exception(name);}
     private static T Field<T>(object target,string name){return (T)target.GetType().GetField(name,BindingFlags.NonPublic|BindingFlags.Instance).GetValue(target);}
+    private static void Set(object target,string name,object value){target.GetType().GetField(name,BindingFlags.NonPublic|BindingFlags.Instance).SetValue(target,value);}
     private static void Call(object target,string name,params object[] args){target.GetType().GetMethod(name,BindingFlags.NonPublic|BindingFlags.Instance).Invoke(target,args);}
     private static void Layout(FrameworkElement root,double w,double h){root.Measure(new Size(w,h));root.Arrange(new Rect(0,0,w,h));root.UpdateLayout();}
     private static void Capture(FrameworkElement root,string file,int w,int h)
@@ -67,33 +68,29 @@ internal static class ProductUiTests
             MiniHudWindow hud=new MiniHudWindow(false,null,null);
             long now=(long)(DateTime.UtcNow-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;
             HudTelemetry sample=new HudTelemetry { Tool="OpenAI Codex",Model="gpt-6.1-sol",TimestampMs=now,Output=824,DurationMs=10000,TimingSource="request",TodayUsd=215.72,LastHourUsd=12.5,Last15Usd=3.2,LastCostUsd=0.42,ContextTokens=234000,ContextLimit=1000000,TodayTokens=469180000,TodayRequests=2333,CacheHitRate=0.97 };
+            sample.Workspace=@"C:\Projects\TokLens"; sample.SessionId="demo-session"; sample.WindowComplete=true;
+            sample.Sessions.Add(new HudSessionChoice { Key="",Label="最新请求 · 本机全部工具" });
+            sample.Sessions.Add(new HudSessionChoice { Key="demo",Label="Codex · TokLens" });
             for(int i=0;i<24;i++)sample.SparkTwoHours[i]=(i%5)*0.8+(i==23?1:0);
             sample.Latest.Add(new RecentRequestRecord{TimestampMs=now,Tool="OpenAI Codex",Model="gpt-6.1-sol",FreshInput=1000,CacheRead=233000,Output=824,CostUsd=0.42});
             hud.UpdateTelemetry(sample);FrameworkElement surface=(FrameworkElement)hud.Content;
-            Func<string> ballText=delegate{return Field<TextBlock>(hud,"_prefix").Text+Field<TextBlock>(hud,"_value").Text+Field<TextBlock>(hud,"_suffix").Text;};
-            Capture(surface,Path.Combine(output,"hud-ball-running.png"),94,94);
-            Check(ballText()=="23%"&&Field<System.Windows.Shapes.Path>(hud,"_arc").Data!=null,"ring and centre show context use against the model limit");
-            Check(Field<string>(hud,"_glowState")=="running","a request in the last minute lights the halo");
-            Layout(surface,300,300);Check(Field<Grid>(hud,"_ball").ActualWidth==58,"the ball stays 58px");
-            sample.ContextLimit=0;hud.UpdateTelemetry(sample);Check(ballText()=="234K"&&Field<System.Windows.Shapes.Path>(hud,"_arc").Data==null,"unknown model limits show the absolute size instead of a guessed percentage");
-            sample.ContextLimit=1000000;hud.UpdateTelemetry(sample);
-            Call(hud,"CycleMode");Check(ballText()=="$216","click switches the centre to today's estimate");
-            Call(hud,"CycleMode");Check(ballText()=="$12.8/h","next click shows the spend rate");
-            Call(hud,"CycleMode");Check(ballText()=="23%","third click returns to context");
-            sample.TimestampMs=now+5000;hud.UpdateTelemetry(sample);Check(Field<int>(hud,"_pulses")==1,"a new request flashes the ring once");
-            sample.ContextTokens=900000;hud.UpdateTelemetry(sample);Capture(surface,Path.Combine(output,"hud-ball-warn.png"),94,94);sample.ContextTokens=234000;
-            sample.Alert=true;sample.AlertText="Agent 高频消耗";hud.UpdateTelemetry(sample);
-            Check(ballText()=="!"&&Field<string>(hud,"_glowState")=="alert","runaway agents turn the ball into an alert");
-            Capture(surface,Path.Combine(output,"hud-ball-alert.png"),94,94);
-            Call(hud,"OpenCard");Popup card=Field<Popup>(hud,"_cardPopup");Check(card.IsOpen,"hover opens the detail card");
-            Call(hud,"RenderCard");Check(Field<TextBlock>(hud,"_cardAlert").Visibility==Visibility.Visible&&Field<TextBlock>(hud,"_cardContext").Text=="23% · 234.0K","card states the alert and context use");
-            Check(Field<StackPanel>(hud,"_recentList").Children.Count==1&&Field<Canvas>(hud,"_cardChart").Children.Count==24&&Field<TextBlock>(hud,"_cardFoot").Text.Contains("82.4"),"card lists recent requests, two hours of bars and measured speed");
-            sample.Alert=false;hud.SetTheme(true);Call(hud,"RenderCard");Capture((FrameworkElement)card.Child,Path.Combine(output,"hud-card-dark.png"),288,340);
-            Call(hud,"CloseCard");Check(!card.IsOpen,"leaving closes the card");
-            sample.TimingSource="";sample.TimestampMs=now-600000;hud.UpdateTelemetry(sample);
-            Check(Field<bool>(hud,"_idle")&&Field<string>(hud,"_glowState")=="idle","no request for five minutes turns the ball idle");
-            Capture(surface,Path.Combine(output,"hud-ball-idle.png"),94,94);
-            Call(hud,"RenderCard");Check(Field<TextBlock>(hud,"_cardFoot").Text.Contains("没有提供计时"),"missing timing is stated instead of faked");
+            Func<string> contextText=delegate{return Field<TextBlock>(hud,"_context").Text;};
+            Capture(surface,Path.Combine(output,"hud-capsule-light.png"),250,56);
+            Check(contextText()=="23%"&&Field<TextBlock>(hud,"_scope").Text.Contains("标称"),"context explicitly identifies nominal model limit");
+            Check(Field<TextBlock>(hud,"_status").Text.Contains("请求"),"recent activity has a text status");
+            sample.ContextLimit=0;hud.UpdateTelemetry(sample);Check(contextText().Contains("234")&&!contextText().Contains("%"),"unknown limit shows absolute tokens");
+            sample.ContextLimit=1000000;sample.RequestedServiceTier="fast";hud.UpdateTelemetry(sample);
+            Call(hud,"OpenCard");Popup card=Field<Popup>(hud,"_cardPopup");Check(card.IsOpen&&!card.StaysOpen,"click-open panel supports outside dismissal");
+            Call(hud,"RenderCard");Check(Field<TextBlock>(hud,"_cardTier").Text.Contains("请求")&&Field<TextBlock>(hud,"_cardTier").Text.Contains("未知"),"requested Fast is distinguished from actual execution");
+            sample.Alert=true;sample.AlertText="近 15 分钟估值较活跃时段基线高";hud.UpdateTelemetry(sample);Call(hud,"RenderCard");
+            Check(contextText()=="23%"&&Field<TextBlock>(hud,"_cardAlert").Visibility==Visibility.Visible,"alert explains the condition without hiding context");
+            Check(Field<Canvas>(hud,"_chart").Children.Count==24&&Field<TextBlock>(hud,"_cardTiming").Text.Contains("82.4"),"card renders full trend and measured request speed");
+            hud.SetAlert("",DateTime.MinValue);hud.SetTheme(true);Call(hud,"RenderCard");Capture((FrameworkElement)card.Child,Path.Combine(output,"hud-card-dark.png"),348,450);
+            Capture(surface,Path.Combine(output,"hud-capsule-dark.png"),250,56);
+            Call(hud,"CloseCard");Check(!card.IsOpen,"explicit dismissal closes the panel");
+            sample.Alert=false;sample.TimingSource="";sample.TimestampMs=now-600000;hud.UpdateTelemetry(sample);Call(hud,"RenderCard");
+            Check(Field<TextBlock>(hud,"_status").Text.Contains("空闲"),"old request is idle");
+            Check(Field<TextBlock>(hud,"_cardTiming").Text.Contains("未提供可靠"),"missing timing is stated instead of inferred");
             hud.Close();
 
             RequestInspectorPanel inspector=new RequestInspectorPanel(root,null,null);
@@ -144,7 +141,18 @@ internal static class ProductUiTests
             Check(Field<TextBlock>(view,"_paybackValue").Text=="64%","payback = matched Kimi usage at API prices / amount paid this cycle (8 / (88 / 7))");
             DesignSystem.ApplyTheme(owner,true);view.Resources=owner.Resources;view.Render(usage,true,7,true,DateTime.Today);
             Capture(view,Path.Combine(output,"subscriptions-dark.png"),1100,900);
-            owner.Close();main.Close();Console.WriteLine("PASS: "+checks+" UI assertions; screenshots: "+output);return 0;
+            owner.Close();
+            ScanResult missingPrice=new ScanResult { ReferenceDate=DateTime.Today.ToString("yyyy-MM-dd") };
+            missingPrice.Records.Add(new RecordBucket { Date=missingPrice.ReferenceDate,Tool="OpenAI Codex",Model="fixture-fast-model",CostBasis="unpriced",ActualServiceTier="fast",Turns=2,FreshInput=100,RateLabel="未定价" });
+            NodeSnapshot isolated=new NodeSnapshot { MachineId="ui-isolated",MachineName="UI fixture",IsLocal=true };isolated.Records=missingPrice.Records;
+            Set(main,"_scanResult",missingPrice);Set(main,"_localNode",isolated);Set(main,"_remoteNodes",new List<NodeSnapshot>());
+            Set(main,"_selectedMachineId",null);Set(main,"_selectedTool",null);Set(main,"_selectedDate",null);Set(main,"_rangeDays",0);
+            Call(main,"RefreshDashboardView");
+            Check(Field<TextBlock>(main,"_kpiCostVal").Text=="—"&&Field<TextBlock>(main,"_kpiCostSub").Text.Contains("未计价"),"all-unpriced overview is unknown, not free");
+            missingPrice.Records.Add(new RecordBucket { Date=missingPrice.ReferenceDate,Tool="OpenAI Codex",Model="fixture-fast-model",CostBasis="reported",ActualServiceTier="standard",CostUsd=2,Turns=1,FreshInput=100 });Call(main,"RefreshDashboardView");
+            Check(Field<TextBlock>(main,"_kpiCostSub").Text.Contains("已计价部分")&&Field<DataGrid>(main,"_modelGrid").Items.Count==2,"partial pricing is explicit and model analysis separates service tiers");
+            Check(Field<TextBlock>(main,"_kpiSaveVal").Text=="—","reported or unknown charges cannot imply cache savings");
+            main.Close();Console.WriteLine("PASS: "+checks+" UI assertions; screenshots: "+output);return 0;
         }
         catch(Exception e){Console.Error.WriteLine(e);return 1;}
         finally{app.Shutdown();}

@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-知微 · TokLens v2.2 — Linux VPS / 跨平台零依赖采集与同步探针 (toklens_agent.py)
-纯 Python 3 标准库实现（无需 pip 安装任何依赖，兼容 Python 3.7+ 至 3.13），
-支持文件级增量字节游标、SQLite WAL 高水位归档、单实例互斥锁、26+ 种 AI Agent Harness
-（含 Linux VS Code / Cursor / Windsurf / Antigravity / Trae Remote SSH 与 code-server），
-生成不含任何隐私对话原文的脱敏统计快照，并通过 GitHub 私有 Gist 或 WebDAV 可靠同步。
+知微 · TokLens — Linux / macOS 日志采集与同步探针。
+使用 Python 标准库；普通 JSONL 可在较旧 Python 运行，Zstandard 归档推荐 Python 3.14。
+支持增量文件游标、SQLite 归档和多个工具日志适配器；具体覆盖取决于日志格式和可读性。
+同步统计快照不包含对话正文，模型、设备、工具等元数据仍可能敏感。
 """
 
 import argparse
@@ -35,11 +34,12 @@ try:
 except ImportError:
     fcntl = None
 
-AGENT_VERSION = "2.2.1"
+AGENT_VERSION = "2.4.0"
+BUNDLED_TIER_PRICES = json.loads(r'''[{"provider":"openai","model":"gpt-6.1-sol","tier":"standard","effective_from":"2026-11-17","input_per_m":2,"output_per_m":10,"cache_read_per_m":0.1,"cache_write_per_m":2.5,"cache_write_long_per_m":5,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":4,"long_output_per_m":15,"long_cache_read_per_m":0.2,"long_cache_write_per_m":5,"long_cache_write_long_per_m":10},{"provider":"openai","model":"gpt-6.1-sol","tier":"fast","effective_from":"2026-11-17","input_per_m":4,"output_per_m":20,"cache_read_per_m":0.2,"cache_write_per_m":5,"cache_write_long_per_m":10,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":8,"long_output_per_m":30,"long_cache_read_per_m":0.4,"long_cache_write_per_m":10,"long_cache_write_long_per_m":20},{"provider":"openai","model":"gpt-6.1-sol","tier":"ultrafast","effective_from":"2026-11-17","input_per_m":12,"output_per_m":60,"cache_read_per_m":0.6,"cache_write_per_m":15,"cache_write_long_per_m":30,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":24,"long_output_per_m":90,"long_cache_read_per_m":1.2,"long_cache_write_per_m":30,"long_cache_write_long_per_m":60},{"provider":"openai","model":"gpt-6-astra","tier":"standard","effective_from":"2026-11-17","input_per_m":10,"output_per_m":50,"cache_read_per_m":1,"cache_write_per_m":12.5,"cache_write_long_per_m":25,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":20,"long_output_per_m":75,"long_cache_read_per_m":2,"long_cache_write_per_m":25,"long_cache_write_long_per_m":50},{"provider":"openai","model":"gpt-6-astra","tier":"fast","effective_from":"2026-11-17","input_per_m":20,"output_per_m":100,"cache_read_per_m":2,"cache_write_per_m":25,"cache_write_long_per_m":50,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":40,"long_output_per_m":150,"long_cache_read_per_m":4,"long_cache_write_per_m":50,"long_cache_write_long_per_m":100},{"provider":"openai","model":"gpt-6-astra","tier":"ultrafast","effective_from":"2026-11-17","input_per_m":60,"output_per_m":300,"cache_read_per_m":6,"cache_write_per_m":75,"cache_write_long_per_m":150,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":120,"long_output_per_m":450,"long_cache_read_per_m":12,"long_cache_write_per_m":150,"long_cache_write_long_per_m":300},{"provider":"openai","model":"gpt-6.1-terra","tier":"standard","effective_from":"2026-11-17","input_per_m":1,"output_per_m":5,"cache_read_per_m":0.05,"cache_write_per_m":1.25,"cache_write_long_per_m":2.5,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":2,"long_output_per_m":7.5,"long_cache_read_per_m":0.1,"long_cache_write_per_m":2.5,"long_cache_write_long_per_m":5},{"provider":"openai","model":"gpt-6.1-terra","tier":"fast","effective_from":"2026-11-17","input_per_m":2,"output_per_m":10,"cache_read_per_m":0.1,"cache_write_per_m":2.5,"cache_write_long_per_m":5,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":4,"long_output_per_m":15,"long_cache_read_per_m":0.2,"long_cache_write_per_m":5,"long_cache_write_long_per_m":10},{"provider":"openai","model":"gpt-6-sol","tier":"standard","effective_from":"2026-11-17","input_per_m":2,"output_per_m":10,"cache_read_per_m":0.2,"cache_write_per_m":2.5,"cache_write_long_per_m":5,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":4,"long_output_per_m":15,"long_cache_read_per_m":0.4,"long_cache_write_per_m":5,"long_cache_write_long_per_m":10},{"provider":"openai","model":"gpt-6-sol","tier":"fast","effective_from":"2026-11-17","input_per_m":4,"output_per_m":20,"cache_read_per_m":0.4,"cache_write_per_m":5,"cache_write_long_per_m":10,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":8,"long_output_per_m":30,"long_cache_read_per_m":0.8,"long_cache_write_per_m":10,"long_cache_write_long_per_m":20},{"provider":"openai","model":"gpt-6-luna","tier":"standard","effective_from":"2026-11-17","input_per_m":0.1,"output_per_m":0.5,"cache_read_per_m":0.01,"cache_write_per_m":0.125,"cache_write_long_per_m":0.25,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":0.2,"long_output_per_m":0.75,"long_cache_read_per_m":0.02,"long_cache_write_per_m":0.25,"long_cache_write_long_per_m":0.5},{"provider":"openai","model":"gpt-6-luna","tier":"fast","effective_from":"2026-11-17","input_per_m":0.2,"output_per_m":1,"cache_read_per_m":0.02,"cache_write_per_m":0.25,"cache_write_long_per_m":0.5,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":0.4,"long_output_per_m":1.5,"long_cache_read_per_m":0.04,"long_cache_write_per_m":0.5,"long_cache_write_long_per_m":1},{"provider":"openai","model":"gpt-5.6-sol","tier":"standard","effective_from":"2026-11-17","input_per_m":4,"output_per_m":20,"cache_read_per_m":0.4,"cache_write_per_m":5,"cache_write_long_per_m":10,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":8,"long_output_per_m":30,"long_cache_read_per_m":0.8,"long_cache_write_per_m":10,"long_cache_write_long_per_m":20,"effective_until":"2026-11-30"},{"provider":"openai","model":"gpt-5.6-sol","tier":"fast","effective_from":"2026-11-17","input_per_m":8,"output_per_m":40,"cache_read_per_m":0.8,"cache_write_per_m":10,"cache_write_long_per_m":20,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":16,"long_output_per_m":60,"long_cache_read_per_m":1.6,"long_cache_write_per_m":20,"long_cache_write_long_per_m":40,"effective_until":"2026-11-30"},{"provider":"openai","model":"gpt-5.5","tier":"standard","effective_from":"2026-11-17","input_per_m":5,"output_per_m":30,"cache_read_per_m":0.5,"cache_write_per_m":0,"cache_write_long_per_m":0,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":10,"long_output_per_m":45,"long_cache_read_per_m":1,"long_cache_write_per_m":0,"long_cache_write_long_per_m":0},{"provider":"openai","model":"gpt-5.5","tier":"fast","effective_from":"2026-11-17","input_per_m":12.5,"output_per_m":75,"cache_read_per_m":1.25,"cache_write_per_m":0,"cache_write_long_per_m":0,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","max_prompt_tokens":272000},{"provider":"openai","model":"gpt-5.4","tier":"standard","effective_from":"2026-11-17","input_per_m":2.5,"output_per_m":15,"cache_read_per_m":0.25,"cache_write_per_m":0,"cache_write_long_per_m":0,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":5,"long_output_per_m":22.5,"long_cache_read_per_m":0.5,"long_cache_write_per_m":0,"long_cache_write_long_per_m":0},{"provider":"openai","model":"gpt-5.4","tier":"fast","effective_from":"2026-11-17","input_per_m":5,"output_per_m":30,"cache_read_per_m":0.5,"cache_write_per_m":0,"cache_write_long_per_m":0,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","max_prompt_tokens":272000},{"provider":"anthropic","model":"claude-fable-5-2","tier":"standard","effective_from":"2026-11-17","input_per_m":8,"output_per_m":40,"cache_read_per_m":0.2,"cache_write_per_m":10,"cache_write_long_per_m":16,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-fable-5-2","tier":"fast","effective_from":"2026-11-17","input_per_m":16,"output_per_m":80,"cache_read_per_m":0.4,"cache_write_per_m":20,"cache_write_long_per_m":32,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-mythos-5-2","tier":"standard","effective_from":"2026-11-17","input_per_m":8,"output_per_m":40,"cache_read_per_m":0.2,"cache_write_per_m":10,"cache_write_long_per_m":16,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-mythos-5-2","tier":"fast","effective_from":"2026-11-17","input_per_m":16,"output_per_m":80,"cache_read_per_m":0.4,"cache_write_per_m":20,"cache_write_long_per_m":32,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-opus-5-5","tier":"standard","effective_from":"2026-11-17","input_per_m":4,"output_per_m":20,"cache_read_per_m":0.2,"cache_write_per_m":5,"cache_write_long_per_m":8,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-opus-5-5","tier":"fast","effective_from":"2026-11-17","input_per_m":8,"output_per_m":40,"cache_read_per_m":0.4,"cache_write_per_m":10,"cache_write_long_per_m":16,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-opus-5","tier":"standard","effective_from":"2026-11-17","input_per_m":5,"output_per_m":25,"cache_read_per_m":0.5,"cache_write_per_m":6.25,"cache_write_long_per_m":10,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-opus-5","tier":"fast","effective_from":"2026-11-17","input_per_m":10,"output_per_m":50,"cache_read_per_m":1,"cache_write_per_m":12.5,"cache_write_long_per_m":20,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-opus-4-8","tier":"standard","effective_from":"2026-11-17","input_per_m":5,"output_per_m":25,"cache_read_per_m":0.5,"cache_write_per_m":6.25,"cache_write_long_per_m":10,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-opus-4-8","tier":"fast","effective_from":"2026-11-17","input_per_m":10,"output_per_m":50,"cache_read_per_m":1,"cache_write_per_m":12.5,"cache_write_long_per_m":20,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."}]''')  # Generated from pricing/service_tier_prices.json.
 SCHEMA_VERSION = "toklens.node.v2"
-SCANNER_REV = 29
+SCANNER_REV = 30
 RECONCILED_REVISION = 28
-CURSOR_SCHEMA_VERSION = "toklens.cursor.v2.9"
+CURSOR_SCHEMA_VERSION = "toklens.cursor.v2.10"
 CRON_MARKER = "# toklens-auto-sync"
 MAX_SQLITE_TEMP_COPY_BYTES = 128 * 1024 * 1024  # 128 MB 保护阈值，防止打满 VPS /tmp tmpfs
 LOG_MAX_BYTES = 131072  # 128 KB 触发滚动
@@ -47,7 +47,7 @@ LOG_KEEP_BYTES = 65536  # 保留尾部 64 KB
 PRICING_CACHE_TTL_SEC = 86400
 PRICING_FAIL_COOLDOWN_SEC = 7200  # 受限网络全源失败后冷却 2 小时，避免每次 cron 阻塞
 
-# 1. 基础公开模型百万 Token 美元单价: (input, output, cache_read, cache_write) —— 与桌面端 InitBuiltin 100% 对齐
+# 基础模型参考单价 USD / 1M tokens: input, output, cache_read, cache_write。
 BUILTIN_RATES = {
     # Anthropic Claude
     "claude-opus-4-6": (5.0, 25.0, 0.5, 6.25),
@@ -722,6 +722,24 @@ class PricingLookup:
 
     def __init__(self, home: Path, allow_network: bool = True):
         self.rates = dict(BUILTIN_RATES)
+        self.tier_prices = []
+        try:
+            tier_file = Path(home).expanduser() / ".toklens" / "service_tier_prices.json"
+            values = list(BUNDLED_TIER_PRICES)
+            for bundled in (Path(__file__).resolve().parent / "service_tier_prices.json", Path(__file__).resolve().parent.parent / "pricing" / "service_tier_prices.json", tier_file):
+                if bundled.exists():
+                    loaded = json.loads(bundled.read_text(encoding="utf-8-sig"))
+                    if isinstance(loaded, list):
+                        values.extend(loaded)
+            for value in values if isinstance(values, list) else []:
+                if not isinstance(value, dict) or not value.get("source") or not value.get("version"):
+                    continue
+                datetime.datetime.strptime(str(value.get("effective_from", "")), "%Y-%m-%d")
+                rates = [float(value[k]) for k in ("input_per_m", "output_per_m", "cache_read_per_m", "cache_write_per_m")]
+                if all(0 <= rate <= 1e8 for rate in rates):
+                    self.tier_prices.append(dict(value, rates=tuple(rates)))
+        except (ValueError, TypeError, KeyError, OSError):
+            self.tier_prices = []
         self.cloud_source = "builtin"
         self.cloud_model_count = 0
         self._load_or_sync_cloud_cache(home, allow_network=allow_network)
@@ -939,7 +957,7 @@ class PricingLookup:
         slug = normalize_model(raw_model, "unknown")
         if slug in self.rates:
             return self.rates[slug]
-        stripped = re.sub(r"-(high|medium|low|minimal|thinking|preview|latest|fast)$", "", slug, flags=re.I)
+        stripped = re.sub(r"-(high|medium|low|minimal|thinking|preview|latest)$", "", slug, flags=re.I)
         if stripped in self.rates:
             return self.rates[stripped]
         no_date = re.sub(r"-(?:\d{8}|\d{4}-\d{2}-\d{2})$", "", stripped)
@@ -948,6 +966,90 @@ class PricingLookup:
 
         # Unknown rates stay explicitly unpriced; do not borrow another model.
         return (0.0, 0.0, 0.0, 0.0)
+
+    def lookup_tier(self, model, provider, actual_tier, date, input_tokens=0):
+        tier = normalize_service_tier(actual_tier)
+        if tier == "unknown":
+            rates, basis, version = self.lookup_tier(model, provider, "standard", date, input_tokens)
+            return rates, "estimated_unknown_tier" if basis != "unpriced" else basis, version
+        matched = [p for p in self.tier_prices if str(p.get("provider", "")).lower() == provider.lower()
+                   and normalize_model(p.get("model"), "unknown") == normalize_model(model, "unknown")
+                   and normalize_service_tier(p.get("tier")) == tier and str(p["effective_from"]) <= date
+                   and (not p.get("effective_until") or date <= str(p["effective_until"]))]
+        if matched and tier != "unknown":
+            selected = sorted(matched, key=lambda p: str(p["effective_from"]))[-1]
+            max_prompt = safe_int(selected.get("max_prompt_tokens"))
+            if max_prompt > 0 and input_tokens > max_prompt:
+                return (0, 0, 0, 0, 0), "unpriced", ""
+            rates = selected["rates"]
+            long_context = safe_int(selected.get("long_context_threshold")) > 0 and input_tokens > safe_int(selected.get("long_context_threshold"))
+            if long_context:
+                names = ("long_input_per_m", "long_output_per_m", "long_cache_read_per_m", "long_cache_write_per_m")
+                if not all(key in selected for key in names):
+                    return (0, 0, 0, 0, 0), "unpriced", str(selected["version"])
+                rates = tuple(safe_float(selected[key]) for key in names)
+            cw1h_rate = max(rates[3], rates[0] * 2.0) if provider == "anthropic" else rates[3]
+            long_write_key = "long_cache_write_long_per_m" if long_context else "cache_write_long_per_m"
+            if selected.get("cache_write_long_duration") == "1h" and long_write_key in selected:
+                cw1h_rate = safe_float(selected[long_write_key])
+            return tuple(rates) + (cw1h_rate,), "estimated_tier_price", str(selected["version"]) + "|" + str(selected["source"])
+        if tier in ("fast", "ultrafast", "flex"):
+            return (0.0, 0.0, 0.0, 0.0, 0.0), "unpriced", ""
+        rates = self.lookup(model)
+        if not any(rates):
+            return rates + (0.0,), "unpriced", ""
+        return rates + (max(rates[3], rates[0] * 2.0) if provider == "anthropic" else rates[3],), "estimated_unknown_tier" if tier == "unknown" else "estimated_standard", "standard-reference-v" + AGENT_VERSION
+
+
+def normalize_service_tier(value):
+    value = str(value or "").strip().lower()
+    return {"default": "standard", "standard": "standard", "fast": "fast", "priority": "fast",
+            "ultrafast": "ultrafast", "flex": "flex"}.get(value, "unknown")
+
+
+def tier_metadata(value=None, requested="unknown", provider="unknown"):
+    """Only response evidence establishes actual service tier; session preferences do not."""
+    value = value if isinstance(value, dict) else {}
+    result = {"requested_tier": normalize_service_tier(requested), "actual_tier": "unknown",
+              "tier_evidence": "session:requested" if normalize_service_tier(requested) != "unknown" else "", "provider": str(value.get("provider") or value.get("model_provider") or provider).lower()}
+    for key in ("requested_service_tier", "service_tier"):
+        if key in value:
+            result["requested_tier"] = normalize_service_tier(value[key])
+            result["tier_evidence"] = key + "=" + str(value[key])
+            break
+    if result["requested_tier"] == "unknown" and isinstance(value.get("fast_mode"), bool):
+        result["requested_tier"] = "fast" if value["fast_mode"] else "standard"
+        result["tier_evidence"] = "fast_mode=" + str(value["fast_mode"]).lower()
+    response = value.get("response") if isinstance(value.get("response"), dict) else {}
+    raw, field = value.get("actual_service_tier"), "actual_service_tier"
+    if raw is None and "service_tier" in response:
+        raw, field = response["service_tier"], "response.service_tier"
+    if raw is not None:
+        result["actual_tier"] = normalize_service_tier(raw)
+        result["tier_evidence"] = field + "=" + str(raw)
+    return result
+
+
+def event_tier_metadata(event):
+    return event[13] if len(event) > 13 and isinstance(event[13], dict) else {}
+
+
+def attach_tier_metadata(event, metadata):
+    while len(event) < 14:
+        event.append(None)
+    event[13] = metadata
+    return event
+
+
+def infer_provider(model):
+    model = str(model or "").lower()
+    if model.startswith(("gpt-", "o1", "o3", "o4", "codex")):
+        return "openai"
+    if model.startswith("claude-"):
+        return "anthropic"
+    if model.startswith("gemini-"):
+        return "google"
+    return "unknown"
 
 
 def extract_generic_usage(obj: dict, cur_model: str, fallback_ts: float, tz_offset_min: int = None):
@@ -1156,7 +1258,11 @@ DAILY_ARCHIVE_DDL = (
     "cost_usd REAL NOT NULL, "
     "base_usd REAL NOT NULL, "
     "rate_label TEXT, "
-    "PRIMARY KEY(rec_date, tool, model))"
+    "requested_tier TEXT NOT NULL DEFAULT 'unknown', actual_tier TEXT NOT NULL DEFAULT 'unknown', "
+    "tier_evidence TEXT NOT NULL DEFAULT '', cost_basis TEXT NOT NULL DEFAULT 'legacy_unknown', "
+    "pricing_version TEXT NOT NULL DEFAULT '', provider TEXT NOT NULL DEFAULT 'unknown', "
+    "standard_equivalent_usd REAL, service_tier_premium_usd REAL, "
+    "PRIMARY KEY(rec_date, tool, model, requested_tier, actual_tier, cost_basis, pricing_version, provider))"
 )
 
 FILE_CURSORS_DDL = (
@@ -1196,6 +1302,22 @@ def _init_ledger_connection(db_path: Path):
         except Exception:
             pass
         conn.execute(DAILY_ARCHIVE_DDL)
+        if "actual_tier" not in {r[1] for r in conn.execute("PRAGMA table_info(daily_archive)")}:
+            conn.commit()
+            backup = sqlite3.connect(str(db_path) + ".before-tier-v30." + str(time.time_ns()) + ".db")
+            try:
+                conn.backup(backup)
+            finally:
+                backup.close()
+            conn.execute("ALTER TABLE daily_archive RENAME TO daily_archive_v29")
+            conn.execute(DAILY_ARCHIVE_DDL)
+            conn.execute("INSERT INTO daily_archive (rec_date,tool,model,turns,fi,cr,cw,out_tok,cost_usd,base_usd,rate_label) SELECT rec_date,tool,model,turns,fi,cr,cw,out_tok,cost_usd,base_usd,rate_label FROM daily_archive_v29")
+            conn.execute("DROP TABLE daily_archive_v29")
+            conn.commit()
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(daily_archive)")}
+        for column in ("standard_equivalent_usd", "service_tier_premium_usd"):
+            if column not in columns:
+                conn.execute("ALTER TABLE daily_archive ADD COLUMN " + column + " REAL")
         conn.execute(FILE_CURSORS_DDL)
         conn.execute(KV_META_DDL)
         row = conn.execute("SELECT v FROM kv_meta WHERE k='cursor_schema' LIMIT 1").fetchone()
@@ -1203,7 +1325,7 @@ def _init_ledger_connection(db_path: Path):
         if cur_ver != CURSOR_SCHEMA_VERSION:
             if cur_ver:
                 conn.commit()
-                backup = sqlite3.connect(str(db_path) + ".before-v2.9." + str(time.time_ns()) + ".db")
+                backup = sqlite3.connect(str(db_path) + ".before-v30." + str(time.time_ns()) + ".db")
                 try:
                     conn.backup(backup)
                 finally:
@@ -1389,15 +1511,17 @@ def _fold_rotated_events(existing_buckets: list, old_events: list, exclude_dedup
     agg = {}
     for b in (existing_buckets or []):
         if isinstance(b, list) and len(b) >= 9:
-            k = (str(b[0]), str(b[1]), str(b[2]))
-            agg[k] = [k[0], k[1], k[2], safe_int(b[3]), safe_int(b[4]), safe_int(b[5]), safe_int(b[6]), safe_float(b[7]), max(1, safe_int(b[8]))]
+            meta = event_tier_metadata(b)
+            k = (str(b[0]), str(b[1]), str(b[2]), normalize_service_tier(meta.get("requested_tier")), normalize_service_tier(meta.get("actual_tier")), str(meta.get("provider") or "unknown"))
+            agg[k] = attach_tier_metadata([k[0], k[1], k[2], safe_int(b[3]), safe_int(b[4]), safe_int(b[5]), safe_int(b[6]), safe_float(b[7]), max(1, safe_int(b[8])), "", safe_int(b[10]) if len(b) > 10 else 0], dict(meta))
     for ev in (old_events or []):
         if not isinstance(ev, list) or len(ev) < 9:
             continue
         dkey = str(ev[9]) if len(ev) > 9 and ev[9] else ""
         if dkey and exclude_dedup_keys and dkey in exclude_dedup_keys:
             continue
-        k = (str(ev[0]), str(ev[1]), str(ev[2]))
+        meta = event_tier_metadata(ev)
+        k = (str(ev[0]), str(ev[1]), str(ev[2]), normalize_service_tier(meta.get("requested_tier")), normalize_service_tier(meta.get("actual_tier")), str(meta.get("provider") or "unknown"))
         fi, out_t, cr, cw = safe_int(ev[3]), safe_int(ev[4]), safe_int(ev[5]), safe_int(ev[6])
         if fi + out_t + cr + cw <= 0:
             continue
@@ -1410,8 +1534,11 @@ def _fold_rotated_events(existing_buckets: list, old_events: list, exclude_dedup
             ex[6] += cw
             ex[7] = round(ex[7] + cost, 8)
             ex[8] += turns
+            ex[10] += safe_int(ev[10]) if len(ev) > 10 else 0
+            if event_tier_metadata(ex).get("tier_evidence", "") != meta.get("tier_evidence", ""):
+                ex[13]["tier_evidence"] = "mixed"
         else:
-            agg[k] = [k[0], k[1], k[2], fi, out_t, cr, cw, round(cost, 8), turns]
+            agg[k] = attach_tier_metadata([k[0], k[1], k[2], fi, out_t, cr, cw, round(cost, 8), turns, "", safe_int(ev[10]) if len(ev) > 10 else 0], dict(meta))
     return list(agg.values())
 
 
@@ -1524,14 +1651,22 @@ class CodexUsageState:
         self.seen = self.seen[-128:]
         return True
 
-    def emit(self, usage, raw_ts, response=None):
+    def emit(self, usage, raw_ts, response=None, evidence=None):
         inp, out, read, write = usage
         if inp + out <= 0:
             return ""
         read, write = min(inp, read), min(inp - min(inp, read), write)
         ms = _usage_epoch_ms(raw_ts, self.fallback)
         key = "codex-response:" + response if response else "codex:" + str(self.meta["tid"]) + ":" + str(ms) + ":" + ",".join(map(str, usage))
-        self.rows[key] = ["OpenAI Codex", self.meta["mdl"], to_local_date(raw_ts, self.fallback, self.tz_offset_min), inp - read - write, out, read, write, 0.0, 1, key, 0, self.meta["tid"], ms]
+        row = ["OpenAI Codex", self.meta["mdl"], to_local_date(raw_ts, self.fallback, self.tz_offset_min), inp - read - write, out, read, write, 0.0, 1, key, 0, self.meta["tid"], ms]
+        metadata = tier_metadata(evidence, self.meta.get("requested_tier"), "openai")
+        previous = event_tier_metadata(self.rows[key]) if key in self.rows else {}
+        if previous.get("requested_tier", "unknown") != "unknown":
+            metadata["requested_tier"] = previous["requested_tier"]
+        if metadata["actual_tier"] == "unknown" and previous.get("actual_tier", "unknown") != "unknown":
+            metadata["actual_tier"] = previous["actual_tier"]
+            metadata["tier_evidence"] = previous.get("tier_evidence", "")
+        self.rows[key] = attach_tier_metadata(row, metadata)
         return key
 
     def on_line(self, line, _index=0):
@@ -1546,10 +1681,13 @@ class CodexUsageState:
         if typ in ("session_meta", "turn_context") or p.get("type") == "thread_settings_applied":
             if p.get("model"):
                 self.meta["mdl"] = normalize_model(str(p["model"]), "unknown")
+            # Preferences establish requested tier only, never actual execution.
+            if "service_tier" in p or "requested_service_tier" in p or "fast_mode" in p:
+                self.meta["requested_tier"] = tier_metadata(p)["requested_tier"]
         if typ == "token_usage_record":
             usage = self.counters(p.get("usage"))
             if usage is not None:
-                self.meta["pending_key"] = self.emit(usage, ts, p.get("response_id"))
+                self.meta["pending_key"] = self.emit(usage, ts, p.get("response_id"), p)
                 self.meta["pending"] = usage
             return
         if typ != "event_msg" or p.get("type") != "token_count" or not isinstance(p.get("info"), dict):
@@ -1572,9 +1710,14 @@ class CodexUsageState:
         pending_key = self.meta.pop("pending_key", "")
         if covered and model and pending_key in self.rows:
             self.rows[pending_key][1] = self.meta["mdl"]
+        if covered and pending_key in self.rows:
+            extra = tier_metadata(info, self.meta.get("requested_tier"), "openai")
+            existing = event_tier_metadata(self.rows[pending_key])
+            if extra["actual_tier"] != "unknown" or existing.get("actual_tier", "unknown") == "unknown":
+                attach_tier_metadata(self.rows[pending_key], extra)
         if not duplicate and not covered and usage is not None:
             if total is not None or self.remember(str(ts) + "|" + json.dumps(usage)):
-                self.emit(usage, ts)
+                self.emit(usage, ts, evidence=info)
 
     def state(self):
         self.meta["seen"] = self.seen
@@ -1606,6 +1749,7 @@ class MultiHarnessScanner:
         self.request_events = {}
         self.reconciled_partitions = {}
         self.failed_exact_tools = set()
+        self.source_errors = {}
         self.unverified_partitions = set()
 
     def _norm_file_key(self, p: Path) -> str:
@@ -1621,9 +1765,9 @@ class MultiHarnessScanner:
         self.visited_files.add(fk)
         return fk
 
-    def add_ev(self, tool, model, date_str, fi, out_tok, cr, cw, cost=0.0, turns=1, cw1h=0):
+    def add_ev(self, tool, model, date_str, fi, out_tok, cr, cw, cost=0.0, turns=1, cw1h=0, tier=None):
         if fi + out_tok + cr + cw > 0:
-            self.events.append((tool, model, date_str, int(fi), int(out_tok), int(cr), int(cw), float(cost), max(1, int(turns)), max(0, int(cw1h))))
+            self.events.append((tool, model, date_str, int(fi), int(out_tok), int(cr), int(cw), float(cost), max(1, int(turns)), max(0, int(cw1h)), tier or {}))
 
     def _emit_ev_list(self, ev_list: list, dedup_set: set = None):
         for ev in (ev_list or []):
@@ -1635,7 +1779,7 @@ class MultiHarnessScanner:
                     continue
                 dedup_set.add(dk)
             cw1h = safe_int(ev[10]) if len(ev) > 10 else 0
-            self.add_ev(ev[0], ev[1], ev[2], safe_int(ev[3]), safe_int(ev[4]), safe_int(ev[5]), safe_int(ev[6]), safe_float(ev[7]), max(1, safe_int(ev[8])), cw1h=cw1h)
+            self.add_ev(ev[0], ev[1], ev[2], safe_int(ev[3]), safe_int(ev[4]), safe_int(ev[5]), safe_int(ev[6]), safe_float(ev[7]), max(1, safe_int(ev[8])), cw1h=cw1h, tier=event_tier_metadata(ev))
 
     def _emit_usage_events(self, file_key, rows):
         meta = (self.cursor_store.get(file_key) or {}).get("meta") or {}
@@ -1652,7 +1796,7 @@ class MultiHarnessScanner:
                 if not raw_key:
                     self.unverified_partitions.add(str(ev[2]) + "||OpenAI Codex")
             previous = self.request_events.get(key)
-            if previous is None or sum(ev[3:7]) > sum(previous[0][3:7]) or (previous[0][1] == "unknown" and ev[1] != "unknown"):
+            if previous is None or sum(ev[3:7]) > sum(previous[0][3:7]) or (previous[0][1] == "unknown" and ev[1] != "unknown") or (sum(ev[3:7]) == sum(previous[0][3:7]) and event_tier_metadata(previous[0]).get("actual_tier", "unknown") == "unknown" and event_tier_metadata(ev).get("actual_tier", "unknown") != "unknown"):
                 self.request_events[key] = (ev, str(meta.get("tid") or ""))
 
     def _finalize_request_events(self):
@@ -1725,7 +1869,7 @@ class MultiHarnessScanner:
         for row in rows:
             if row[1] in ("Claude Code", "Claude Desktop", "OpenAI Codex", "Google Antigravity", "ZCode") and row[1] not in self.failed_exact_tools and row[0] + "||" + row[1] not in self.unverified_partitions:
                 self.reconciled_partitions[row[0] + "||" + row[1]] = now_ms
-        return merge_with_ledger_db(self.ledger_home, rows, strict=strict_ledger, reconciled_partitions=self.reconciled_partitions)
+        return merge_with_ledger_db(self.ledger_home, rows, strict=strict_ledger, reconciled_partitions=self.reconciled_partitions, failed_tools=self.failed_exact_tools)
 
     def _recover_deleted_cursors_and_finalize_codex(self):
         for fk, cur in self.cursor_store.cursors.items():
@@ -1785,7 +1929,7 @@ class MultiHarnessScanner:
                         continue
                     else:
                         self.generic_seen_keys.add(dk)
-                self.add_ev(ev[0], ev[1], ev[2], safe_int(ev[3]), safe_int(ev[4]), safe_int(ev[5]), safe_int(ev[6]), safe_float(ev[7]), max(1, safe_int(ev[8])))
+                self.add_ev(ev[0], ev[1], ev[2], safe_int(ev[3]), safe_int(ev[4]), safe_int(ev[5]), safe_int(ev[6]), safe_float(ev[7]), max(1, safe_int(ev[8])), tier=event_tier_metadata(ev))
 
         for cev in self.codex_archive_candidates:
             if not isinstance(cev, list) or len(cev) < 9:
@@ -1831,7 +1975,9 @@ class MultiHarnessScanner:
                 cur = self.cursor_store.get(fk)
                 start_off = 0
                 line_base = 0
-                cur_m = default_model
+                cur_m = "unknown"
+                cur_requested = "unknown"
+                parse_failed = False
                 file_dedup = {}
                 rot_buckets = list(((cur.get("meta") if cur else None) or {}).get("rotated_buckets") or [])
 
@@ -1839,6 +1985,7 @@ class MultiHarnessScanner:
                     start_off = cur["byte_offset"]
                     meta = cur.get("meta") or {}
                     cur_m = str(meta.get("mdl") or cur_m)
+                    cur_requested = normalize_service_tier(meta.get("requested_tier"))
                     line_base = safe_int(meta.get("ln"))
                     for idx_o, oev in enumerate(cur.get("events") or []):
                         odk = str(oev[9]) if len(oev) > 9 and oev[9] else f"{fk}:L{idx_o}"
@@ -1854,12 +2001,14 @@ class MultiHarnessScanner:
                     rot_buckets = _fold_rotated_events(rot_buckets, cur["events"], exclude_dedup_keys=kept_global)
 
                 def _on_line(line: str, rel_idx: int):
-                    nonlocal cur_m
-                    if "usage" not in line and "tokens" not in line and "input" not in line and "model" not in line:
+                    nonlocal cur_m, cur_requested, parse_failed
+                    if not any(word in line for word in ("usage", "tokens", "input", "model", "service_tier", "fast_mode")):
                         return
                     try:
                         obj = json.loads(line)
                     except Exception:
+                        parse_failed = True
+                        self.source_errors[tool_name] = self.source_errors.get(tool_name, 0) + 1
                         return
                     if not isinstance(obj, dict):
                         return
@@ -1869,6 +2018,10 @@ class MultiHarnessScanner:
                         cand = obj.get("modelId") or obj.get("model") or pl.get("model")
                         if cand:
                             cur_m = normalize_model(str(cand), cur_m)
+                        setting = dict(pl)
+                        setting.update(obj)
+                        if any(key in setting for key in ("service_tier", "requested_service_tier", "fast_mode")):
+                            cur_requested = tier_metadata(setting)["requested_tier"]
                     else:
                         meta_o = obj.get("_meta") if isinstance(obj.get("_meta"), dict) else {}
                         pdata_o = obj.get("providerData") if isinstance(obj.get("providerData"), dict) else {}
@@ -1886,6 +2039,7 @@ class MultiHarnessScanner:
                     global_dk = f"{tool_name}:{did}" if did else ""
                     key = global_dk if global_dk else f"{fk}:L{abs_ln}"
                     ev_row = [tool_name, mdl, dt, fi, out_tok, cr, cw, cost, 1, global_dk]
+                    attach_tier_metadata(ev_row, tier_metadata(obj, cur_requested, infer_provider(mdl)))
                     prev = file_dedup.get(key)
                     if not prev or (fi + out_tok + cr + cw) >= (prev[3] + prev[4] + prev[5] + prev[6]):
                         file_dedup[key] = ev_row
@@ -1895,13 +2049,19 @@ class MultiHarnessScanner:
                 try:
                     valid_end, read_cnt = scan_jsonl_from_offset(fp, start_off, m_sec, _on_line)
                 except Exception:
-                    pass
+                    parse_failed = True
+                    self.source_errors[tool_name] = self.source_errors.get(tool_name, 0) + 1
 
                 file_events = list(file_dedup.values())
-                new_meta = {"mdl": cur_m, "ln": line_base + read_cnt}
+                new_meta = {"mdl": cur_m, "ln": line_base + read_cnt, "requested_tier": cur_requested}
                 if rot_buckets:
                     new_meta["rotated_buckets"] = rot_buckets
-                self.cursor_store.put(fk, hkey, ino, fsize, m_ns, valid_end, new_meta, file_events)
+                if parse_failed:
+                    self.failed_exact_tools.add(tool_name)
+                    file_events = list((cur or {}).get("events") or [])
+                    rot_buckets = list(((cur or {}).get("meta") or {}).get("rotated_buckets") or [])
+                else:
+                    self.cursor_store.put(fk, hkey, ino, fsize, m_ns, valid_end, new_meta, file_events)
 
                 rotated_all.extend(rot_buckets)
                 for idx_f, ev in enumerate(file_events):
@@ -1916,7 +2076,7 @@ class MultiHarnessScanner:
                 if ev[9] in self.generic_seen_keys:
                     continue
                 self.generic_seen_keys.add(ev[9])
-            self.add_ev(ev[0], ev[1], ev[2], ev[3], ev[4], ev[5], ev[6], ev[7], ev[8])
+            self.add_ev(ev[0], ev[1], ev[2], ev[3], ev[4], ev[5], ev[6], ev[7], ev[8], tier=event_tier_metadata(ev))
 
     def scan_claude(self):
         hkey = self._norm_home_key(self.home)
@@ -2035,7 +2195,7 @@ class MultiHarnessScanner:
                         raw_m = msg.get("model") or obj.get("model")
                         if raw_m == "<synthetic>":
                             return
-                        mdl = normalize_model(raw_m, "claude-sonnet-4-6")
+                        mdl = normalize_model(raw_m, "unknown")
                         fi = safe_int(u.get("input_tokens"))
                         out_tok = safe_int(u.get("output_tokens"))
                         cr = safe_int(u.get("cache_read_input_tokens"))
@@ -2055,6 +2215,10 @@ class MultiHarnessScanner:
                         dt = to_local_date(obj.get("timestamp"), m_sec, self.tz_offset_min)
                         cost = first_pos_float(obj.get("costUSD"), u.get("cost"))
                         ev_row = ["Claude Code", mdl, dt, fi, out_tok, cr, cw, cost, 1, key, cw1h]
+                        metadata = tier_metadata(obj, provider=infer_provider(mdl))
+                        if isinstance(msg, dict) and "service_tier" in msg:
+                            metadata.update(actual_tier=normalize_service_tier(msg["service_tier"]), tier_evidence="message.service_tier=" + str(msg["service_tier"]))
+                        attach_tier_metadata(ev_row, metadata)
                         prev = file_dedup.get(key)
                         if not prev or (fi + out_tok + cr + cw) >= (prev[3] + prev[4] + prev[5] + prev[6]):
                             if cw1h == 0 and prev and len(prev) > 10:
@@ -2089,7 +2253,7 @@ class MultiHarnessScanner:
 
             for ev in (n_meta.get("rotated_buckets") or []):
                 cw1h_r = safe_int(ev[10]) if len(ev) > 10 else 0
-                self.add_ev(final_tool, ev[1], ev[2], safe_int(ev[3]), safe_int(ev[4]), safe_int(ev[5]), safe_int(ev[6]), safe_float(ev[7]), max(1, safe_int(ev[8])), cw1h=cw1h_r)
+                self.add_ev(final_tool, ev[1], ev[2], safe_int(ev[3]), safe_int(ev[4]), safe_int(ev[5]), safe_int(ev[6]), safe_float(ev[7]), max(1, safe_int(ev[8])), cw1h=cw1h_r, tier=event_tier_metadata(ev))
 
             for ev in f_evs:
                 if ev[0] != final_tool:
@@ -2099,7 +2263,7 @@ class MultiHarnessScanner:
                 prev = global_dedup.get(dk) if dk else None
                 if not dk:
                     cw1h_i = safe_int(ev[10]) if len(ev) > 10 else 0
-                    self.add_ev(final_tool, ev[1], ev[2], ev[3], ev[4], ev[5], ev[6], ev[7], ev[8], cw1h=cw1h_i)
+                    self.add_ev(final_tool, ev[1], ev[2], ev[3], ev[4], ev[5], ev[6], ev[7], ev[8], cw1h=cw1h_i, tier=event_tier_metadata(ev))
                 elif not prev or (ev[3] + ev[4] + ev[5] + ev[6]) >= (prev[3] + prev[4] + prev[5] + prev[6]):
                     global_dedup[dk] = ev
 
@@ -2111,7 +2275,7 @@ class MultiHarnessScanner:
                 continue
             self.claude_seen_keys.add(dk)
             cw1h_g = safe_int(ev[10]) if len(ev) > 10 else 0
-            self.add_ev(ev[0], ev[1], ev[2], ev[3], ev[4], ev[5], ev[6], ev[7], ev[8], cw1h=cw1h_g)
+            self.add_ev(ev[0], ev[1], ev[2], ev[3], ev[4], ev[5], ev[6], ev[7], ev[8], cw1h=cw1h_g, tier=event_tier_metadata(ev))
 
     @staticmethod
     def _scan_codex_zst_lines(fp: Path, on_line):
@@ -3361,6 +3525,10 @@ class MultiHarnessScanner:
         for ev in self.events:
             tool, model, dt, fi, out_tok, cr, cw, logged_cost, turns = ev[:9]
             cw1h = safe_int(ev[9]) if len(ev) > 9 else 0
+            metadata = ev[10] if len(ev) > 10 and isinstance(ev[10], dict) else {}
+            requested = normalize_service_tier(metadata.get("requested_tier"))
+            actual_tier = normalize_service_tier(metadata.get("actual_tier"))
+            provider = str(metadata.get("provider") or infer_provider(model)).lower()
             fi = max(0, min(MAX_SAFE_TOKENS, safe_int(fi)))
             out_tok = max(0, min(MAX_SAFE_TOKENS, safe_int(out_tok)))
             cr = max(0, min(MAX_SAFE_TOKENS, safe_int(cr)))
@@ -3368,18 +3536,33 @@ class MultiHarnessScanner:
             cw1h_c = min(cw, max(0, cw1h))
             cw5m = max(0, cw - cw1h_c)
             turns = max(1, min(1_000_000_000, safe_int(turns)))
-            inp_r, out_r, cr_r, cw_r = self.pricing.lookup(model)
-            cw1h_r = max(cw_r, inp_r * 2.0)
+            effective_tier = actual_tier if actual_tier != "unknown" else requested
+            rates, basis, pricing_version = self.pricing.lookup_tier(model, provider, effective_tier, dt, fi + cr + cw)
+            if actual_tier == "unknown" and requested != "unknown" and basis != "unpriced":
+                basis = "estimated_requested_tier"
+            inp_r, out_r, cr_r, cw_r, cw1h_r = rates
             calc = min(1e12, max(0.0, (fi * inp_r + out_tok * out_r + cr * cr_r + cw5m * cw_r + cw1h_c * cw1h_r) / 1e6))
             base = min(1e12, max(0.0, ((fi + cr + cw) * inp_r + out_tok * out_r) / 1e6))
             safe_logged = safe_float(logged_cost)
             actual = safe_logged if safe_logged > 0 else calc
+            if safe_logged > 0:
+                basis, pricing_version = "reported", "source-reported"
+            standard_equivalent, premium = None, None
+            if basis in ("estimated_tier_price", "estimated_standard", "estimated_requested_tier") and effective_tier != "unknown":
+                standard_rates, standard_basis, _ = self.pricing.lookup_tier(model, provider, "standard", dt, fi + cr + cw)
+                if standard_basis != "unpriced":
+                    standard_equivalent = (fi * standard_rates[0] + out_tok * standard_rates[1] + cr * standard_rates[2] + cw5m * standard_rates[3] + cw1h_c * standard_rates[4]) / 1e6
+                    premium = max(0.0, actual - standard_equivalent)
             baseline = max(base, actual)
             rate_lbl = f"${inp_r:g} / ${out_r:g}" if any((inp_r, out_r, cr_r, cw_r)) else "未定价"
-            k = (dt, tool, model)
+            k = (dt, tool, model, requested, actual_tier, basis, pricing_version, provider)
             if k not in buckets:
-                buckets[k] = [dt, tool, model, 0, 0, 0, 0, 0, 0.0, 0.0, rate_lbl]
+                buckets[k] = [dt, tool, model, 0, 0, 0, 0, 0, 0.0, 0.0, rate_lbl, requested, actual_tier, str(metadata.get("tier_evidence") or ""), basis, pricing_version, provider, 0.0 if standard_equivalent is not None else None, 0.0 if premium is not None else None]
             b = buckets[k]
+            if b[10] != rate_lbl:
+                b[10] = "多种费率 · 见明细"
+            if b[13] != str(metadata.get("tier_evidence") or ""):
+                b[13] = "mixed"
             b[3] = min(1_000_000_000, b[3] + turns)
             b[4] = min(MAX_BUCKET_TOKENS, b[4] + fi)
             b[5] = min(MAX_BUCKET_TOKENS, b[5] + cr)
@@ -3387,10 +3570,15 @@ class MultiHarnessScanner:
             b[7] = min(MAX_BUCKET_TOKENS, b[7] + out_tok)
             b[8] = min(1e12, b[8] + actual)
             b[9] = min(1e12, b[9] + baseline)
+            b[17] = b[17] + standard_equivalent if b[17] is not None and standard_equivalent is not None else None
+            b[18] = b[18] + premium if b[18] is not None and premium is not None else None
         rows = sorted(buckets.values(), key=lambda x: (x[0], x[1], x[2]))
         for r in rows:
             r[8] = round(r[8], 6)
             r[9] = round(r[9], 6)
+            for index in (17, 18):
+                if r[index] is not None:
+                    r[index] = round(r[index], 6)
         return rows
 
 
@@ -3413,7 +3601,19 @@ def normalize_record_row(row):
     cost_usd = max(0.0, safe_float(row[8]))
     base_usd = max(cost_usd, safe_float(row[9]))
     rate_lbl = str(row[10] if len(row) > 10 and row[10] is not None else "")
-    return [dt, tool, model, max(1, turns), fi, cr, cw, out_tok, round(cost_usd, 6), round(base_usd, 6), rate_lbl]
+    extension = [normalize_service_tier(row[11] if len(row) > 11 else None),
+                 normalize_service_tier(row[12] if len(row) > 12 else None),
+                 str(row[13] or "") if len(row) > 13 else "",
+                 str(row[14] or "legacy_unknown") if len(row) > 14 else "legacy_unknown",
+                 str(row[15] or "") if len(row) > 15 else "",
+                 str(row[16] or "unknown").lower() if len(row) > 16 else "unknown",
+                 max(0.0, safe_float(row[17])) if len(row) > 17 and row[17] is not None else None,
+                 max(0.0, safe_float(row[18])) if len(row) > 18 and row[18] is not None else None]
+    return [dt, tool, model, max(1, turns), fi, cr, cw, out_tok, round(cost_usd, 6), round(base_usd, 6), rate_lbl] + extension
+
+
+def record_key(row):
+    return tuple(row[:3]) + tuple(row[i] for i in (11, 12, 14, 15, 16))
 
 
 def _collapse_record_rows(rows) -> dict:
@@ -3423,7 +3623,7 @@ def _collapse_record_rows(rows) -> dict:
         r = normalize_record_row(raw)
         if not r:
             continue
-        k = (r[0], r[1], r[2])
+        k = record_key(r)
         if k not in out:
             out[k] = r
         else:
@@ -3437,6 +3637,10 @@ def _collapse_record_rows(rows) -> dict:
             ex[9] = round(min(1e12, ex[9] + r[9]), 6)
             if r[10]:
                 ex[10] = r[10]
+            if ex[13] != r[13]:
+                ex[13] = "mixed"
+            for index in (17, 18):
+                ex[index] = round(ex[index] + r[index], 6) if ex[index] is not None and r[index] is not None else None
     return out
 
 
@@ -3448,7 +3652,28 @@ def merge_records_high_water(primary_rows, historical_rows, historical_scanner_r
     for key in set(primary_partitions) | set(historical_partitions):
         p_time, h_time = safe_int(primary_partitions.get(key)), safe_int(historical_partitions.get(key))
         if p_time > 0 or h_time > 0:
-            owners[key] = p_time >= h_time
+            if p_time > 0 and h_time > 0 and historical_scanner_rev is not None and safe_int(historical_scanner_rev) != SCANNER_REV:
+                owners[key] = SCANNER_REV > safe_int(historical_scanner_rev)
+            else:
+                owners[key] = p_time >= h_time
+    # An old aggregate cannot be split into service tiers without its source.
+    # Choose one coherent model group instead of summing a legacy bucket and
+    # a newly classified copy of the same requests.
+    legacy_groups = {tuple(r[:3]) for r in list(p_map.values()) + list(h_map.values())}
+    for group in legacy_groups:
+        if group[0] + "||" + group[1] in owners:
+            continue
+        p_keys = [k for k in p_map if k[:3] == group]
+        h_keys = [k for k in h_map if k[:3] == group]
+        if not p_keys or not h_keys:
+            continue
+        score = lambda rows: (sum(r[3] for r in rows), sum(sum(r[4:8]) for r in rows))
+        if score([p_map[k] for k in p_keys]) >= score([h_map[k] for k in h_keys]):
+            for k in h_keys:
+                del h_map[k]
+        else:
+            for k in p_keys:
+                del p_map[k]
     merged = []
     for key in set(p_map) | set(h_map):
         current, previous = p_map.get(key), h_map.get(key)
@@ -3461,10 +3686,10 @@ def merge_records_high_water(primary_rows, historical_rows, historical_scanner_r
             chosen = current or previous
         if chosen is not None:
             merged.append(list(chosen))
-    return sorted(merged, key=lambda r: (r[0], r[1], r[2]))
+    return sorted(merged, key=record_key)
 
 
-def merge_with_ledger_db(home: Path, current_rows: list, strict: bool = False, reconciled_partitions=None) -> list:
+def merge_with_ledger_db(home: Path, current_rows: list, strict: bool = False, reconciled_partitions=None, failed_tools=None) -> list:
     """
     使用本地 ~/.toklens/ledger.db (SQLite WAL) 进行持久化高水位归档：
     - 仅增量写入新增、发生变化或需淘汰旧错分类的行，降低 VPS 磁盘写放大；
@@ -3477,26 +3702,26 @@ def merge_with_ledger_db(home: Path, current_rows: list, strict: bool = False, r
         archived_rows = []
         archived_map = {}
         cur = conn.execute(
-            "SELECT rec_date, tool, model, turns, fi, cr, cw, out_tok, cost_usd, base_usd, rate_label "
+            "SELECT rec_date, tool, model, turns, fi, cr, cw, out_tok, cost_usd, base_usd, rate_label, requested_tier, actual_tier, tier_evidence, cost_basis, pricing_version, provider, standard_equivalent_usd, service_tier_premium_usd "
             "FROM daily_archive"
         )
         for db_row in cur.fetchall():
             lst = list(db_row)
             archived_rows.append(lst)
-            archived_map[(str(lst[0]), str(lst[1]), str(lst[2]))] = (
-                safe_int(lst[3]),
-                safe_int(lst[4]),
-                safe_int(lst[5]),
-                safe_int(lst[6]),
-                safe_int(lst[7]),
-                round(safe_float(lst[8]), 6),
-                round(safe_float(lst[9]), 6),
-                str(lst[10] or ""),
-            )
+            archived_map[record_key(lst)] = tuple(normalize_record_row(lst))
 
         proof_row = conn.execute("SELECT v FROM kv_meta WHERE k='accounting_partitions'").fetchone()
         old_proofs = json.loads(proof_row[0]) if proof_row else {}
-        merged = merge_records_high_water(current_rows, archived_rows, primary_partitions=reconciled_partitions, historical_partitions=old_proofs)
+        revision_row = conn.execute("SELECT v FROM kv_meta WHERE k='ledger_scanner_rev'").fetchone()
+        old_revision = safe_int(revision_row[0]) if revision_row else 29
+        failed_tools = failed_tools or set()
+        trusted_rows = [r for r in current_rows if r[1] not in failed_tools]
+        if reconciled_partitions is not None:
+            for key in list(reconciled_partitions):
+                if key.split("||", 1)[-1] in failed_tools:
+                    del reconciled_partitions[key]
+        merged = merge_records_high_water(trusted_rows, archived_rows, historical_scanner_rev=old_revision, primary_partitions=reconciled_partitions, historical_partitions=old_proofs)
+        conn.execute("INSERT OR REPLACE INTO kv_meta(k,v) VALUES ('ledger_scanner_rev',?)", (str(max(old_revision, SCANNER_REV)),))
         proofs = dict(old_proofs)
         for key, value in (reconciled_partitions or {}).items():
             proofs[key] = max(safe_int(value), safe_int(proofs.get(key)))
@@ -3504,27 +3729,27 @@ def merge_with_ledger_db(home: Path, current_rows: list, strict: bool = False, r
         if reconciled_partitions is not None:
             reconciled_partitions.clear()
             reconciled_partitions.update(proofs)
-        merged_keys = set((r[0], r[1], r[2]) for r in merged)
+        merged_keys = set(record_key(r) for r in merged)
         obsolete_keys = [k for k in archived_map.keys() if k not in merged_keys]
 
         diff_params = []
         for r in merged:
-            k = (r[0], r[1], r[2])
-            val_tup = (r[3], r[4], r[5], r[6], r[7], round(r[8], 6), round(r[9], 6), r[10])
+            k = record_key(r)
+            val_tup = tuple(r)
             if archived_map.get(k) != val_tup:
-                diff_params.append((r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10]))
+                diff_params.append(tuple(r))
 
         if obsolete_keys or diff_params:
             if obsolete_keys:
                 conn.executemany(
-                    "DELETE FROM daily_archive WHERE rec_date = ? AND tool = ? AND model = ?",
+                    "DELETE FROM daily_archive WHERE rec_date = ? AND tool = ? AND model = ? AND requested_tier = ? AND actual_tier = ? AND cost_basis = ? AND pricing_version = ? AND provider = ?",
                     obsolete_keys,
                 )
             if diff_params:
                 conn.executemany(
                     "INSERT OR REPLACE INTO daily_archive "
-                    "(rec_date, tool, model, turns, fi, cr, cw, out_tok, cost_usd, base_usd, rate_label) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "(rec_date, tool, model, turns, fi, cr, cw, out_tok, cost_usd, base_usd, rate_label, requested_tier, actual_tier, tier_evidence, cost_basis, pricing_version, provider, standard_equivalent_usd, service_tier_premium_usd) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     diff_params,
                 )
         conn.commit()
@@ -3573,6 +3798,7 @@ def build_snapshot(
             "scanner_rev": SCANNER_REV,
             "accounting_updated_ms": int(time.time() * 1000),
             "reconciled_partitions": scanner.reconciled_partitions,
+            "source_errors": scanner.source_errors,
             "machine_id": sanitize_machine_id(machine_id),
             "machine_name": machine_name.strip() or socket.gethostname(),
             "machine_type": machine_type,

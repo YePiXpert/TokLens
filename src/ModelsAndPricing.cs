@@ -13,9 +13,9 @@ namespace TokLens
 {
     public static class AppConstants
     {
-        public const string Version = "2.3.0";
-        public const string VersionTag = "v2.3.0";
-        public const string ProductTitle = "知微 · TokLens v2.3.0";
+        public const string Version = BuildVersion.Version;
+        public const string VersionTag = "v" + BuildVersion.Version;
+        public const string ProductTitle = "知微 · TokLens v" + BuildVersion.Version;
     }
 
     internal sealed class WinSqlite : IDisposable
@@ -590,7 +590,7 @@ namespace TokLens
         }
     }
 
-    public sealed class UsageEvent
+    public sealed class UsageEvent : UsageRecordMetadata
     {
         public string Tool;
         public string Model;
@@ -602,11 +602,12 @@ namespace TokLens
         public double LoggedCostUsd;
         public int Turns;
         public string DedupKey;
-        public string SessionId = "";
         public long TimestampMs;
         public int DurationMs;
         public string TimingSource = ""; // "request" only for an explicit elapsed time or paired request timestamps.
         public long CacheWrite1h;
+
+        public UsageEvent() : this("","unknown","",0,0,0,0,0,1) { }
 
         public UsageEvent(string tool, string model, string date, long fi, long outTok, long cr, long cw, double loggedCost, int turns)
             : this(tool, model, date, fi, outTok, cr, cw, loggedCost, turns, "", 0L, 0, 0L)
@@ -645,11 +646,12 @@ namespace TokLens
             UsageEvent copy = new UsageEvent(Tool, Model, Date, FreshInput, Output, CacheRead, CacheWrite, LoggedCostUsd, Turns, DedupKey, TimestampMs, DurationMs, CacheWrite1h);
             copy.SessionId = SessionId;
             copy.TimingSource = TimingSource;
+            CopyMetadataTo(copy);
             return copy;
         }
     }
 
-    public sealed class RecentRequestRecord
+    public sealed class RecentRequestRecord : UsageRecordMetadata
     {
         public long TimestampMs;
         public string Date;
@@ -670,7 +672,7 @@ namespace TokLens
         }
     }
 
-    public sealed class LiveRequestRowView
+    public sealed class LiveRequestRowView : UsageRecordMetadata
     {
         public long TimestampMs { get; set; }
         public string Date { get; set; }
@@ -697,7 +699,7 @@ namespace TokLens
         public string FormattedCost { get; set; }
     }
 
-    public sealed class RecordBucket
+    public sealed class RecordBucket : UsageRecordMetadata
     {
         public string MachineId;
         public string MachineName;
@@ -745,6 +747,7 @@ namespace TokLens
             c.CostUsd = CostUsd;
             c.BaselineUsd = BaselineUsd;
             c.RateLabel = RateLabel;
+            CopyMetadataTo(c);
             return c;
         }
     }
@@ -947,7 +950,7 @@ namespace TokLens
         public string ColorHex { get; set; }
     }
 
-    public sealed class ModelRowView
+    public sealed class ModelRowView : UsageRecordMetadata
     {
         public string Model { get; set; }
         public string Tool { get; set; }
@@ -1007,6 +1010,9 @@ namespace TokLens
         public Dictionary<string, long> ReconciledPartitions = new Dictionary<string, long>(StringComparer.Ordinal);
         public List<RecordBucket> Records = new List<RecordBucket>();
         public List<RecentRequestRecord> RecentRequests = new List<RecentRequestRecord>();
+        public List<RecentRequestRecord> WindowRequests = new List<RecentRequestRecord>();
+        public bool WindowRequestsComplete;
+        public List<ProviderHealth> ProviderHealth = new List<ProviderHealth>();
         public List<string> Warnings = new List<string>();
     }
 
@@ -1032,6 +1038,7 @@ namespace TokLens
         private readonly string _homeDir;
         private readonly bool _isCustomHome;
         private readonly Dictionary<string, ModelRate> _rates = new Dictionary<string, ModelRate>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string,ServiceTierPrice> _tierQuotes=new Dictionary<string,ServiceTierPrice>(StringComparer.OrdinalIgnoreCase);
         private static readonly object CacheLock = new object();
         private static Dictionary<string, ModelRate> _memCloudRates = null;
         private static long _memCloudCacheMtimeTicks = -1;
@@ -1040,7 +1047,7 @@ namespace TokLens
         private static string _lastCloudUpdated = "";
 
         private static readonly Regex SpaceUnderscoreRegex = new Regex(@"[\s_]+", RegexOptions.Compiled);
-        private static readonly Regex TierSuffixRegex = new Regex(@"-(?:xhigh|high|medium|low|minimal|thinking|nothinking|reasoning|preview|latest|beta|exp|experimental|fast|max|auto|online|nitro|exacto|1m)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        private static readonly Regex TierSuffixRegex = new Regex(@"-(?:xhigh|high|medium|low|minimal|thinking|nothinking|reasoning|preview|latest|beta|exp|experimental|max|auto|online|nitro|exacto|1m)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
         private static readonly Regex DateSuffixRegex = new Regex(@"-(?:20\d{6}|20\d{2}-\d{2}-\d{2}|\d{4})$", RegexOptions.Compiled);
         private static readonly Regex ClaudeDotVerRegex = new Regex(@"^(claude-(?:opus|sonnet|haiku|fable|mythos)-\d+)\.(\d+.*)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
         private static readonly Regex ClaudeDashVerRegex = new Regex(@"^(claude-(?:opus|sonnet|haiku|fable|mythos)-\d+)-(\d+)(?=-|$)(.*)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -1975,6 +1982,58 @@ namespace TokLens
             baselineUsd = baseCost > actualUsd ? baseCost : actualUsd;
         }
 
+        private ServiceTierPrice FindTierPrice(UsageEvent ev,string tier)
+        {
+            string key=ev.Provider+"|"+ev.Model+"|"+tier+"|"+ev.Date;ServiceTierPrice quote;
+            if(!_tierQuotes.TryGetValue(key,out quote))
+            {_tierQuotes[key]=quote=ServiceTierPricing.Find(ev.Provider,ev.Model,tier,ev.Date,_isCustomHome?_homeDir:null);}
+            return quote;
+        }
+        private static double UncachedQuote(UsageEvent ev,ModelRate rate,double cost)
+        {
+            double prompt=(double)Math.Max(0,ev.FreshInput)+Math.Max(0,ev.CacheRead)+Math.Max(0,ev.CacheWrite);
+            return Math.Min(1000000000000.0,Math.Max(cost,(prompt*rate.InputPerM+Math.Max(0,ev.Output)*rate.OutputPerM)/1000000.0));
+        }
+
+        public void ComputeEventCost(UsageEvent ev, out double actualUsd, out double baselineUsd, out ModelRate rate)
+        {
+            if(string.IsNullOrWhiteSpace(ev.Provider)||ev.Provider=="unknown")ev.Provider=UsageServiceTier.InferProvider(ev.Model);
+            ComputeBucketCost(ev.Model,ev.Turns,ev.FreshInput,ev.Output,ev.CacheRead,ev.CacheWrite,ev.CacheWrite1h,0,out actualUsd,out baselineUsd,out rate);
+            if(ev.LoggedCostUsd>0&&!double.IsNaN(ev.LoggedCostUsd)&&!double.IsInfinity(ev.LoggedCostUsd)&&ev.LoggedCostUsd<=1000000000.0)
+            {actualUsd=ev.LoggedCostUsd;baselineUsd=Math.Max(actualUsd,baselineUsd);ev.CostBasis="reported";ev.PricingVersion="source-reported";ev.StandardEquivalentUsd=null;ev.ServiceTierPremiumUsd=null;return;}
+            string tier=UsageServiceTier.Effective(ev);
+            bool requestedOnly=UsageServiceTier.Normalize(ev.ActualServiceTier)=="unknown"&&tier!="unknown";
+            ev.CostBasis=tier=="unknown"?"estimated_unknown_tier":requestedOnly?"estimated_requested_tier":"estimated_standard";
+            ev.PricingVersion="standard-reference-v2.4.0";
+            ev.StandardEquivalentUsd=null;ev.ServiceTierPremiumUsd=null;
+            if(tier=="unknown")
+            {
+                ServiceTierPrice reference=FindTierPrice(ev,"standard");
+                if(reference!=null&&ServiceTierPricing.Supports(reference,ev)){actualUsd=ServiceTierPricing.Quote(reference,ev,out rate);baselineUsd=UncachedQuote(ev,rate,actualUsd);ev.PricingVersion=(reference.version??reference.effective_from)+"|"+reference.source;}
+            }
+            if(tier!="unknown")
+            {
+                ServiceTierPrice quote=FindTierPrice(ev,tier);
+                if(quote!=null&&!ServiceTierPricing.Supports(quote,ev))quote=null;
+                if(quote!=null)
+                {
+                    actualUsd=ServiceTierPricing.Quote(quote,ev,out rate);
+                    baselineUsd=UncachedQuote(ev,rate,actualUsd);
+                    ev.CostBasis=requestedOnly?"estimated_requested_tier":"estimated_tier_price";
+                    ev.PricingVersion=(quote.version??quote.effective_from)+"|"+quote.source;
+                    ServiceTierPrice standard=FindTierPrice(ev,"standard");
+                    if(standard!=null&&ServiceTierPricing.Supports(standard,ev))
+                    {
+                        ModelRate ignored;double reference=ServiceTierPricing.Quote(standard,ev,out ignored);
+                        ev.StandardEquivalentUsd=reference;ev.ServiceTierPremiumUsd=Math.Max(0,actualUsd-reference);
+                    }
+                }
+                else if(tier!="standard")
+                {actualUsd=0;baselineUsd=0;rate=new ModelRate(0,0,0,0,"unpriced");ev.CostBasis="unpriced";ev.PricingVersion="";}
+            }
+            if(rate.Source=="unpriced")ev.CostBasis="unpriced";
+        }
+
         public void RecalculateRemoteSnapshot(NodeSnapshot snap)
         {
             if (snap == null || snap.Records == null) return;
@@ -1982,6 +2041,9 @@ namespace TokLens
             {
                 RecordBucket r = snap.Records[i];
                 if (r == null || r.TotalTokens <= 0) continue;
+                // A remote bill is a quote made with a particular tier and dated source.
+                // Do not replace it with a local standard-tier price or overwrite reported charges.
+                if(r.CostBasis=="reported"||UsageServiceTier.Effective(r)!="unknown")continue;
 
                 ModelRate rate = Lookup(r.Model);
                 bool isCustom = string.Equals(rate.Source, "custom", StringComparison.OrdinalIgnoreCase);

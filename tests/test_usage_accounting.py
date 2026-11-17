@@ -38,10 +38,127 @@ def field(number, data):
 
 
 def row(model, fresh, cached, turns=1):
-    return ["2026-11-12", "OpenAI Codex", model, turns, fresh, cached, 0, 0, 1.0, 1.0, "test"]
+    return agent.normalize_record_row(["2026-11-12", "OpenAI Codex", model, turns, fresh, cached, 0, 0, 1.0, 1.0, "test"])
 
 
 class AccountingTests(unittest.TestCase):
+    def test_tier_baseline_and_mixed_long_context_rates(self):
+        with tempfile.TemporaryDirectory(prefix="toklens-tier-") as temp:
+            scanner = agent.MultiHarnessScanner(Path(temp), allow_network_pricing=False)
+            tier = {"actual_tier": "fast", "provider": "openai"}
+            scanner.add_ev("OpenAI Codex", "gpt-6.1-sol", "2026-11-17", 1000, 200, 500, 100, 0, tier=tier)
+            first = scanner.build_records()[0]
+            self.assertAlmostEqual(first[9], .0104, places=6)
+            scanner.add_ev("OpenAI Codex", "gpt-6.1-sol", "2026-11-17", 300000, 200, 500, 100, 0, tier=tier)
+            rows = scanner.build_records()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0][10], "多种费率 · 见明细")
+
+    def test_shared_service_tier_fixtures(self):
+        fixtures = json.loads((Path(__file__).parent / "fixtures" / "service_tier_cases.json").read_text())
+        for case in fixtures["cases"]:
+            with self.subTest(case=case["id"]), tempfile.TemporaryDirectory(prefix="toklens-tier-") as temp:
+                scanner = agent.MultiHarnessScanner(Path(temp), allow_network_pricing=False)
+                scanner.add_ev("OpenAI Codex", case["model"], case["date"], case["fi"], case["output"], case["cache_read"], case["cache_write"], case["reported"], tier={"requested_tier":case["requested"], "actual_tier":case["actual"], "provider":case["provider"], "tier_evidence":"fixture"})
+                actual = scanner.build_records()[0]
+                self.assertEqual(len(actual), 19)
+                self.assertAlmostEqual(actual[8], case["expected_cost"], places=6)
+                self.assertEqual(actual[14], case["expected_basis"])
+                for index, name in ((17, "expected_standard"), (18, "expected_premium")):
+                    if case[name] is None:
+                        self.assertIsNone(actual[index])
+                    else:
+                        self.assertAlmostEqual(actual[index], case[name], places=6)
+
+    def test_request_preference_never_promoted_to_actual_and_response_overrides(self):
+        parser = agent.CodexUsageState("thread", 1794484800)
+        parser.on_line(frame("turn_context", {"model":"gpt-6.1-sol", "service_tier":"priority"}, 0))
+        parser.on_line(frame("token_usage_record", {"response_id":"a", "usage":usage()}, 1))
+        first = list(parser.rows.values())[0][13]
+        self.assertEqual((first["requested_tier"], first["actual_tier"]), ("fast", "unknown"))
+        parser.on_line(frame("token_usage_record", {"response_id":"b", "usage":usage(), "response":{"service_tier":"default"}}, 2))
+        second = list(parser.rows.values())[1][13]
+        self.assertEqual((second["requested_tier"], second["actual_tier"]), ("fast", "standard"))
+
+    def test_old_ledger_migration_preserves_unknown_and_tier_buckets(self):
+        with tempfile.TemporaryDirectory(prefix="toklens-tier-") as temp:
+            home = Path(temp)
+            folder = home / ".toklens"
+            folder.mkdir()
+            db = sqlite3.connect(folder / "ledger.db")
+            db.execute("CREATE TABLE daily_archive(rec_date TEXT,tool TEXT,model TEXT,turns INTEGER,fi INTEGER,cr INTEGER,cw INTEGER,out_tok INTEGER,cost_usd REAL,base_usd REAL,rate_label TEXT,PRIMARY KEY(rec_date,tool,model))")
+            old = row("gpt-6.1-sol", 1000, 500)
+            db.execute("INSERT INTO daily_archive VALUES (?,?,?,?,?,?,?,?,?,?,?)", old[:11])
+            db.commit()
+            db.close()
+            result = agent.merge_with_ledger_db(home, [])
+            self.assertEqual(result[0][11:13], ["unknown", "unknown"])
+            self.assertTrue(list(folder.glob("ledger.db.before-tier-v30.*.db")))
+            self.assertEqual(result, agent.merge_with_ledger_db(home, []))
+            fast, standard = list(old), list(old)
+            fast[11:17] = ["fast", "fast", "response", "estimated_tier_price", "test", "openai"]
+            standard[11:17] = ["standard", "standard", "response", "estimated_tier_price", "test", "openai"]
+            combined = agent.merge_with_ledger_db(home, [fast, standard], reconciled_partitions={old[0]+"||"+old[1]:9999999999999})
+            self.assertEqual(len(combined), 2)
+            self.assertEqual({r[12] for r in combined}, {"fast", "standard"})
+            self.assertEqual(combined, agent.merge_with_ledger_db(home, combined))
+
+    def test_fast_suffix_not_silently_priced_as_standard(self):
+        with tempfile.TemporaryDirectory(prefix="toklens-tier-") as temp:
+            self.assertEqual(agent.PricingLookup(Path(temp), allow_network=False).lookup("gpt-6.1-sol-fast"), (0,0,0,0))
+
+    def test_generic_tier_survives_cursor_and_malformed_files_retry(self):
+        with tempfile.TemporaryDirectory(prefix="toklens-tier-") as temp:
+            home = Path(temp)
+            folder = home / "source"
+            folder.mkdir()
+            path = folder / "session.jsonl"
+            content = [dict(type="turn_context",model="gpt-6.1-sol",service_tier="priority"),
+                       dict(timestamp="2026-11-17T01:00:00Z",request_id="one",usage=dict(input_tokens=1000,output_tokens=200),actual_service_tier="priority")]
+            path.write_text("\n".join(map(json.dumps, content)) + "\n")
+            scanner = agent.MultiHarnessScanner(home, allow_network_pricing=False)
+            scanner.scan_jsonl_tree("Fixture", [folder], "wrong-default")
+            scanner.cursor_store.flush()
+            rows = scanner.build_records()
+            self.assertEqual(rows[0][11:13], ["fast", "fast"])
+            scanner = agent.MultiHarnessScanner(home, allow_network_pricing=False)
+            scanner.scan_jsonl_tree("Fixture", [folder], "wrong-default")
+            self.assertEqual(scanner.build_records(), rows)
+            path.write_text('{"usage": broken}\n' + json.dumps(dict(timestamp="2026-11-17T01:00:00Z",usage=dict(input_tokens=4,output_tokens=2))) + "\n")
+            scanner = agent.MultiHarnessScanner(home, allow_network_pricing=False)
+            scanner.scan_jsonl_tree("Fixture", [folder], "wrong-default")
+            self.assertIn("Fixture", scanner.failed_exact_tools)
+            self.assertEqual(scanner.source_errors["Fixture"], 1)
+            self.assertFalse(scanner.cursor_store.dirty)
+            self.assertEqual(scanner.build_records(), rows)
+            fresh = home / "empty"
+            fresh.mkdir()
+            (fresh / "unknown.jsonl").write_text(json.dumps(dict(timestamp="2026-11-17T01:00:00Z",usage=dict(input_tokens=4,output_tokens=2))) + "\n")
+            scanner = agent.MultiHarnessScanner(home, allow_network_pricing=False)
+            scanner.scan_jsonl_tree("Fixture", [fresh], "wrong-default")
+            self.assertEqual(scanner.build_records()[0][2], "unknown")
+            self.assertEqual(scanner.build_records()[0][14], "unpriced")
+
+    def test_duplicate_response_preserves_actual_tier_after_setting_change(self):
+        parser = agent.CodexUsageState("thread", 1794484800)
+        parser.on_line(frame("turn_context", {"model":"gpt-6.1-sol","fast_mode":True}, 0))
+        parser.on_line(frame("token_usage_record", {"response_id":"a","usage":usage(),"actual_service_tier":"priority"}, 1))
+        parser.on_line(frame("turn_context", {"fast_mode":False}, 2))
+        parser.on_line(frame("token_usage_record", {"response_id":"a","usage":usage()}, 3))
+        self.assertEqual(len(parser.rows), 1)
+        self.assertEqual(list(parser.rows.values())[0][13]["actual_tier"], "fast")
+        self.assertEqual(list(parser.rows.values())[0][13]["requested_tier"], "fast")
+
+    def test_new_revision_proof_and_legacy_group_never_double_count(self):
+        old = row("gpt-6.1-sol", 1000, 500, 5)
+        new = list(old)
+        new[11:17] = ["fast","fast","response","estimated_tier_price","official","openai"]
+        partition = old[0] + "||" + old[1]
+        self.assertEqual(agent.merge_records_high_water([new],[old],29,{partition:100},{partition:200}),[new])
+        self.assertEqual(agent.merge_records_high_water([new],[old]),[new])
+        old[3] = 10
+        self.assertEqual(agent.merge_records_high_water([new],[old]),[old])
+
     def test_record_total_only_pair_and_cumulative_reset(self):
         p = agent.CodexUsageState("thread", 1794484800)
         p.on_line(frame("token_usage_record", {"response_id": "one", "usage": usage()}))

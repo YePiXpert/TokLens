@@ -53,6 +53,7 @@ namespace TokLens
         private TextBlock _priceSourceText;
         private TextBlock _primaryCostText;
         private TextBlock _secondaryCostText;
+        private TextBlock _evidenceText;
         private TextBlock _rateInValText;
         private TextBlock _rateOutValText;
         private TextBlock _rateCrValText;
@@ -388,6 +389,10 @@ namespace TokLens
 
             _detailContentStack = new StackPanel();
             _detailContentStack.Margin = new Thickness(10, 10, 10, 10);
+
+            _evidenceText = new TextBlock { TextWrapping = TextWrapping.Wrap, FontSize = DesignSystem.TextCaption, Margin = new Thickness(2, 0, 2, 10) };
+            _evidenceText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            _detailContentStack.Children.Add(_evidenceText);
 
             _detailContentStack.Children.Add(BuildCostAndSavingsCard());
             _detailContentStack.Children.Add(BuildTokenWaterfallCard());
@@ -1092,8 +1097,14 @@ namespace TokLens
             // 1. 顶部工具品牌彩色徽章与等宽模型胶囊
             ApplyToolBrandBadge(toolName, isDark);
             _modelPillBorder.Visibility = Visibility.Visible;
-            _modelPillText.Text = modelName;
+            _modelPillText.Text = modelName + " · " + UsagePresentation.TierLabel(row);
             _modelPillBorder.ToolTip = "模型标识: " + modelName + "\n所属工具: " + toolName;
+            _evidenceText.Text = UsagePresentation.TierLabel(row) + " · " + UsagePresentation.CostLabel(row)
+                + "\n证据：" + (string.IsNullOrEmpty(row.TierEvidence) ? "日志未提供" : row.TierEvidence)
+                + "\n价格版本：" + (string.IsNullOrEmpty(row.PricingVersion) ? "历史记录未保存" : row.PricingVersion)
+                + (string.IsNullOrEmpty(row.SessionId) ? "" : "\n会话：" + row.SessionId)
+                + (row.ServiceTierPremiumUsd.HasValue ? "\n相同用量的档位额外估值：" + FormatterUtil.FormatMoney(row.ServiceTierPremiumUsd.Value, isCny, _currentUsdToCny) : "")
+                + "\n金额不代表订阅实付。下方单价与缓存对比按当前规则重算，仅作参考。";
 
             // 2. 单次费用、匹配单价与 Prompt Cache 节省拆解
             long fi = Math.Max(0L, row.FreshInput);
@@ -1102,15 +1113,9 @@ namespace TokLens
             long outTok = Math.Max(0L, row.Output);
             long totalTok = fi + cr + cw + outTok;
 
-            ModelRate lookupRate = _pricing.Lookup(modelName);
-            double actualUsd;
-            double baselineUsd;
-            ModelRate computedRate;
-            _pricing.ComputeCost(modelName, fi, outTok, cr, cw, row.CostUsd, out actualUsd, out baselineUsd, out computedRate);
-            if (lookupRate == null)
-            {
-                lookupRate = computedRate ?? new ModelRate(0, 0, 0, 0, "unpriced");
-            }
+            double quoteUsd, baselineUsd;
+            ModelRate lookupRate = QuoteReference(row, out quoteUsd, out baselineUsd);
+            double actualUsd = FormatterUtil.SanitizeMoney(row.CostUsd);
 
             double actualCny = actualUsd * _currentUsdToCny;
             double baselineCny = baselineUsd * _currentUsdToCny;
@@ -1127,12 +1132,14 @@ namespace TokLens
             }
 
             _priceSourceText.Text = FormatRateSourceLabel(lookupRate.Source, fi + cr + cw);
+            _priceSourceBadge.ToolTip = "重算参考单价；历史金额保持不变。\n" + (lookupRate.Source ?? "");
+            if (row.CostBasis == "unpriced") { _primaryCostText.Text = "未计价"; _secondaryCostText.Text = "缺少适用的档位价格"; }
             _rateInValText.Text = FormatRatePerMillion(lookupRate.InputPerM);
             _rateOutValText.Text = FormatRatePerMillion(lookupRate.OutputPerM);
             _rateCrValText.Text = lookupRate.CacheReadPerM > 0.0 ? FormatRatePerMillion(lookupRate.CacheReadPerM) : "—";
             _rateCwValText.Text = lookupRate.CacheWritePerM > 0.0 ? FormatRatePerMillion(lookupRate.CacheWritePerM) : "—";
 
-            double savedUsd = Math.Max(0.0, baselineUsd - actualUsd);
+            double savedUsd = Math.Max(0.0, baselineUsd - quoteUsd);
             double savedCny = savedUsd * _currentUsdToCny;
             double savedPct = (baselineUsd > 1e-9 && savedUsd > 1e-8)
                 ? Math.Min(99.9, savedUsd * 100.0 / baselineUsd)
@@ -1608,16 +1615,12 @@ namespace TokLens
             long outTok = Math.Max(0L, row.Output);
             long totalTok = fi + cr + cw + outTok;
 
-            ModelRate rate = _pricing.Lookup(model);
-            double actualUsd;
-            double baselineUsd;
-            ModelRate computedRate;
-            _pricing.ComputeCost(model, fi, outTok, cr, cw, row.CostUsd, out actualUsd, out baselineUsd, out computedRate);
-            if (rate == null)
-                rate = computedRate ?? new ModelRate(0, 0, 0, 0, "unpriced");
+            double quoteUsd, baselineUsd;
+            ModelRate rate = QuoteReference(row, out quoteUsd, out baselineUsd);
+            double actualUsd = FormatterUtil.SanitizeMoney(row.CostUsd);
 
             double fx = SanitizeRate(_currentUsdToCny);
-            double savedUsd = Math.Max(0.0, baselineUsd - actualUsd);
+            double savedUsd = Math.Max(0.0, baselineUsd - quoteUsd);
             double savedPct = (baselineUsd > 1e-9 && savedUsd > 1e-8) ? (savedUsd * 100.0 / baselineUsd) : 0.0;
             int duration = UsageTiming.IsMeasured(row.TimingSource) && row.DurationMs > 0 ? row.DurationMs : 0;
             double tps = FormatterUtil.ComputeTps(outTok, duration);
@@ -1631,6 +1634,12 @@ namespace TokLens
             sb.AppendFormat(CultureInfo.InvariantCulture, "  \"date\": \"{0}\",\r\n", JsonEscape(row.Date ?? ""));
             sb.AppendFormat(CultureInfo.InvariantCulture, "  \"tool\": \"{0}\",\r\n", JsonEscape(tool));
             sb.AppendFormat(CultureInfo.InvariantCulture, "  \"model\": \"{0}\",\r\n", JsonEscape(model));
+            sb.AppendFormat(CultureInfo.InvariantCulture, "  \"provider\": \"{0}\",\r\n", JsonEscape(row.Provider ?? "unknown"));
+            sb.AppendFormat(CultureInfo.InvariantCulture, "  \"requested_service_tier\": \"{0}\",\r\n", JsonEscape(row.RequestedServiceTier ?? "unknown"));
+            sb.AppendFormat(CultureInfo.InvariantCulture, "  \"actual_service_tier\": \"{0}\",\r\n", JsonEscape(row.ActualServiceTier ?? "unknown"));
+            sb.AppendFormat(CultureInfo.InvariantCulture, "  \"tier_evidence\": \"{0}\",\r\n", JsonEscape(row.TierEvidence ?? ""));
+            sb.AppendFormat(CultureInfo.InvariantCulture, "  \"cost_basis\": \"{0}\",\r\n", JsonEscape(row.CostBasis ?? "legacy_unknown"));
+            sb.AppendFormat(CultureInfo.InvariantCulture, "  \"pricing_version\": \"{0}\",\r\n", JsonEscape(row.PricingVersion ?? ""));
             sb.AppendLine("  \"tokens\": {");
             sb.AppendFormat(CultureInfo.InvariantCulture, "    \"fresh_input\": {0},\r\n", fi);
             sb.AppendFormat(CultureInfo.InvariantCulture, "    \"cache_read\": {0},\r\n", cr);
@@ -1646,12 +1655,16 @@ namespace TokLens
             sb.AppendFormat(CultureInfo.InvariantCulture, "    \"cache_write\": {0:G}\r\n", rate.CacheWritePerM);
             sb.AppendLine("  },");
             sb.AppendLine("  \"cost\": {");
-            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"actual_usd\": {0:F6},\r\n", actualUsd);
-            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"actual_cny\": {0:F6},\r\n", actualUsd * fx);
-            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"baseline_no_cache_usd\": {0:F6},\r\n", baselineUsd);
-            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"cache_saved_usd\": {0:F6},\r\n", savedUsd);
-            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"cache_saved_cny\": {0:F6},\r\n", savedUsd * fx);
-            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"cache_saved_percent\": {0:F2},\r\n", savedPct);
+            bool referenceAvailable = rate.Source != "unpriced";
+            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"recorded_or_estimated_usd\": {0},\r\n", JsonMoney(UsagePresentation.IsUnpriced(row) ? (double?)null : actualUsd));
+            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"recorded_or_estimated_cny\": {0},\r\n", JsonMoney(UsagePresentation.IsUnpriced(row) ? (double?)null : actualUsd * fx));
+            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"standard_equivalent_usd\": {0},\r\n", JsonMoney(row.StandardEquivalentUsd));
+            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"service_tier_premium_usd\": {0},\r\n", JsonMoney(row.ServiceTierPremiumUsd));
+            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"recalculated_reference_usd\": {0},\r\n", JsonMoney(referenceAvailable ? quoteUsd : (double?)null));
+            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"baseline_no_cache_usd\": {0},\r\n", JsonMoney(referenceAvailable ? baselineUsd : (double?)null));
+            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"cache_saved_usd\": {0},\r\n", JsonMoney(referenceAvailable ? savedUsd : (double?)null));
+            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"cache_saved_cny\": {0},\r\n", JsonMoney(referenceAvailable ? savedUsd * fx : (double?)null));
+            sb.AppendFormat(CultureInfo.InvariantCulture, "    \"cache_saved_percent\": {0},\r\n", JsonMoney(referenceAvailable ? savedPct : (double?)null));
             sb.AppendFormat(CultureInfo.InvariantCulture, "    \"usd_to_cny_rate\": {0:F4}\r\n", fx);
             sb.AppendLine("  },");
             sb.AppendLine("  \"telemetry\": {");
@@ -1665,6 +1678,18 @@ namespace TokLens
             sb.Append("}");
             return sb.ToString();
         }
+
+        private ModelRate QuoteReference(LiveRequestRowView row, out double referenceUsd, out double baselineUsd)
+        {
+            UsageEvent ev = new UsageEvent(row.Tool, row.Model, row.Date, row.FreshInput, row.Output, row.CacheRead, row.CacheWrite, 0, 1);
+            row.CopyMetadataTo(ev);
+            ModelRate rate;
+            _pricing.ComputeEventCost(ev, out referenceUsd, out baselineUsd, out rate);
+            return rate ?? new ModelRate(0, 0, 0, 0, "unpriced");
+        }
+
+        private static string JsonMoney(double? value)
+        { return value.HasValue ? FormatterUtil.SanitizeMoney(value.Value).ToString("F6", CultureInfo.InvariantCulture) : "null"; }
 
         private static double SanitizeRate(double rate)
         {

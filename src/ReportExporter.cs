@@ -61,7 +61,7 @@ namespace TokLens
             }
         }
 
-        private sealed class ModelAggRow
+        private sealed class ModelAggRow : UsageRecordMetadata
         {
             public string Model;
             public Dictionary<string, double> ToolCosts = new Dictionary<string, double>(StringComparer.OrdinalIgnoreCase);
@@ -157,6 +157,7 @@ namespace TokLens
             long totCw = 0L;
             long totOut = 0L;
             int totTurns = 0;
+            int unpricedTurns = 0;
             double totCostUsd = 0.0;
             double totBaselineUsd = 0.0;
             double totSavedUsd = 0.0;
@@ -164,6 +165,7 @@ namespace TokLens
             string minDate = null;
             string maxDate = null;
             HashSet<string> activeDates = new HashSet<string>(StringComparer.Ordinal);
+            HashSet<string> distinctModels = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             Dictionary<string, DayTrendPoint> dayMap = new Dictionary<string, DayTrendPoint>(StringComparer.Ordinal);
             Dictionary<string, MachineAggRow> machineMap = new Dictionary<string, MachineAggRow>(StringComparer.OrdinalIgnoreCase);
             Dictionary<string, ToolAggRow> toolMap = new Dictionary<string, ToolAggRow>(StringComparer.OrdinalIgnoreCase);
@@ -182,8 +184,9 @@ namespace TokLens
                     long cw = Math.Max(0L, r.CacheWrite);
                     long outTok = Math.Max(0L, r.Output);
                     int turns = Math.Max(0, r.Turns);
-                    double costUsd = FormatterUtil.SanitizeMoney(r.CostUsd);
-                    double baseUsd = Math.Max(costUsd, FormatterUtil.SanitizeMoney(r.BaselineUsd));
+                    bool unpriced = UsagePresentation.IsUnpriced(r);
+                    double costUsd = unpriced ? 0 : FormatterUtil.SanitizeMoney(r.CostUsd);
+                    double baseUsd = unpriced ? 0 : Math.Max(costUsd, FormatterUtil.SanitizeMoney(r.BaselineUsd));
                     double savedUsd = Math.Max(0.0, baseUsd - costUsd);
 
                     if ((fi + cr + cw + outTok) <= 0L && costUsd <= 0.0 && turns <= 0)
@@ -194,6 +197,7 @@ namespace TokLens
                     totCw += cw;
                     totOut += outTok;
                     totTurns += turns;
+                    if (unpriced) unpricedTurns += turns;
                     totCostUsd += costUsd;
                     totBaselineUsd += baseUsd;
                     totSavedUsd += savedUsd;
@@ -235,6 +239,7 @@ namespace TokLens
                     }
                     string toolName = string.IsNullOrWhiteSpace(r.Tool) ? "未知工具" : r.Tool.Trim();
                     string modelName = string.IsNullOrWhiteSpace(r.Model) ? "unknown" : r.Model.Trim();
+                    distinctModels.Add(modelName);
                     mRow.Tools.Add(toolName);
                     mRow.Turns += turns;
                     mRow.FreshInput += fi;
@@ -263,17 +268,18 @@ namespace TokLens
 
                     // 模型聚合
                     ModelAggRow mdRow;
-                    if (!modelMap.TryGetValue(modelName, out mdRow))
+                    string modelKey = modelName + "||" + UsageServiceTier.DimensionKey(r);
+                    if (!modelMap.TryGetValue(modelKey, out mdRow))
                     {
                         mdRow = new ModelAggRow();
+                        r.CopyMetadataTo(mdRow);
                         mdRow.Model = modelName;
-                        mdRow.RateLabel = string.IsNullOrWhiteSpace(r.RateLabel) ? "标准档位" : r.RateLabel.Trim();
-                        modelMap[modelName] = mdRow;
+                        mdRow.RateLabel = string.IsNullOrWhiteSpace(r.RateLabel) ? "价格未记录" : r.RateLabel.Trim();
+                        modelMap[modelKey] = mdRow;
                     }
-                    else if (string.Equals(mdRow.RateLabel, "标准档位", StringComparison.Ordinal) &&
-                             !string.IsNullOrWhiteSpace(r.RateLabel))
+                    else if (mdRow.RateLabel != (string.IsNullOrWhiteSpace(r.RateLabel) ? "价格未记录" : r.RateLabel.Trim()))
                     {
-                        mdRow.RateLabel = r.RateLabel.Trim();
+                        mdRow.RateLabel = "多种费率 · 见明细";
                     }
                     double prevToolCost;
                     if (!mdRow.ToolCosts.TryGetValue(toolName, out prevToolCost))
@@ -296,6 +302,7 @@ namespace TokLens
 
             int activeDayCount = Math.Max(1, activeDates.Count);
             double avgActiveDayUsd = totCostUsd / activeDayCount;
+            bool allUnpriced = unpricedTurns > 0 && unpricedTurns == totTurns;
 
             string periodDisplay;
             if (!string.IsNullOrWhiteSpace(scopeTitle))
@@ -322,10 +329,11 @@ namespace TokLens
             sb.Append("`📅 统计周期: ").Append(EscapeInlineCode(periodDisplay)).Append("` ");
             sb.Append("`⚡ 总 Token: ").Append(FormatterUtil.FormatTokens(totTokens)).Append("` ");
             sb.Append("`🎯 缓存命中率: ").Append(cacheHitPct.ToString("F1", CultureInfo.InvariantCulture)).Append("%` ");
-            sb.Append("`💰 API 等价总成本: ").Append(FormatDualMoney(totCostUsd, isCny, safeRate)).Append("` ");
-            sb.Append("`🛡️ 缓存节省: ").Append(FormatterUtil.FormatMoney(totSavedUsd, isCny, safeRate)).Append("` ");
-            sb.AppendLine("`📈 日均消耗: " + FormatterUtil.FormatMoney(avgActiveDayUsd, isCny, safeRate) + "/活跃日`");
+            sb.Append("`💰 已计价金额: ").Append(allUnpriced ? "未计价" : FormatDualMoney(totCostUsd, isCny, safeRate)).Append("` ");
+            sb.Append("`🛡️ 缓存节省: ").Append(allUnpriced ? "—" : FormatterUtil.FormatMoney(totSavedUsd, isCny, safeRate)).Append("` ");
+            sb.AppendLine("`📈 日均已计价金额: " + (allUnpriced ? "—" : FormatterUtil.FormatMoney(avgActiveDayUsd, isCny, safeRate)) + "/活跃日`");
             sb.AppendLine();
+            if (unpricedTurns > 0) { sb.AppendLine("> 有 " + unpricedTurns.ToString(CultureInfo.InvariantCulture) + " 次请求未计价；以下金额仅汇总已有报价或日志记录金额，不能视为完整账单。"); sb.AppendLine(); }
 
             sb.AppendLine("> **生成时间**：`" + localNow.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture) + "` ｜ " +
                           "**参考汇率**：`1 USD = " + safeRate.ToString("F4", CultureInfo.InvariantCulture) + " CNY` ｜ " +
@@ -344,7 +352,7 @@ namespace TokLens
                 totTokens,
                 machineMap.Count,
                 toolMap.Count,
-                modelMap.Count));
+                distinctModels.Count));
             sb.AppendLine(string.Format(
                 CultureInfo.InvariantCulture,
                 "| **输入 / 输出 / 缓存明细** | **命中率 {0:F1}%** | 新增输入 `{1}` · 缓存读取 `{2}` · 缓存写入 `{3}` · 输出 `{4}` |",
@@ -356,21 +364,21 @@ namespace TokLens
             sb.AppendLine(string.Format(
                 CultureInfo.InvariantCulture,
                 "| **API 等价总成本** | **{0}** | 折合副币种 `{1}`（无缓存基准价 `{2}`） |",
-                FormatterUtil.FormatMoney(totCostUsd, isCny, safeRate),
-                FormatterUtil.FormatMoney(totCostUsd, !isCny, safeRate),
-                FormatterUtil.FormatMoney(totBaselineUsd, isCny, safeRate)));
+                allUnpriced ? "—" : FormatterUtil.FormatMoney(totCostUsd, isCny, safeRate),
+                allUnpriced ? "—" : FormatterUtil.FormatMoney(totCostUsd, !isCny, safeRate),
+                allUnpriced ? "—" : FormatterUtil.FormatMoney(totBaselineUsd, isCny, safeRate)));
             sb.AppendLine(string.Format(
                 CultureInfo.InvariantCulture,
                 "| **Prompt 缓存节省金额** | **{0}** | 相比全量输入单价立省 **{1:F1}%**（折合 `{2}`） |",
-                FormatterUtil.FormatMoney(totSavedUsd, isCny, safeRate),
+                allUnpriced ? "—" : FormatterUtil.FormatMoney(totSavedUsd, isCny, safeRate),
                 savedPct,
-                FormatterUtil.FormatMoney(totSavedUsd, !isCny, safeRate)));
+                allUnpriced ? "—" : FormatterUtil.FormatMoney(totSavedUsd, !isCny, safeRate)));
             sb.AppendLine(string.Format(
                 CultureInfo.InvariantCulture,
                 "| **日均消耗水平** | **{0} / 天** | 按 `{1}` 个活跃日折算（单次调用均价 `{2}`） |",
-                FormatterUtil.FormatMoney(avgActiveDayUsd, isCny, safeRate),
+                allUnpriced ? "—" : FormatterUtil.FormatMoney(avgActiveDayUsd, isCny, safeRate),
                 activeDates.Count > 0 ? activeDates.Count : 1,
-                FormatterUtil.FormatMoney(totTurns > 0 ? (totCostUsd / totTurns) : 0.0, isCny, safeRate)));
+                allUnpriced ? "—" : FormatterUtil.FormatMoney(totTurns > unpricedTurns ? (totCostUsd / (totTurns - unpricedTurns)) : 0.0, isCny, safeRate)));
             sb.AppendLine();
 
             // 近 14 天每日成本 ASCII / Unicode 迷你柱状趋势图
@@ -385,6 +393,7 @@ namespace TokLens
 
             // Top 10 模型精算表
             AppendTopModelsSection(sb, modelMap, totCostUsd, isCny, safeRate);
+            sb.Append(UsagePresentation.Markdown(records, isCny, safeRate));
 
             sb.AppendLine("---");
             sb.AppendLine("*本报告由 **" + AppConstants.ProductTitle + "** 本地离线精算引擎自动生成，原始对话内容零上传。*");
@@ -452,7 +461,7 @@ namespace TokLens
             });
 
             StringBuilder sb = new StringBuilder(sorted.Count * 128 + 256);
-            sb.Append("日期,设备节点,AI工具,模型名称,调用次数,输入Token,输出Token,缓存写入,缓存读取,总Token,API折算美元(USD),折算人民币(CNY),计价档位说明\r\n");
+            sb.Append("日期,设备节点,AI工具,模型名称,调用次数,输入Token,输出Token,缓存写入,缓存读取,总Token,记录或估值美元(USD),折算人民币(CNY),计价说明,服务商,请求档位,实际档位,档位证据,金额来源,价格版本,同量Standard估值USD,档位额外估值USD\r\n");
 
             for (int i = 0; i < sorted.Count; i++)
             {
@@ -473,7 +482,7 @@ namespace TokLens
                 double costCny = costUsd * safeRate;
                 double baseUsd = Math.Max(costUsd, FormatterUtil.SanitizeMoney(r.BaselineUsd));
 
-                string tierDesc = BuildPricingTierNote(r.RateLabel, turns, fi + cr + cw, costUsd, baseUsd);
+                string tierDesc = UsagePresentation.TierLabel(r) + " · " + UsagePresentation.CostLabel(r) + " · " + (string.IsNullOrWhiteSpace(r.RateLabel) ? "价格未记录" : r.RateLabel);
 
                 sb.Append(EscapeCsvField(dateText, true)).Append(',')
                   .Append(EscapeCsvField(nodeName, true)).Append(',')
@@ -485,9 +494,17 @@ namespace TokLens
                   .Append(cw.ToString(CultureInfo.InvariantCulture)).Append(',')
                   .Append(cr.ToString(CultureInfo.InvariantCulture)).Append(',')
                   .Append(totalTok.ToString(CultureInfo.InvariantCulture)).Append(',')
-                  .Append(costUsd.ToString("F6", CultureInfo.InvariantCulture)).Append(',')
-                  .Append(costCny.ToString("F4", CultureInfo.InvariantCulture)).Append(',')
+                  .Append(UsagePresentation.IsUnpriced(r) ? "" : costUsd.ToString("F6", CultureInfo.InvariantCulture)).Append(',')
+                  .Append(UsagePresentation.IsUnpriced(r) ? "" : costCny.ToString("F4", CultureInfo.InvariantCulture)).Append(',')
                   .Append(EscapeCsvField(tierDesc, true))
+                  .Append(',').Append(EscapeCsvField(r.Provider, true))
+                  .Append(',').Append(EscapeCsvField(r.RequestedServiceTier, true))
+                  .Append(',').Append(EscapeCsvField(r.ActualServiceTier, true))
+                  .Append(',').Append(EscapeCsvField(r.TierEvidence, true))
+                  .Append(',').Append(EscapeCsvField(r.CostBasis, true))
+                  .Append(',').Append(EscapeCsvField(r.PricingVersion, true))
+                  .Append(',').Append(r.StandardEquivalentUsd.HasValue ? r.StandardEquivalentUsd.Value.ToString("F6", CultureInfo.InvariantCulture) : "")
+                  .Append(',').Append(r.ServiceTierPremiumUsd.HasValue ? r.ServiceTierPremiumUsd.Value.ToString("F6", CultureInfo.InvariantCulture) : "")
                   .Append("\r\n");
             }
 
@@ -830,14 +847,14 @@ namespace TokLens
                     CultureInfo.InvariantCulture,
                     "| {0} | `{1}` | {2} | {3:N0} | {4} | {5:F1}% | `{6}` | **{7}** | {8} | {9:F1}% |",
                     i + 1,
-                    EscapeInlineCode(m.Model),
+                    EscapeInlineCode(m.Model + " · " + UsagePresentation.TierLabel(m) + " · " + UsagePresentation.CostLabel(m)),
                     EscapeMdCell(m.PrimaryTool),
                     m.Turns,
                     FormatterUtil.FormatTokens(m.TotalTokens),
                     m.CacheHitPercent,
                     EscapeInlineCode(m.RateLabel),
-                    FormatterUtil.FormatMoney(m.CostUsd, isCny, safeRate),
-                    FormatterUtil.FormatMoney(m.SavedUsd, isCny, safeRate),
+                    UsagePresentation.IsUnpriced(m) ? "—" : FormatterUtil.FormatMoney(m.CostUsd, isCny, safeRate),
+                    UsagePresentation.IsUnpriced(m) ? "—" : FormatterUtil.FormatMoney(m.SavedUsd, isCny, safeRate),
                     share));
             }
 

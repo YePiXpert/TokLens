@@ -40,11 +40,14 @@ namespace TokLens
                     r.CacheRead,
                     r.CacheWrite,
                     r.Output,
-                    Math.Round(r.CostUsd, 6),
-                    Math.Round(r.BaselineUsd, 6),
+                    UsagePresentation.ExportMoney(r.CostUsd, r),
+                    UsagePresentation.ExportMoney(r.BaselineUsd, r),
                     r.RateLabel ?? "",
                     string.IsNullOrEmpty(r.MachineName) ? "本机" : r.MachineName,
-                    string.IsNullOrEmpty(r.MachineType) ? "windows" : r.MachineType
+                    string.IsNullOrEmpty(r.MachineType) ? "windows" : r.MachineType,
+                    UsagePresentation.TierLabel(r), r.Provider, r.RequestedServiceTier,
+                    r.ActualServiceTier, r.TierEvidence, r.CostBasis, r.PricingVersion,
+                    r.StandardEquivalentUsd, r.ServiceTierPremiumUsd
                 });
             }
 
@@ -740,8 +743,10 @@ function render() {
 
   document.getElementById('kScopeBadge').textContent = state.node ? state.node : `全部 ${nodePillArr.length} 台设备`;
   document.getElementById('kToolsBadge').textContent = `${tset.size} 个工具`;
-  document.getElementById('kCost').textContent = fmtMoney(cost);
-  document.getElementById('kCostSub').textContent = `折合 ${fmtMoney(cost, state.cur === 'CNY' ? 'USD' : 'CNY')} · ${turns.toLocaleString()} 次调用`;
+  const unpricedTurns = activeRows.reduce((sum, r) => sum + (r[18] === 'unpriced' ? r[3] : 0), 0);
+  const allUnpriced = unpricedTurns > 0 && unpricedTurns === turns;
+  document.getElementById('kCost').textContent = allUnpriced ? '—' : fmtMoney(cost);
+  document.getElementById('kCostSub').textContent = allUnpriced ? `${turns.toLocaleString()} 次请求未计价` : `${unpricedTurns > 0 ? '已计价部分 · ' + unpricedTurns.toLocaleString() + ' 次未计价 · ' : ''}折合 ${fmtMoney(cost, state.cur === 'CNY' ? 'USD' : 'CNY')} · ${turns.toLocaleString()} 次调用`;
 
   document.getElementById('kTok').textContent = fmtTok(tot);
   document.getElementById('kTokSub').textContent = `输入 ${fmtTok(fi)} · 缓存读 ${fmtTok(cr)} · 输出 ${fmtTok(out)}`;
@@ -760,9 +765,9 @@ function render() {
   document.getElementById('kHitBadge').className = 'kpi-badge' + (hit >= 60 ? ' good' : '');
   document.getElementById('kHitSub').textContent = `缓存读 ${fmtTok(cr)} · 缓存写 ${fmtTok(cw)}`;
 
-  document.getElementById('kSave').textContent = fmtMoney(saved);
-  document.getElementById('kSaveBadge').textContent = `省 ${savePct.toFixed(1)}%`;
-  document.getElementById('kSaveSub').textContent = `无缓存原价 ${fmtMoney(base)}`;
+  document.getElementById('kSave').textContent = allUnpriced ? '—' : fmtMoney(saved);
+  document.getElementById('kSaveBadge').textContent = allUnpriced ? '未计价' : `省 ${savePct.toFixed(1)}%`;
+  document.getElementById('kSaveSub').textContent = allUnpriced ? '无可用参考报价' : `已计价部分无缓存参考 ${fmtMoney(base)}`;
 
   // 聚合三张数据表（均严格联动工具筛选与搜索词！）
   // 1) 设备单列对比数据（当选中 state.tool 或输入搜索词时同步精确过滤）
@@ -800,12 +805,13 @@ function render() {
   const mmap = new Map();
   let maxModelCost = 0;
   for (const r of activeRows) {
-    const k = r[1] + '||' + r[2];
+    const k = JSON.stringify([r[1], r[2], r[13], r[18], r[19], r[14], r[15], r[16]]);
     let m = mmap.get(k);
     if (!m) {
-      m = { tool: r[1], model: r[2], turns: 0, fi: 0, cr: 0, cw: 0, out: 0, tok: 0, cost: 0, rate: r[10] || '' };
+      m = { tool: r[1], model: r[2], tier: r[13] || '档位未知', basis: r[18] || 'estimated_unknown_tier', version: r[19] || '', turns: 0, fi: 0, cr: 0, cw: 0, out: 0, tok: 0, cost: 0, rate: r[10] || '' };
       mmap.set(k, m);
     }
+    else if (m.rate !== (r[10] || '')) m.rate = '多种费率 · 见明细';
     m.turns += r[3]; m.fi += r[4]; m.cr += r[5]; m.cw += r[6]; m.out += r[7];
     m.tok += (r[4] + r[5] + r[6] + r[7]); m.cost += r[8];
   }
@@ -1010,7 +1016,7 @@ function renderTable(nodeArr, maxNodeCost, modelArr, maxModelCost, dailyArr, max
     modelArr.sort((a, b) => compareVals(a, b, col, state.sortDir));
 
     html += `<thead><tr>` +
-      thHtml('模型名称', 'model', false) +
+      thHtml('模型 / 服务档位', 'model', false) +
       thHtml('所属工具', 'tool', false) +
       thHtml('调用数', 'turns', true) +
       thHtml('纯新增输入', 'fi', true) +
@@ -1030,7 +1036,7 @@ function renderTable(nodeArr, maxNodeCost, modelArr, maxModelCost, dailyArr, max
         const colHex = providerColor(m.tool);
         const ratio = maxModelCost > 0 ? (m.cost / maxModelCost) : 0;
         html += `<tr>` +
-          `<td class=""pri mono"">${esc(m.model)}</td>` +
+          `<td class=""pri mono"">${esc(m.model)}<br><small>${esc(m.tier)} · ${esc(m.basis === 'reported' ? '日志金额' : m.basis === 'unpriced' ? '未计价' : m.basis === 'estimated_requested_tier' ? '按请求档位估值 · 实际未核实' : m.basis === 'estimated_unknown_tier' ? '标准参考估值 · 档位未知' : m.basis === 'legacy_unknown' ? '历史金额 · 来源未记录' : 'API 估值')}</small><br><small>${esc(m.version)}</small></td>` +
           `<td><span class=""badge""><span class=""ndot"" style=""background:${colHex}""></span>${esc(m.tool)}</span></td>` +
           `<td class=""r mono"">${m.turns.toLocaleString()}</td>` +
           `<td class=""r mono"">${esc(fmtTok(m.fi))}</td>` +
@@ -1039,7 +1045,7 @@ function renderTable(nodeArr, maxNodeCost, modelArr, maxModelCost, dailyArr, max
           `<td class=""r mono"">${esc(fmtTok(m.out))}</td>` +
           `<td class=""r mono pri"">${esc(fmtTok(m.tok))}</td>` +
           `<td class=""r mono"">${esc(m.rate)}</td>` +
-          `<td class=""r mono pri"">${esc(fmtMoney(m.cost))}</td>` +
+          `<td class=""r mono pri"">${esc(m.basis === 'unpriced' ? '—' : fmtMoney(m.cost))}</td>` +
           `<td class=""r"">${shareCellHtml(m.share, ratio)}</td>` +
         `</tr>`;
       }
@@ -1242,7 +1248,7 @@ function csvCell(val) {
 
 // 导出当前筛选条件（时间 + 设备 + 工具 + 搜索词）下的精准账单明细 CSV
 document.getElementById('csvBtn').onclick = () => {
-  let csv = '\uFEFF日期,所属设备,系统类型,AI工具,模型,调用数,新增输入,缓存读取,缓存写入,输出Token,总Token,等效美元(USD),等效人民币(CNY)\r\n';
+  let csv = '\uFEFF日期,所属设备,系统类型,AI工具,模型,调用数,新增输入,缓存读取,缓存写入,输出Token,总Token,记录或估值美元(USD),折算人民币(CNY),服务商,请求档位,实际档位,档位证据,金额来源,价格版本,同量Standard估值USD,档位额外估值USD\r\n';
   for (const r of lastExportableRows) {
     const totTok = (r[4] || 0) + (r[5] || 0) + (r[6] || 0) + (r[7] || 0);
     const usd = Number(r[8]) || 0;
@@ -1258,8 +1264,9 @@ document.getElementById('csvBtn').onclick = () => {
       r[6] || 0,
       r[7] || 0,
       totTok,
-      usd.toFixed(6),
-      (usd * state.rate).toFixed(4)
+      r[18] === 'unpriced' ? '' : usd.toFixed(6),
+      r[18] === 'unpriced' ? '' : (usd * state.rate).toFixed(4),
+      csvCell(r[14]), csvCell(r[15]), csvCell(r[16]), csvCell(r[17]), csvCell(r[18]), csvCell(r[19]), csvCell(r[20]), csvCell(r[21])
     ].join(',') + '\r\n';
   }
   const suffix = (state.range === 'all' ? 'All' : (state.range + 'd')) +

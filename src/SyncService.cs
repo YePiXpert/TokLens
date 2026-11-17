@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -1196,6 +1196,7 @@ namespace TokLens
             copy.CostUsd = src.CostUsd;
             copy.BaselineUsd = src.BaselineUsd;
             copy.RateLabel = src.RateLabel;
+            src.CopyMetadataTo(copy);
             return copy;
         }
 
@@ -1267,7 +1268,7 @@ namespace TokLens
                 string dt = src.Date ?? "";
                 string tool = src.Tool ?? "";
                 string model = src.Model ?? "";
-                string key = dt + "||" + tool + "||" + model;
+                string key = UsageServiceTier.BucketKey(src);
                 RecordBucket existing;
                 if (map.TryGetValue(key, out existing))
                 {
@@ -1278,6 +1279,9 @@ namespace TokLens
                     existing.Output += src.Output;
                     existing.CostUsd += src.CostUsd;
                     existing.BaselineUsd += src.BaselineUsd;
+                    existing.StandardEquivalentUsd=existing.StandardEquivalentUsd.HasValue&&src.StandardEquivalentUsd.HasValue?existing.StandardEquivalentUsd+src.StandardEquivalentUsd:null;
+                    existing.ServiceTierPremiumUsd=existing.ServiceTierPremiumUsd.HasValue&&src.ServiceTierPremiumUsd.HasValue?existing.ServiceTierPremiumUsd+src.ServiceTierPremiumUsd:null;
+                    if(existing.TierEvidence!=src.TierEvidence)existing.TierEvidence="mixed";
                     if (string.IsNullOrWhiteSpace(existing.RateLabel) && !string.IsNullOrWhiteSpace(src.RateLabel))
                         existing.RateLabel = src.RateLabel;
                 }
@@ -1298,6 +1302,7 @@ namespace TokLens
                     copy.CostUsd = src.CostUsd;
                     copy.BaselineUsd = src.BaselineUsd;
                     copy.RateLabel = src.RateLabel ?? "";
+                    src.CopyMetadataTo(copy);
                     map[key] = copy;
                 }
             }
@@ -1358,9 +1363,19 @@ namespace TokLens
                 if (primary != null && primary.ScannerRev >= UsageAccounting.ReconciledRevision) primary.ReconciledPartitions.TryGetValue(partition, out pTime);
                 if (historical != null && historical.ScannerRev >= UsageAccounting.ReconciledRevision) historical.ReconciledPartitions.TryGetValue(partition, out hTime);
                 if (pTime <= 0 && hTime <= 0) continue;
-                bool preferPrimary = pTime >= hTime;
+                bool preferPrimary = pTime>0&&hTime>0&&primary.ScannerRev!=historical.ScannerRev
+                    ? primary.ScannerRev>historical.ScannerRev : pTime >= hTime;
                 owners[partition] = preferPrimary;
                 res.ReconciledPartitions[partition] = Math.Max(pTime, hTime);
+            }
+            // Without a complete partition proof, choose one whole model group. Combining
+            // old and new price/tier dimensions would count the same historical requests twice.
+            Dictionary<string,List<RecordBucket>> pg=UsageServiceTier.Groups(pMap.Values),hg=UsageServiceTier.Groups(hMap.Values);
+            foreach(KeyValuePair<string,List<RecordBucket>> group in pg)
+            {
+                List<RecordBucket> oldRows;if(!hg.TryGetValue(group.Key,out oldRows)||owners.ContainsKey(UsageAccounting.Partition(group.Value[0].Date,group.Value[0].Tool)))continue;
+                bool current=UsageServiceTier.PreferCurrentGroup(group.Value,oldRows);
+                foreach(RecordBucket row in current?oldRows:group.Value)(current?hMap:pMap).Remove(UsageServiceTier.BucketKey(row));
             }
             HashSet<string> keys = new HashSet<string>(pMap.Keys, StringComparer.Ordinal);
             keys.UnionWith(hMap.Keys);
@@ -1481,7 +1496,7 @@ namespace TokLens
                     r.Output,
                     Math.Round(r.CostUsd, 6),
                     Math.Round(r.BaselineUsd, 6),
-                    r.RateLabel ?? ""
+                    r.RateLabel ?? "", r.RequestedServiceTier, r.ActualServiceTier, r.TierEvidence, r.CostBasis, r.PricingVersion, r.Provider, r.StandardEquivalentUsd, r.ServiceTierPremiumUsd
                 });
             }
 
@@ -1566,6 +1581,7 @@ namespace TokLens
                             r.CostUsd = Convert.ToDouble(row[8], CultureInfo.InvariantCulture);
                             r.BaselineUsd = Convert.ToDouble(row[9], CultureInfo.InvariantCulture);
                             r.RateLabel = row.Count > 10 ? Convert.ToString(row[10], CultureInfo.InvariantCulture) : "";
+                            UsageServiceTier.ReadCloud(row,r);
                             snap.Records.Add(r);
                         }
                     }

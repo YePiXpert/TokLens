@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
@@ -557,8 +557,8 @@ namespace TokLens
                 true));
 
             rightStack.Children.Add(BuildShortcutRow(
-                "显示 / 隐藏桌面悬浮球",
-                "外圈是上下文占用，悬停看今日概况与最近请求",
+                "显示 / 隐藏桌面状态胶囊",
+                "单击展开详情与会话选择，拖动调整位置，支持锁定位置和透明度",
                 new string[][] { new string[] { "Ctrl", "M" } },
                 false));
 

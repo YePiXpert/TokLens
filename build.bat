@@ -1,6 +1,9 @@
 @echo off
 setlocal
-echo [TokLens v2.3.0] Building portable single-file TokLens.exe (with embedded Linux VPS agent)...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0packaging\sync_version.ps1"
+if errorlevel 1 exit /b 1
+set /p TOKLENS_VERSION=<"%~dp0version.txt"
+echo [TokLens v%TOKLENS_VERSION%] Building portable TokLens.exe...
 
 set "FWDIR=%SystemRoot%\Microsoft.NET\Framework64\v4.0.30319"
 if not exist "%FWDIR%\csc.exe" (
@@ -21,6 +24,7 @@ if not exist "%CSC%" (
   /win32icon:"%SRC%\TokLens.ico" ^
   /win32manifest:"%SRC%\app.manifest" ^
   /resource:"%VPS%\toklens_agent.py",TokLens.toklens_agent.py ^
+  /resource:"%~dp0pricing\service_tier_prices.json",TokLens.service_tier_prices.json ^
   /r:"%WPF%\PresentationFramework.dll" ^
   /r:"%WPF%\PresentationCore.dll" ^
   /r:"%WPF%\WindowsBase.dll" ^

@@ -25,6 +25,7 @@ namespace TokLens
         public string ForkedFrom = "";
         public long ForkedAtMs;
         public readonly List<UsageEvent> Events = new List<UsageEvent>();
+        private readonly UsageRecordMetadata _requestContext = new UsageRecordMetadata();
 
         public CodexUsageParser(string tool, string tid, DateTime fallback, string meta, List<UsageEvent> previousEvents)
         {
@@ -42,6 +43,7 @@ namespace TokLens
                 _started = Number(state, "started");
                 _pending = Text(state, "pending") ?? "";
                 _pendingKey = Text(state, "pending_key") ?? "";
+                UsageServiceTier.DeserializeInto(Text(state,"usage_metadata"),_requestContext);
                 object value;
                 if (state != null && state.TryGetValue("previous", out value) && value is IList)
                 {
@@ -87,7 +89,17 @@ namespace TokLens
             if (key.Length > 0 && _indexes.TryGetValue(key, out index))
             {
                 if (ev.TimestampMs < Events[index].TimestampMs) return;
-                if (ev.Model == "unknown" && Events[index].Model != "unknown") ev.Model = Events[index].Model;
+                UsageEvent previous=Events[index];
+                if (ev.Model == "unknown" && previous.Model != "unknown") ev.Model = previous.Model;
+                // A replay of the same response must not inherit settings from a later turn.
+                if(UsageServiceTier.Normalize(previous.RequestedServiceTier)!="unknown")ev.RequestedServiceTier=previous.RequestedServiceTier;
+                if(UsageServiceTier.Normalize(ev.ActualServiceTier)=="unknown"&&UsageServiceTier.Normalize(previous.ActualServiceTier)!="unknown")
+                {ev.ActualServiceTier=previous.ActualServiceTier;ev.TierEvidence=previous.TierEvidence;}
+                if(ev.Workspace.Length==0)ev.Workspace=previous.Workspace;
+                if(ev.ActualContextLimit<=0){ev.ActualContextLimit=previous.ActualContextLimit;ev.ContextLimitEvidence=previous.ContextLimitEvidence;}
+                if(ev.LoggedCostUsd<=0)ev.LoggedCostUsd=previous.LoggedCostUsd;
+                if(!UsageTiming.IsMeasured(ev.TimingSource)&&UsageTiming.IsMeasured(previous.TimingSource))
+                {ev.DurationMs=previous.DurationMs;ev.TimingSource=previous.TimingSource;}
                 Events[index] = ev;
             }
             else { if (key.Length > 0) _indexes[key] = Events.Count; Events.Add(ev); }
@@ -97,6 +109,7 @@ namespace TokLens
         {
             _previous = null; _pending = ""; _pendingKey = ""; _started = 0;
             Model = "unknown"; _snapshots.Clear(); _snapshotOrder.Clear();
+            new UsageRecordMetadata().CopyMetadataTo(_requestContext);
         }
 
         public void OnLine(string line, int unused)
@@ -118,6 +131,9 @@ namespace TokLens
             {
                 string model = Text(p, "model");
                 if (!string.IsNullOrWhiteSpace(model)) Model = PricingEngine.NormalizeModelId(model, "unknown");
+                UsageServiceTier.ReadEvidence(_requestContext,p,type=="session_meta"?"session":"request");
+                // Configuration describes intent. Actual response tier is never inherited by a later request.
+                _requestContext.ActualServiceTier="unknown";
             }
             if (type == "turn_context" || pType == "user_message" || pType == "task_started" ||
                 (type == "response_item" && (pType ?? "").EndsWith("_call_output", StringComparison.Ordinal))) _started = ms;
@@ -128,6 +144,8 @@ namespace TokLens
                 if (usage == null) return;
                 string response = Text(p, "response_id");
                 _pendingKey = Emit(usage, ts, ms, string.IsNullOrEmpty(response) ? null : "codex-response:" + response);
+                int metadataIndex;
+                if(_indexes.TryGetValue(_pendingKey,out metadataIndex))UsageServiceTier.ReadEvidence(Events[metadataIndex],p,"request");
                 int timingIndex;
                 long elapsed = Number(p, "duration_ms");
                 if (elapsed == 0) elapsed = Number(p, "durationMs");
@@ -160,11 +178,16 @@ namespace TokLens
             bool recorded = _pending.Length > 0 && (_pending == Signature(usageNow) || (last != null && last[0] + last[1] == 0));
             int pendingIndex;
             if (recorded && !string.IsNullOrEmpty(explicitModel) && _indexes.TryGetValue(_pendingKey, out pendingIndex)) Events[pendingIndex].Model = Model;
+            if(recorded&&_indexes.TryGetValue(_pendingKey,out pendingIndex))UsageServiceTier.ReadEvidence(Events[pendingIndex],info,"request");
             _pending = "";
             _pendingKey = "";
             if (!duplicate && !recorded && usageNow != null)
             {
-                if (total != null || Remember((ts ?? "") + "|" + Signature(usageNow))) Emit(usageNow, ts, ms, null);
+                if (total != null || Remember((ts ?? "") + "|" + Signature(usageNow)))
+                {
+                    string key=Emit(usageNow, ts, ms, null);int index;
+                    if(_indexes.TryGetValue(key,out index))UsageServiceTier.ReadEvidence(Events[index],info,"request");
+                }
             }
         }
 
@@ -176,6 +199,8 @@ namespace TokLens
             long duration = ms - _started;
             UsageEvent ev = new UsageEvent(_tool, Model, TokenScanner.UsageLocalDate(ts, _fallback), usage[0] - read - write, usage[1], read, write, 0, 1, requestKey, ms,
                 _started > 0 && duration >= 100 && duration <= 600000 ? (int)duration : 0);
+            _requestContext.CopyMetadataTo(ev);
+            if(ev.Provider=="unknown")ev.Provider=UsageServiceTier.InferProvider(Model);
             ev.SessionId = ThreadId;
             Put(ev);
             if (ms > 0) _started = ms;
@@ -186,6 +211,7 @@ namespace TokLens
         {
             Dictionary<string, object> state = new Dictionary<string, object>();
             state["mdl"] = Model; state["tid"] = ThreadId; state["parent"] = ForkedFrom; state["fork_ms"] = ForkedAtMs;
+            state["usage_metadata"]=UsageServiceTier.Serialize(_requestContext);
             state["previous"] = _previous; state["pending"] = _pending; state["pending_key"] = _pendingKey; state["started"] = _started; state["seen"] = _snapshotOrder.ToArray();
             return _json.Serialize(state);
         }

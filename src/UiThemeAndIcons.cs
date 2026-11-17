@@ -1057,6 +1057,35 @@ namespace TokLens
 
     internal static class ModernControlsFactory
     {
+        public static ComboBox CreateComboBox()
+        {
+            const string markup = @"<Style xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation' xmlns:x='http://schemas.microsoft.com/winfx/2006/xaml' TargetType='{x:Type ComboBox}'>
+              <Setter Property='Foreground' Value='{DynamicResource FgPrimary}'/><Setter Property='Background' Value='{DynamicResource BgInput}'/>
+              <Setter Property='BorderBrush' Value='{DynamicResource BorderStrong}'/>
+              <Setter Property='ItemContainerStyle'><Setter.Value><Style TargetType='{x:Type ComboBoxItem}'>
+                <Setter Property='Padding' Value='10,7'/><Setter Property='Foreground' Value='{DynamicResource FgPrimary}'/>
+                <Setter Property='Template'><Setter.Value><ControlTemplate TargetType='{x:Type ComboBoxItem}'>
+                  <Border x:Name='Item' Padding='{TemplateBinding Padding}' Background='Transparent'><ContentPresenter/></Border>
+                  <ControlTemplate.Triggers><Trigger Property='IsHighlighted' Value='True'><Setter TargetName='Item' Property='Background' Value='{DynamicResource BgSelected}'/></Trigger></ControlTemplate.Triggers>
+                </ControlTemplate></Setter.Value></Setter></Style></Setter.Value></Setter>
+              <Setter Property='Template'><Setter.Value><ControlTemplate TargetType='{x:Type ComboBox}'><Grid>
+                <ToggleButton Focusable='False' IsChecked='{Binding IsDropDownOpen,RelativeSource={RelativeSource TemplatedParent},Mode=TwoWay}' Background='{TemplateBinding Background}' BorderBrush='{TemplateBinding BorderBrush}' Foreground='{TemplateBinding Foreground}' Content='{TemplateBinding SelectionBoxItem}' ContentTemplate='{TemplateBinding SelectionBoxItemTemplate}'>
+                  <ToggleButton.Template><ControlTemplate TargetType='{x:Type ToggleButton}'>
+                    <Border CornerRadius='6' BorderThickness='1' BorderBrush='{TemplateBinding BorderBrush}' Background='{TemplateBinding Background}' Padding='10,4'>
+                      <DockPanel><Path DockPanel.Dock='Right' Data='M 0,0 L 4,4 L 8,0' Stroke='{DynamicResource FgMuted}' StrokeThickness='1.5' VerticalAlignment='Center' Margin='12,1,0,0'/><ContentPresenter VerticalAlignment='Center'/></DockPanel>
+                    </Border>
+                  </ControlTemplate></ToggleButton.Template>
+                </ToggleButton>
+                <Popup x:Name='PART_Popup' Placement='Bottom' IsOpen='{TemplateBinding IsDropDownOpen}' AllowsTransparency='True' Focusable='False'>
+                  <Border Background='{DynamicResource BgCard}' BorderBrush='{DynamicResource BorderStrong}' BorderThickness='1' CornerRadius='6' MinWidth='{TemplateBinding ActualWidth}'>
+                    <ScrollViewer MaxHeight='260' CanContentScroll='True'><ItemsPresenter KeyboardNavigation.DirectionalNavigation='Contained'/></ScrollViewer>
+                  </Border>
+                </Popup>
+              </Grid></ControlTemplate></Setter.Value></Setter>
+            </Style>";
+            return new ComboBox { Style = (Style)System.Windows.Markup.XamlReader.Parse(markup), Height = 32, FontFamily = DesignSystem.FontUi, FontSize = DesignSystem.TextBody };
+        }
+
         public static Button CreateButton(string text, string variant)
         {
             bool isPrimary = string.Equals(variant, "primary", StringComparison.OrdinalIgnoreCase);
