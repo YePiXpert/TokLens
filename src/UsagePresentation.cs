@@ -49,6 +49,15 @@ namespace TokLens
             string basis = record == null ? "" : record.CostBasis;
             if (basis == "reported") return "日志记录金额";
             if (basis == "unpriced") return "未计价";
+            if (basis == "estimated_official_reference" || basis == "estimated_current_reference")
+            {
+                string tier = UsageServiceTier.Effective(record);
+                string label = TierName(tier == "unknown" ? "standard" : tier) +
+                    (basis == "estimated_official_reference" ? " 官方参考估值 · 渠道未报价" : " 现行参考估值 · 非历史报价");
+                if (tier == "unknown") label += " · 档位未知";
+                else if (UsageServiceTier.Normalize(record.ActualServiceTier) == "unknown") label += " · 实际档位未核实";
+                return label;
+            }
             if (basis == "estimated_requested_tier") return "按请求档位估值 · 实际档位未核实";
             if (basis == "estimated_unknown_tier") return "标准档位参考估值 · 档位未知";
             if (basis == "legacy_unknown" || string.IsNullOrEmpty(basis)) return "历史金额 · 来源未记录";

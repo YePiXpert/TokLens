@@ -34,10 +34,10 @@ try:
 except ImportError:
     fcntl = None
 
-AGENT_VERSION = "2.4.1"
+AGENT_VERSION = "2.4.2"
 BUNDLED_TIER_PRICES = json.loads(r'''[{"provider":"openai","model":"gpt-6.1-sol","tier":"standard","effective_from":"2026-11-17","input_per_m":2,"output_per_m":10,"cache_read_per_m":0.1,"cache_write_per_m":2.5,"cache_write_long_per_m":5,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":4,"long_output_per_m":15,"long_cache_read_per_m":0.2,"long_cache_write_per_m":5,"long_cache_write_long_per_m":10},{"provider":"openai","model":"gpt-6.1-sol","tier":"fast","effective_from":"2026-11-17","input_per_m":4,"output_per_m":20,"cache_read_per_m":0.2,"cache_write_per_m":5,"cache_write_long_per_m":10,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":8,"long_output_per_m":30,"long_cache_read_per_m":0.4,"long_cache_write_per_m":10,"long_cache_write_long_per_m":20},{"provider":"openai","model":"gpt-6.1-sol","tier":"ultrafast","effective_from":"2026-11-17","input_per_m":12,"output_per_m":60,"cache_read_per_m":0.6,"cache_write_per_m":15,"cache_write_long_per_m":30,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":24,"long_output_per_m":90,"long_cache_read_per_m":1.2,"long_cache_write_per_m":30,"long_cache_write_long_per_m":60},{"provider":"openai","model":"gpt-6-astra","tier":"standard","effective_from":"2026-11-17","input_per_m":10,"output_per_m":50,"cache_read_per_m":1,"cache_write_per_m":12.5,"cache_write_long_per_m":25,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":20,"long_output_per_m":75,"long_cache_read_per_m":2,"long_cache_write_per_m":25,"long_cache_write_long_per_m":50},{"provider":"openai","model":"gpt-6-astra","tier":"fast","effective_from":"2026-11-17","input_per_m":20,"output_per_m":100,"cache_read_per_m":2,"cache_write_per_m":25,"cache_write_long_per_m":50,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":40,"long_output_per_m":150,"long_cache_read_per_m":4,"long_cache_write_per_m":50,"long_cache_write_long_per_m":100},{"provider":"openai","model":"gpt-6-astra","tier":"ultrafast","effective_from":"2026-11-17","input_per_m":60,"output_per_m":300,"cache_read_per_m":6,"cache_write_per_m":75,"cache_write_long_per_m":150,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":120,"long_output_per_m":450,"long_cache_read_per_m":12,"long_cache_write_per_m":150,"long_cache_write_long_per_m":300},{"provider":"openai","model":"gpt-6.1-terra","tier":"standard","effective_from":"2026-11-17","input_per_m":1,"output_per_m":5,"cache_read_per_m":0.05,"cache_write_per_m":1.25,"cache_write_long_per_m":2.5,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":2,"long_output_per_m":7.5,"long_cache_read_per_m":0.1,"long_cache_write_per_m":2.5,"long_cache_write_long_per_m":5},{"provider":"openai","model":"gpt-6.1-terra","tier":"fast","effective_from":"2026-11-17","input_per_m":2,"output_per_m":10,"cache_read_per_m":0.1,"cache_write_per_m":2.5,"cache_write_long_per_m":5,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":4,"long_output_per_m":15,"long_cache_read_per_m":0.2,"long_cache_write_per_m":5,"long_cache_write_long_per_m":10},{"provider":"openai","model":"gpt-6-sol","tier":"standard","effective_from":"2026-11-17","input_per_m":2,"output_per_m":10,"cache_read_per_m":0.2,"cache_write_per_m":2.5,"cache_write_long_per_m":5,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":4,"long_output_per_m":15,"long_cache_read_per_m":0.4,"long_cache_write_per_m":5,"long_cache_write_long_per_m":10},{"provider":"openai","model":"gpt-6-sol","tier":"fast","effective_from":"2026-11-17","input_per_m":4,"output_per_m":20,"cache_read_per_m":0.4,"cache_write_per_m":5,"cache_write_long_per_m":10,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":8,"long_output_per_m":30,"long_cache_read_per_m":0.8,"long_cache_write_per_m":10,"long_cache_write_long_per_m":20},{"provider":"openai","model":"gpt-6-luna","tier":"standard","effective_from":"2026-11-17","input_per_m":0.1,"output_per_m":0.5,"cache_read_per_m":0.01,"cache_write_per_m":0.125,"cache_write_long_per_m":0.25,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":0.2,"long_output_per_m":0.75,"long_cache_read_per_m":0.02,"long_cache_write_per_m":0.25,"long_cache_write_long_per_m":0.5},{"provider":"openai","model":"gpt-6-luna","tier":"fast","effective_from":"2026-11-17","input_per_m":0.2,"output_per_m":1,"cache_read_per_m":0.02,"cache_write_per_m":0.25,"cache_write_long_per_m":0.5,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":0.4,"long_output_per_m":1.5,"long_cache_read_per_m":0.04,"long_cache_write_per_m":0.5,"long_cache_write_long_per_m":1},{"provider":"openai","model":"gpt-5.6-sol","tier":"standard","effective_from":"2026-11-17","input_per_m":4,"output_per_m":20,"cache_read_per_m":0.4,"cache_write_per_m":5,"cache_write_long_per_m":10,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":8,"long_output_per_m":30,"long_cache_read_per_m":0.8,"long_cache_write_per_m":10,"long_cache_write_long_per_m":20,"effective_until":"2026-11-30"},{"provider":"openai","model":"gpt-5.6-sol","tier":"fast","effective_from":"2026-11-17","input_per_m":8,"output_per_m":40,"cache_read_per_m":0.8,"cache_write_per_m":10,"cache_write_long_per_m":20,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":16,"long_output_per_m":60,"long_cache_read_per_m":1.6,"long_cache_write_per_m":20,"long_cache_write_long_per_m":40,"effective_until":"2026-11-30"},{"provider":"openai","model":"gpt-5.5","tier":"standard","effective_from":"2026-11-17","input_per_m":5,"output_per_m":30,"cache_read_per_m":0.5,"cache_write_per_m":0,"cache_write_long_per_m":0,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":10,"long_output_per_m":45,"long_cache_read_per_m":1,"long_cache_write_per_m":0,"long_cache_write_long_per_m":0},{"provider":"openai","model":"gpt-5.5","tier":"fast","effective_from":"2026-11-17","input_per_m":12.5,"output_per_m":75,"cache_read_per_m":1.25,"cache_write_per_m":0,"cache_write_long_per_m":0,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","max_prompt_tokens":272000},{"provider":"openai","model":"gpt-5.4","tier":"standard","effective_from":"2026-11-17","input_per_m":2.5,"output_per_m":15,"cache_read_per_m":0.25,"cache_write_per_m":0,"cache_write_long_per_m":0,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":5,"long_output_per_m":22.5,"long_cache_read_per_m":0.5,"long_cache_write_per_m":0,"long_cache_write_long_per_m":0},{"provider":"openai","model":"gpt-5.4","tier":"fast","effective_from":"2026-11-17","input_per_m":5,"output_per_m":30,"cache_read_per_m":0.5,"cache_write_per_m":0,"cache_write_long_per_m":0,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","max_prompt_tokens":272000},{"provider":"anthropic","model":"claude-fable-5-2","tier":"standard","effective_from":"2026-11-17","input_per_m":8,"output_per_m":40,"cache_read_per_m":0.2,"cache_write_per_m":10,"cache_write_long_per_m":16,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-fable-5-2","tier":"fast","effective_from":"2026-11-17","input_per_m":16,"output_per_m":80,"cache_read_per_m":0.4,"cache_write_per_m":20,"cache_write_long_per_m":32,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-mythos-5-2","tier":"standard","effective_from":"2026-11-17","input_per_m":8,"output_per_m":40,"cache_read_per_m":0.2,"cache_write_per_m":10,"cache_write_long_per_m":16,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-mythos-5-2","tier":"fast","effective_from":"2026-11-17","input_per_m":16,"output_per_m":80,"cache_read_per_m":0.4,"cache_write_per_m":20,"cache_write_long_per_m":32,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-opus-5-5","tier":"standard","effective_from":"2026-11-17","input_per_m":4,"output_per_m":20,"cache_read_per_m":0.2,"cache_write_per_m":5,"cache_write_long_per_m":8,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-opus-5-5","tier":"fast","effective_from":"2026-11-17","input_per_m":8,"output_per_m":40,"cache_read_per_m":0.4,"cache_write_per_m":10,"cache_write_long_per_m":16,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-opus-5","tier":"standard","effective_from":"2026-11-17","input_per_m":5,"output_per_m":25,"cache_read_per_m":0.5,"cache_write_per_m":6.25,"cache_write_long_per_m":10,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-opus-5","tier":"fast","effective_from":"2026-11-17","input_per_m":10,"output_per_m":50,"cache_read_per_m":1,"cache_write_per_m":12.5,"cache_write_long_per_m":20,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-opus-4-8","tier":"standard","effective_from":"2026-11-17","input_per_m":5,"output_per_m":25,"cache_read_per_m":0.5,"cache_write_per_m":6.25,"cache_write_long_per_m":10,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-opus-4-8","tier":"fast","effective_from":"2026-11-17","input_per_m":10,"output_per_m":50,"cache_read_per_m":1,"cache_write_per_m":12.5,"cache_write_long_per_m":20,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."}]''')  # Generated from pricing/service_tier_prices.json.
 SCHEMA_VERSION = "toklens.node.v2"
-SCANNER_REV = 31
+SCANNER_REV = 32
 RECONCILED_REVISION = 28
 CURSOR_SCHEMA_VERSION = "toklens.cursor.v2.11"
 CRON_MARKER = "# toklens-auto-sync"
@@ -955,6 +955,22 @@ class PricingLookup:
                 return False
         return True
 
+    @staticmethod
+    def model_candidates(raw_model):
+        current = normalize_model(raw_model, "unknown")
+        candidates = [current]
+        for _ in range(6):
+            previous = current
+            current = re.sub(r"-(xhigh|high|medium|low|minimal|thinking|nothinking|reasoning)$", "", current)
+            if current not in candidates:
+                candidates.append(current)
+            current = re.sub(r"-(?:20\d{6}|20\d{2}-\d{2}-\d{2})$", "", current)
+            if current not in candidates:
+                candidates.append(current)
+            if current == previous:
+                break
+        return candidates
+
     def _lookup_key(self, raw_model: str):
         slug = normalize_model(raw_model, "unknown")
         if slug in self.rates:
@@ -972,44 +988,98 @@ class PricingLookup:
         key = self._lookup_key(raw_model)
         return self.rates[key] if key is not None else (0.0, 0.0, 0.0, 0.0)
 
-    def lookup_tier(self, model, provider, actual_tier, date, input_tokens=0, allow_custom=True):
+    def _find_tier_price(self, provider, candidates, tier, asof):
+        for candidate in candidates:
+            matched = [p for p in self.tier_prices if str(p.get("provider", "")).lower() == provider.lower()
+                       and normalize_model(p.get("model"), "unknown") == candidate
+                       and normalize_service_tier(p.get("tier")) == tier and str(p["effective_from"]) <= asof
+                       and (not p.get("effective_until") or asof <= str(p["effective_until"]))]
+            if matched:
+                return sorted(matched, key=lambda p: str(p["effective_from"]))[-1]
+        return None
+
+    @staticmethod
+    def _tier_rates(selected, input_tokens):
+        max_prompt = safe_int(selected.get("max_prompt_tokens"))
+        if max_prompt > 0 and input_tokens > max_prompt:
+            return None
+        rates = selected["rates"]
+        long_context = safe_int(selected.get("long_context_threshold")) > 0 and input_tokens > safe_int(selected.get("long_context_threshold"))
+        if long_context:
+            names = ("long_input_per_m", "long_output_per_m", "long_cache_read_per_m", "long_cache_write_per_m")
+            if not all(key in selected for key in names):
+                return None
+            rates = tuple(safe_float(selected[key]) for key in names)
+        cw1h_rate = max(rates[3], rates[0] * 2.0) if str(selected.get("provider")).lower() == "anthropic" else rates[3]
+        long_write_key = "long_cache_write_long_per_m" if long_context else "cache_write_long_per_m"
+        if selected.get("cache_write_long_duration") == "1h" and long_write_key in selected:
+            cw1h_rate = safe_float(selected[long_write_key])
+        return tuple(rates) + (cw1h_rate,)
+
+    def lookup_tier_quote(self, model, provider, actual_tier, date, input_tokens=0, allow_custom=True, today=None):
+        today = today or datetime.date.today().isoformat()
         tier = normalize_service_tier(actual_tier)
+        quoted_tier = "standard" if tier == "unknown" else tier
+        result = {"rates": (0.0, 0.0, 0.0, 0.0, 0.0), "basis": "unpriced", "version": "", "price": None, "asof": date}
         custom_key = self._lookup_key(model) if allow_custom else None
         if tier in ("standard", "unknown") and custom_key in self.custom_keys:
             rates = self.rates[custom_key]
             long_write = max(rates[3], rates[0] * 2.0) if provider == "anthropic" else rates[3]
-            return rates + (long_write,), "estimated_unknown_tier" if tier == "unknown" else "estimated_standard", "custom-model-price"
-        if tier == "unknown":
-            rates, basis, version = self.lookup_tier(model, provider, "standard", date, input_tokens, allow_custom=allow_custom)
-            return rates, "estimated_unknown_tier" if basis != "unpriced" else basis, version
-        matched = [p for p in self.tier_prices if str(p.get("provider", "")).lower() == provider.lower()
-                   and normalize_model(p.get("model"), "unknown") == normalize_model(model, "unknown")
-                   and normalize_service_tier(p.get("tier")) == tier and str(p["effective_from"]) <= date
-                   and (not p.get("effective_until") or date <= str(p["effective_until"]))]
-        if matched and tier != "unknown":
-            selected = sorted(matched, key=lambda p: str(p["effective_from"]))[-1]
-            max_prompt = safe_int(selected.get("max_prompt_tokens"))
-            if max_prompt > 0 and input_tokens > max_prompt:
-                return (0, 0, 0, 0, 0), "unpriced", ""
-            rates = selected["rates"]
-            long_context = safe_int(selected.get("long_context_threshold")) > 0 and input_tokens > safe_int(selected.get("long_context_threshold"))
-            if long_context:
-                names = ("long_input_per_m", "long_output_per_m", "long_cache_read_per_m", "long_cache_write_per_m")
-                if not all(key in selected for key in names):
-                    return (0, 0, 0, 0, 0), "unpriced", str(selected["version"])
-                rates = tuple(safe_float(selected[key]) for key in names)
-            cw1h_rate = max(rates[3], rates[0] * 2.0) if provider == "anthropic" else rates[3]
-            long_write_key = "long_cache_write_long_per_m" if long_context else "cache_write_long_per_m"
-            if selected.get("cache_write_long_duration") == "1h" and long_write_key in selected:
-                cw1h_rate = safe_float(selected[long_write_key])
-            return tuple(rates) + (cw1h_rate,), "estimated_tier_price", str(selected["version"]) + "|" + str(selected["source"])
+            result.update(rates=rates + (long_write,), basis="estimated_unknown_tier" if tier == "unknown" else "estimated_standard", version="custom-model-price")
+            return result
+        candidates = self.model_candidates(model)
+        maker = infer_provider(candidates[0])
+        attempts = []
+        try:
+            datetime.datetime.strptime(date, "%Y-%m-%d")
+            datetime.datetime.strptime(today, "%Y-%m-%d")
+            valid_dates = len(date) == 10 and len(today) == 10
+        except (ValueError, TypeError):
+            valid_dates = False
+        if valid_dates:
+            attempts.append((provider, date, False, False))
+            if maker != "unknown" and maker.lower() != provider.lower():
+                attempts.append((maker, date, True, False))
+            if date < today:
+                attempts.append((provider, today, False, True))
+                if maker != "unknown" and maker.lower() != provider.lower():
+                    attempts.append((maker, today, True, True))
+        for quote_provider, asof, provider_reference, current_reference in attempts:
+            selected = self._find_tier_price(quote_provider, candidates, quoted_tier, asof)
+            if selected is None:
+                continue
+            rates = self._tier_rates(selected, input_tokens)
+            if rates is None:
+                # An explicit rule that excludes this context cannot be bypassed
+                # by switching providers, dates, or borrowing a standard quote.
+                return result
+            version = str(selected["version"]) + "|" + str(selected["source"])
+            basis = "estimated_unknown_tier" if tier == "unknown" else "estimated_tier_price"
+            if current_reference or provider_reference:
+                kind = "current" if current_reference else "official"
+                version = "reference:" + kind + ":" + str(selected["provider"]) + "/" + str(selected["model"]) + "/" + quoted_tier + "@" + asof + "|" + version
+                basis = "estimated_current_reference" if current_reference else "estimated_official_reference"
+            result.update(rates=rates, basis=basis, version=version, price=selected, asof=asof)
+            return result
         if tier in ("fast", "ultrafast", "flex"):
-            return (0.0, 0.0, 0.0, 0.0, 0.0), "unpriced", ""
+            return result
         rate_key = self._lookup_key(model)
         if rate_key is None:
-            return (0.0, 0.0, 0.0, 0.0, 0.0), "unpriced", ""
+            return result
         rates = self.rates[rate_key]
-        return rates + (max(rates[3], rates[0] * 2.0) if provider == "anthropic" else rates[3],), "estimated_unknown_tier" if tier == "unknown" else "estimated_standard", "standard-reference-v2.4.0"
+        result.update(rates=rates + (max(rates[3], rates[0] * 2.0) if provider == "anthropic" else rates[3],), basis="estimated_unknown_tier" if tier == "unknown" else "estimated_standard", version="standard-reference-v2.4.0")
+        return result
+
+    def lookup_tier(self, model, provider, actual_tier, date, input_tokens=0, allow_custom=True, today=None):
+        quote = self.lookup_tier_quote(model, provider, actual_tier, date, input_tokens, allow_custom, today)
+        return quote["rates"], quote["basis"], quote["version"]
+
+    def comparison_rates(self, quote, input_tokens):
+        price = quote["price"]
+        if price is None:
+            return None
+        standard = self._find_tier_price(str(price["provider"]), [normalize_model(price["model"], "unknown")], "standard", quote["asof"])
+        return self._tier_rates(standard, input_tokens) if standard is not None else None
 
 
 def normalize_service_tier(value):
@@ -3659,7 +3729,7 @@ class MultiHarnessScanner:
         # Retain its backup, but never manufacture a precise bill from ratios.
         return
 
-    def build_records(self):
+    def build_records(self, today=None):
         buckets = {}
         for ev in self.events:
             tool, model, dt, fi, out_tok, cr, cw, logged_cost, turns = ev[:9]
@@ -3676,9 +3746,10 @@ class MultiHarnessScanner:
             cw5m = max(0, cw - cw1h_c)
             turns = max(1, min(1_000_000_000, safe_int(turns)))
             effective_tier = actual_tier if actual_tier != "unknown" else requested
-            rates, basis, pricing_version = self.pricing.lookup_tier(model, provider, effective_tier, dt, fi + cr + cw)
+            quote = self.pricing.lookup_tier_quote(model, provider, effective_tier, dt, fi + cr + cw, today=today)
+            rates, basis, pricing_version = quote["rates"], quote["basis"], quote["version"]
             price_available = basis != "unpriced"
-            if actual_tier == "unknown" and requested != "unknown" and basis != "unpriced":
+            if actual_tier == "unknown" and requested != "unknown" and basis in ("estimated_tier_price", "estimated_standard"):
                 basis = "estimated_requested_tier"
             inp_r, out_r, cr_r, cw_r, cw1h_r = rates
             calc = min(1e12, max(0.0, (fi * inp_r + out_tok * out_r + cr * cr_r + cw5m * cw_r + cw1h_c * cw1h_r) / 1e6))
@@ -3688,9 +3759,9 @@ class MultiHarnessScanner:
             if safe_logged > 0:
                 basis, pricing_version = "reported", "source-reported"
             standard_equivalent, premium = None, None
-            if basis in ("estimated_tier_price", "estimated_requested_tier") and pricing_version != "custom-model-price" and effective_tier != "unknown":
-                standard_rates, standard_basis, _ = self.pricing.lookup_tier(model, provider, "standard", dt, fi + cr + cw, allow_custom=effective_tier == "standard")
-                if standard_basis == "estimated_tier_price":
+            if basis in ("estimated_tier_price", "estimated_requested_tier", "estimated_official_reference", "estimated_current_reference") and effective_tier != "unknown":
+                standard_rates = self.pricing.comparison_rates(quote, fi + cr + cw)
+                if standard_rates is not None:
                     standard_equivalent = (fi * standard_rates[0] + out_tok * standard_rates[1] + cr * standard_rates[2] + cw5m * standard_rates[3] + cw1h_c * standard_rates[4]) / 1e6
                     premium = max(0.0, actual - standard_equivalent)
             baseline = max(base, actual)

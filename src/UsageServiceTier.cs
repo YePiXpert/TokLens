@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Reflection;
+using System.Text.RegularExpressions;
 using System.Web.Script.Serialization;
 
 namespace TokLens
@@ -162,6 +163,25 @@ namespace TokLens
         public double long_cache_write_long_per_m { get; set; }
     }
 
+    public sealed class ServiceTierPriceMatch
+    {
+        public ServiceTierPrice Price { get; set; }
+        public bool IsProviderReference { get; set; }
+        public bool IsCurrentReference { get; set; }
+        public string ReferenceDate { get; set; }
+        public string PricingVersion
+        {
+            get
+            {
+                if(Price==null)return "";
+                string version=(Price.version??Price.effective_from)+"|"+Price.source;
+                if(IsProviderReference||IsCurrentReference)
+                    version="reference:"+(IsCurrentReference?"current":"official")+":"+Price.provider+"/"+Price.model+"/"+UsageServiceTier.Normalize(Price.tier)+"@"+ReferenceDate+"|"+version;
+                return version;
+            }
+        }
+    }
+
     public static class ServiceTierPricing
     {
         private static readonly object Gate=new object();
@@ -183,7 +203,7 @@ namespace TokLens
             rate=new ModelRate(input,output,read,write,"tier:"+UsageServiceTier.Normalize(p.tier));
             return Math.Min(1000000000000.0,(fresh*input+generated*output+cached*read+(written-longer)*write+longer*longWrite)/1000000.0);
         }
-        public static ServiceTierPrice Find(string provider,string model,string tier,string date,string customHome)
+        public static List<ServiceTierPrice> Enumerate(string customHome)
         {
             string path=Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"pricing","service_tier_prices.json");
             // A fixture/custom home never reads the real user's configuration.
@@ -203,22 +223,77 @@ namespace TokLens
                     if(Cache.Count>16)Cache.Clear();Cache[cacheKey]=prices;
                 }
             }
-            ServiceTierPrice best=null;
+            List<ServiceTierPrice> validPrices=new List<ServiceTierPrice>();
             foreach(ServiceTierPrice p in prices)
             {
                 DateTime starts;
                 if(p==null||!DateTime.TryParseExact(p.effective_from,"yyyy-MM-dd",CultureInfo.InvariantCulture,DateTimeStyles.None,out starts)||string.IsNullOrWhiteSpace(p.source))continue;
-                if(!string.Equals(provider,p.provider,StringComparison.OrdinalIgnoreCase)||!string.Equals(model,p.model,StringComparison.OrdinalIgnoreCase)||tier!=UsageServiceTier.Normalize(p.tier)||string.CompareOrdinal(p.effective_from,date)>0)continue;
+                if(string.IsNullOrWhiteSpace(p.provider)||string.IsNullOrWhiteSpace(p.model)||UsageServiceTier.Normalize(p.tier)=="unknown")continue;
                 if(!string.IsNullOrEmpty(p.effective_until))
-                {DateTime until;if(!DateTime.TryParseExact(p.effective_until,"yyyy-MM-dd",CultureInfo.InvariantCulture,DateTimeStyles.None,out until)||string.CompareOrdinal(date,p.effective_until)>0)continue;}
+                {DateTime until;if(!DateTime.TryParseExact(p.effective_until,"yyyy-MM-dd",CultureInfo.InvariantCulture,DateTimeStyles.None,out until)||until<starts)continue;}
                 double[] values={p.input_per_m,p.output_per_m,p.cache_read_per_m,p.cache_write_per_m,p.long_input_per_m,p.long_output_per_m,p.long_cache_read_per_m,p.long_cache_write_per_m,p.cache_write_long_per_m,p.long_cache_write_long_per_m};bool valid=true;
                 foreach(double value in values)if(value<0||value>1000000000000.0||double.IsNaN(value)||double.IsInfinity(value))valid=false;
                 bool needsLongRates=p.long_context_threshold>0&&(p.max_prompt_tokens<=0||p.max_prompt_tokens>p.long_context_threshold);
                 if(needsLongRates&&((p.input_per_m>0&&p.long_input_per_m<=0)||(p.output_per_m>0&&p.long_output_per_m<=0)))valid=false;
                 if(p.max_prompt_tokens<0)valid=false;
-                if(valid&&(best==null||string.CompareOrdinal(p.effective_from,best.effective_from)>=0))best=p;
+                if(valid)validPrices.Add(p);
+            }
+            return validPrices;
+        }
+        public static ServiceTierPrice Find(string provider,string model,string tier,string date,string customHome)
+        {
+            ServiceTierPrice best=null;
+            foreach(ServiceTierPrice p in Enumerate(customHome))
+            {
+                if(!string.Equals(provider,p.provider,StringComparison.OrdinalIgnoreCase)||!string.Equals(model,p.model,StringComparison.OrdinalIgnoreCase)||UsageServiceTier.Normalize(tier)!=UsageServiceTier.Normalize(p.tier)||string.CompareOrdinal(p.effective_from,date)>0)continue;
+                if(!string.IsNullOrEmpty(p.effective_until)&&string.CompareOrdinal(date,p.effective_until)>0)continue;
+                if(best==null||string.CompareOrdinal(p.effective_from,best.effective_from)>=0)best=p;
             }
             return best;
+        }
+        private static List<string> ModelCandidates(string model)
+        {
+            List<string> candidates=new List<string>();
+            string current=PricingEngine.NormalizeModelId(model,"unknown");
+            for(int i=0;i<6;i++)
+            {
+                if(!candidates.Contains(current))candidates.Add(current);
+                string claude=Regex.Replace(current,@"^(claude-(?:opus|sonnet|haiku|fable|mythos)-\d+)\.(\d+)","$1-$2",RegexOptions.IgnoreCase);
+                if(!candidates.Contains(claude))candidates.Add(claude);
+                string next=Regex.Replace(current,@"-(?:xhigh|high|medium|low|minimal|thinking|nothinking|reasoning|20\d{6}|20\d{2}-\d{2}-\d{2})$","",RegexOptions.IgnoreCase);
+                if(next==current)break;
+                current=next;
+            }
+            return candidates;
+        }
+        private static ServiceTierPrice FindCandidates(string provider,List<string> models,string tier,string date,string home)
+        {
+            foreach(string model in models){ServiceTierPrice p=Find(provider,model,tier,date,home);if(p!=null)return p;}
+            return null;
+        }
+        public static ServiceTierPriceMatch Resolve(string provider,string model,string tier,string date,string customHome)
+        {return Resolve(provider,model,tier,date,customHome,DateTime.Today.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture));}
+        public static ServiceTierPriceMatch Resolve(string provider,string model,string tier,string date,string customHome,string referenceDate)
+        {
+            DateTime eventDay,referenceDay;
+            if(!DateTime.TryParseExact(date,"yyyy-MM-dd",CultureInfo.InvariantCulture,DateTimeStyles.None,out eventDay)||
+               !DateTime.TryParseExact(referenceDate,"yyyy-MM-dd",CultureInfo.InvariantCulture,DateTimeStyles.None,out referenceDay))return null;
+            List<string> models=ModelCandidates(model);
+            string maker=UsageServiceTier.InferProvider(models[0]);
+            string normalized=UsageServiceTier.Normalize(tier);if(normalized=="unknown")normalized="standard";
+            for(int pass=0;pass<2;pass++)
+            {
+                if(pass==1&&eventDay>=referenceDay)break;
+                string asof=pass==0?date:referenceDate;
+                ServiceTierPrice p=FindCandidates(provider,models,normalized,asof,customHome);
+                bool providerReference=false;
+                if(p==null&&maker!="unknown"&&!string.Equals(provider,maker,StringComparison.OrdinalIgnoreCase))
+                {p=FindCandidates(maker,models,normalized,asof,customHome);providerReference=p!=null;}
+                // A matched rule is authoritative even if its prompt limit later
+                // rejects this request. Never bypass that limit with another quote.
+                if(p!=null)return new ServiceTierPriceMatch{Price=p,ReferenceDate=asof,IsProviderReference=providerReference,IsCurrentReference=pass==1};
+            }
+            return null;
         }
         private static void Append(List<ServiceTierPrice> target,string json)
         {

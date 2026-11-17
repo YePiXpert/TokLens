@@ -94,7 +94,7 @@
       "expected_premium": 0.0043
     },
     {
-      "id": "fast-no-historical-rate",
+      "id": "fast-no-historical-rate-current-reference",
       "model": "gpt-6.1-sol",
       "provider": "openai",
       "date": "2026-11-16",
@@ -105,10 +105,26 @@
       "cache_read": 500,
       "cache_write": 100,
       "reported": 0,
-      "expected_cost": 0,
-      "expected_basis": "unpriced",
-      "expected_standard": null,
-      "expected_premium": null
+      "expected_cost": 0.0086,
+      "expected_basis": "estimated_current_reference",
+      "expected_standard": 0.0043,
+      "expected_premium": 0.0043
+    },
+    {
+      "id": "custom-route-astra-fast-reference",
+      "model": "gpt-6-astra", "provider": "custom", "date": "2026-11-17",
+      "requested": "fast", "actual": "unknown",
+      "fi": 100000, "output": 100, "cache_read": 50000, "cache_write": 0, "reported": 0,
+      "expected_cost": 2.11, "expected_basis": "estimated_official_reference",
+      "expected_standard": 1.055, "expected_premium": 1.055
+    },
+    {
+      "id": "historical-custom-route-astra-fast-reference",
+      "model": "gpt-6-astra", "provider": "custom", "date": "2026-11-05",
+      "requested": "fast", "actual": "unknown",
+      "fi": 100000, "output": 100, "cache_read": 50000, "cache_write": 0, "reported": 0,
+      "expected_cost": 2.11, "expected_basis": "estimated_current_reference",
+      "expected_standard": 1.055, "expected_premium": 1.055
     },
     {
       "id": "reported-cost-not-multiplied",

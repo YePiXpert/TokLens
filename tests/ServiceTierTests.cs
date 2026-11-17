@@ -95,6 +95,7 @@ internal static class ServiceTierTests
         foreach(string model in new string[]{"gpt-5.4","gpt-5.5"})
         {
             UsageEvent ev=new UsageEvent("OpenAI Codex",model,"2026-11-17",272000,10,0,0,0,1);
+            ev.Provider="openai";
             ev.RequestedServiceTier="fast";ev.ActualServiceTier="fast";double cost,baseline;ModelRate rate;
             engine.ComputeEventCost(ev,out cost,out baseline,out rate);
             Equal(cost,model=="gpt-5.4"?1.3603:3.40075,model+" exactly maximum prompt remains priced");

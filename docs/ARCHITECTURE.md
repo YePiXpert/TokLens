@@ -31,6 +31,8 @@ Codex 支持 `event_msg → thread_settings_applied → thread_settings` 的嵌�
 | `reported` | 日志已报告金额，避免二次加价 |
 | `estimated_tier_price` | 实际档位已知，找到日期适用的独立档位价格 |
 | `estimated_requested_tier` | 只有请求档位证据，按该档位估算；实际未核实 |
+| `estimated_official_reference` | 日志渠道缺少适用报价，使用对应模型官方同日期档位价作参考；渠道实付未知 |
+| `estimated_current_reference` | 历史日期无适用档位报价，按当前有效规则作参考估值；不是当时价格 |
 | `estimated_standard` | 普通档位的基础价格参考 |
 | `estimated_unknown_tier` | 档位都未知，只给 Standard 参考 |
 | `unpriced` | 无可用价格，保留用量但不假造费用 |
@@ -39,6 +41,8 @@ Codex 支持 `event_msg → thread_settings_applied → thread_settings` 的嵌�
 服务档位价格按 provider、精确模型、tier、生效区间匹配。只在明确配置时应用长上下文分段和缓存写入时长价格。API 单价与订阅额度倍率是两个不同概念。
 
 明确的自定义模型基础价（含零价）优先于内置普通参考价；该覆盖仅用于 Standard 或档位未知的普通参考估值。Fast、Ultrafast、Flex 仍需要各自的档位报价，不套用普通自定义价，也不从中乘倍率推导。日志已经报告的金额优先于上述估值。
+
+报价匹配先查日志渠道与事件日期，再查模型官方同日期报价；历史缺价时才查当前日期有效的渠道/官方规则。`Provider` 与事件日期保持原值，引用服务商、模型、档位与参考日期保存在 `PricingVersion` 的 `reference:official:` / `reference:current:` 前缀中。找到规则但请求超出支持上限时直接未定价，不换另一条报价绕过限制；对照 Standard 仅取同一报价服务商、模型与参考日期。已有明确依据的远端快照不由接收端重新计价。
 
 `StandardEquivalentUsd` 是同次请求按 Standard 规则计算的参考值；`ServiceTierPremiumUsd` 是可比较估值的非负差额。两者无法建立时保持 null，不能把 null 呈现为节省了零元。`reported` 金额不拆出虚构的 API 档位溢价。
 
@@ -67,7 +71,7 @@ Windows 从内嵌资源加载；Python 构建时内嵌同一快照，亦可读�
 
 ## 节点快照
 
-顶层 schema 保持 `toklens.node.v2`；`scanner_rev=31` 标识档位核算版本。`records` 每行沿用前 11 列，追加到 19 列：
+顶层 schema 保持 `toklens.node.v2`；`scanner_rev=32` 标识档位核算版本。`records` 每行沿用前 11 列，追加到 19 列：
 
 | 索引 | 内容 |
 |---|---|

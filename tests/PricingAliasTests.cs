@@ -49,6 +49,7 @@ internal static class PricingAliasTests
                 foreach (string tier in new string[] { "unknown", "standard" })
                 {
                     UsageEvent custom = new UsageEvent("OpenAI Codex", "gpt-6.1-sol", "2026-11-17", 1000000, 100, 0, 0, 0, 1);
+                    custom.Provider = "openai";
                     custom.ActualServiceTier = tier;
                     prices.ComputeEventCost(custom, out freeCost, out freeBaseline, out freeRate);
                     Check(Math.Abs(freeCost - (zero ? 0 : 7.0021)) < 0.00000001 && freeRate.Source == "custom" && custom.CostBasis != "unpriced",

@@ -118,7 +118,7 @@ class AccountingTests(unittest.TestCase):
             upgraded = agent.MultiHarnessScanner(home, allow_network_pricing=False)
             self.assertIsNone(upgraded.cursor_store.get(key))
             self.assertIsNotNone(upgraded.cursor_store.get(missing_key))
-            backups = list(db_path.parent.glob("ledger.db.before-v31.*.db"))
+            backups = list(db_path.parent.glob("ledger.db.before-v" + str(agent.SCANNER_REV) + ".*.db"))
             self.assertEqual(len(backups), 1)
             with sqlite3.connect(backups[0]) as db:
                 self.assertEqual(db.execute("SELECT COUNT(*) FROM file_cursors").fetchone()[0], 2)
@@ -148,7 +148,7 @@ class AccountingTests(unittest.TestCase):
             with self.subTest(case=case["id"]), tempfile.TemporaryDirectory(prefix="toklens-tier-") as temp:
                 scanner = agent.MultiHarnessScanner(Path(temp), allow_network_pricing=False)
                 scanner.add_ev("OpenAI Codex", case["model"], case["date"], case["fi"], case["output"], case["cache_read"], case["cache_write"], case["reported"], tier={"requested_tier":case["requested"], "actual_tier":case["actual"], "provider":case["provider"], "tier_evidence":"fixture"})
-                actual = scanner.build_records()[0]
+                actual = scanner.build_records(today=fixtures.get("reference_date", "2026-11-17"))[0]
                 self.assertEqual(len(actual), 19)
                 self.assertAlmostEqual(actual[8], case["expected_cost"], places=6)
                 self.assertEqual(actual[14], case["expected_basis"])
@@ -194,6 +194,89 @@ class AccountingTests(unittest.TestCase):
     def test_fast_suffix_not_silently_priced_as_standard(self):
         with tempfile.TemporaryDirectory(prefix="toklens-tier-") as temp:
             self.assertEqual(agent.PricingLookup(Path(temp), allow_network=False).lookup("gpt-6.1-sol-fast"), (0,0,0,0))
+
+    def test_custom_route_fast_uses_explicit_official_and_current_reference(self):
+        with tempfile.TemporaryDirectory(prefix="toklens-reference-") as temp:
+            scanner = agent.MultiHarnessScanner(Path(temp), allow_network_pricing=False)
+            for date, provider, basis, prefix in (("2026-11-17", "custom", "estimated_official_reference", "official"),
+                                                 ("2026-11-05", "custom", "estimated_current_reference", "current"),
+                                                 ("2026-11-17", "unknown", "estimated_official_reference", "official")):
+                with self.subTest(date=date, provider=provider):
+                    scanner.events = []
+                    scanner.add_ev("OpenAI Codex", "gpt-6-astra", date, 1000, 200, 500, 100, tier={"requested_tier": "fast", "actual_tier": "unknown", "provider": provider})
+                    result = scanner.build_records(today="2026-11-17")[0]
+                    self.assertEqual(len(result), 19)
+                    self.assertEqual(result[0], date)
+                    self.assertEqual(result[11:13], ["fast", "unknown"])
+                    self.assertEqual(result[16], provider)
+                    self.assertEqual(result[14], basis)
+                    self.assertTrue(result[15].startswith("reference:" + prefix + ":openai/gpt-6-astra/fast@2026-11-17|official-2026-11-17|"))
+                    self.assertAlmostEqual(result[8], .0435)
+                    self.assertAlmostEqual(result[17], .02175)
+                    self.assertAlmostEqual(result[18], .02175)
+                    old = list(result)
+                    old[8], old[9], old[14], old[15], old[17], old[18] = 0, 0, "unpriced", "", None, None
+                    partition = date + "||OpenAI Codex"
+                    self.assertEqual(agent.merge_records_high_water([result], [old], 31, {partition: 100}, {partition: 200}), [result])
+
+    def test_tier_reference_aliases_do_not_strip_price_variants(self):
+        with tempfile.TemporaryDirectory(prefix="toklens-reference-alias-") as temp:
+            pricing = agent.PricingLookup(Path(temp), allow_network=False)
+            for model in ("gpt-6-astra-high", "gpt-6-astra-xhigh-20261117", "gpt-6-astra-2026-11-17-thinking", "gpt-6-astra-nothinking", "gpt-6-astra-reasoning"):
+                quote = pricing.lookup_tier_quote(model, "custom", "fast", "2026-11-17", today="2026-11-17")
+                self.assertEqual(quote["basis"], "estimated_official_reference")
+                self.assertEqual(quote["price"]["model"], "gpt-6-astra")
+            for suffix in ("preview", "latest", "beta", "auto", "max", "fast", "1m", "online", "nitro", "exacto"):
+                self.assertEqual(pricing.lookup_tier("gpt-6-astra-" + suffix, "custom", "fast", "2026-11-05", today="2026-11-17")[1], "unpriced")
+
+    def test_reference_rule_priority_expiry_prompt_limits_and_same_source_comparison(self):
+        def rule(provider, tier="fast", start="2026-11-17", price=10, **extra):
+            result = {"provider": provider, "model": "gpt-reference-fixture", "tier": tier, "effective_from": start,
+                      "rates": (price, price * 5, price / 10, 0), "source": "https://example.invalid/reference", "version": "fixture-v1"}
+            result.update(extra)
+            return result
+        with tempfile.TemporaryDirectory(prefix="toklens-reference-rules-") as temp:
+            pricing = agent.PricingLookup(Path(temp), allow_network=False)
+            for excluded in (rule("openai", start="2026-11-01", effective_until="2026-11-10"), rule("openai", start="2026-11-18")):
+                pricing.tier_prices = [excluded]
+                self.assertEqual(pricing.lookup_tier("gpt-reference-fixture", "custom", "fast", "2026-11-12", today="2026-11-17")[1], "unpriced")
+            pricing.tier_prices = [rule("custom", max_prompt_tokens=100), rule("openai")]
+            self.assertEqual(pricing.lookup_tier("gpt-reference-fixture", "custom", "fast", "2026-11-17", 101, today="2026-11-17")[1], "unpriced")
+            self.assertEqual(pricing.lookup_tier("gpt-reference-fixture", "custom", "fast", "2026-11-05", 101, today="2026-11-17")[1], "unpriced")
+            pricing.tier_prices = [rule("custom", price=20), rule("openai", start="2026-11-01", price=10, effective_until="2026-11-12"), rule("openai", tier="standard", start="2026-11-01", price=5, effective_until="2026-11-12")]
+            quote = pricing.lookup_tier_quote("gpt-reference-fixture", "custom", "fast", "2026-11-05", today="2026-11-17")
+            self.assertEqual(quote["basis"], "estimated_official_reference")
+            self.assertEqual(quote["asof"], "2026-11-05")
+            self.assertEqual(pricing.comparison_rates(quote, 100)[0], 5)
+            pricing.tier_prices = [rule("custom", price=20), rule("openai", price=10), rule("openai", tier="standard", price=5)]
+            quote = pricing.lookup_tier_quote("gpt-reference-fixture", "custom", "fast", "2026-11-05", today="2026-11-17")
+            self.assertEqual(quote["basis"], "estimated_current_reference")
+            self.assertEqual(quote["price"]["provider"], "custom")
+            self.assertEqual(quote["rates"][0], 20)
+            self.assertIsNone(pricing.comparison_rates(quote, 100))
+            pricing.tier_prices.append(rule("custom", tier="standard", price=7))
+            self.assertEqual(pricing.comparison_rates(quote, 100)[0], 7)
+
+    def test_reported_and_custom_standard_still_precede_reference_fallback(self):
+        with tempfile.TemporaryDirectory(prefix="toklens-reference-priority-") as temp:
+            home = Path(temp)
+            folder = home / ".toklens"
+            folder.mkdir()
+            (folder / "custom_prices.json").write_text(json.dumps({"gpt-6-astra": {"input": 99, "output": 1, "cache_read": .5, "cache_write": 0}}))
+            scanner = agent.MultiHarnessScanner(home, allow_network_pricing=False)
+            for actual, requested, logged, expected_basis, expected_cost in (("standard", "fast", 0, "estimated_standard", .09945),
+                                                                            ("unknown", "unknown", 0, "estimated_unknown_tier", .09945),
+                                                                            ("unknown", "fast", 0, "estimated_official_reference", .0435),
+                                                                            ("unknown", "fast", .123, "reported", .123)):
+                scanner.events = []
+                scanner.add_ev("OpenAI Codex", "gpt-6-astra", "2026-11-17", 1000, 200, 500, 100, cost=logged,
+                               tier={"requested_tier": requested, "actual_tier": actual, "provider": "custom"})
+                result = scanner.build_records(today="2026-11-17")[0]
+                self.assertEqual(result[14], expected_basis)
+                self.assertAlmostEqual(result[8], expected_cost)
+                self.assertEqual(result[16], "custom")
+                if expected_basis in ("estimated_standard", "estimated_unknown_tier", "reported"):
+                    self.assertIsNone(result[18])
 
     def test_price_changing_model_suffixes_and_explicit_zero_price(self):
         with tempfile.TemporaryDirectory(prefix="toklens-price-alias-") as temp:

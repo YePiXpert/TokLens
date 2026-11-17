@@ -47,7 +47,7 @@ namespace TokLens
                     string.IsNullOrEmpty(r.MachineType) ? "windows" : r.MachineType,
                     UsagePresentation.TierLabel(r), r.Provider, r.RequestedServiceTier,
                     r.ActualServiceTier, r.TierEvidence, r.CostBasis, r.PricingVersion,
-                    r.StandardEquivalentUsd, r.ServiceTierPremiumUsd
+                    r.StandardEquivalentUsd, r.ServiceTierPremiumUsd, UsagePresentation.CostLabel(r)
                 });
             }
 
@@ -808,7 +808,7 @@ function render() {
     const k = JSON.stringify([r[1], r[2], r[13], r[18], r[19], r[14], r[15], r[16]]);
     let m = mmap.get(k);
     if (!m) {
-      m = { tool: r[1], model: r[2], tier: r[13] || '档位未知', basis: r[18] || 'estimated_unknown_tier', version: r[19] || '', turns: 0, fi: 0, cr: 0, cw: 0, out: 0, tok: 0, cost: 0, rate: r[10] || '' };
+      m = { tool: r[1], model: r[2], tier: r[13] || '档位未知', basis: r[18] || 'estimated_unknown_tier', basisLabel: r[22] || 'API 估值', version: r[19] || '', turns: 0, fi: 0, cr: 0, cw: 0, out: 0, tok: 0, cost: 0, rate: r[10] || '' };
       mmap.set(k, m);
     }
     else if (m.rate !== (r[10] || '')) m.rate = '多种费率 · 见明细';
@@ -1036,7 +1036,7 @@ function renderTable(nodeArr, maxNodeCost, modelArr, maxModelCost, dailyArr, max
         const colHex = providerColor(m.tool);
         const ratio = maxModelCost > 0 ? (m.cost / maxModelCost) : 0;
         html += `<tr>` +
-          `<td class=""pri mono"">${esc(m.model)}<br><small>${esc(m.tier)} · ${esc(m.basis === 'reported' ? '日志金额' : m.basis === 'unpriced' ? '未计价' : m.basis === 'estimated_requested_tier' ? '按请求档位估值 · 实际未核实' : m.basis === 'estimated_unknown_tier' ? '标准参考估值 · 档位未知' : m.basis === 'legacy_unknown' ? '历史金额 · 来源未记录' : 'API 估值')}</small><br><small>${esc(m.version)}</small></td>` +
+          `<td class=""pri mono"">${esc(m.model)}<br><small>${esc(m.tier)} · ${esc(m.basisLabel)}</small><br><small>${esc(m.version)}</small></td>` +
           `<td><span class=""badge""><span class=""ndot"" style=""background:${colHex}""></span>${esc(m.tool)}</span></td>` +
           `<td class=""r mono"">${m.turns.toLocaleString()}</td>` +
           `<td class=""r mono"">${esc(fmtTok(m.fi))}</td>` +

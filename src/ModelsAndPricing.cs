@@ -1038,7 +1038,8 @@ namespace TokLens
         private readonly string _homeDir;
         private readonly bool _isCustomHome;
         private readonly Dictionary<string, ModelRate> _rates = new Dictionary<string, ModelRate>(StringComparer.OrdinalIgnoreCase);
-        private readonly Dictionary<string,ServiceTierPrice> _tierQuotes=new Dictionary<string,ServiceTierPrice>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string,ServiceTierPriceMatch> _tierQuotes=new Dictionary<string,ServiceTierPriceMatch>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string,ServiceTierPrice> _comparisonQuotes=new Dictionary<string,ServiceTierPrice>(StringComparer.OrdinalIgnoreCase);
         private static readonly object CacheLock = new object();
         private static Dictionary<string, ModelRate> _memCloudRates = null;
         private static long _memCloudCacheMtimeTicks = -1;
@@ -1984,11 +1985,12 @@ namespace TokLens
             baselineUsd = baseCost > actualUsd ? baseCost : actualUsd;
         }
 
-        private ServiceTierPrice FindTierPrice(UsageEvent ev,string tier)
+        private ServiceTierPriceMatch FindTierPrice(UsageEvent ev,string tier)
         {
-            string key=ev.Provider+"|"+ev.Model+"|"+tier+"|"+ev.Date;ServiceTierPrice quote;
+            string asof=DateTime.Today.ToString("yyyy-MM-dd",CultureInfo.InvariantCulture);
+            string key=ev.Provider+"|"+ev.Model+"|"+tier+"|"+ev.Date+"|"+asof;ServiceTierPriceMatch quote;
             if(!_tierQuotes.TryGetValue(key,out quote))
-            {_tierQuotes[key]=quote=ServiceTierPricing.Find(ev.Provider,ev.Model,tier,ev.Date,_isCustomHome?_homeDir:null);}
+            {_tierQuotes[key]=quote=ServiceTierPricing.Resolve(ev.Provider,ev.Model,tier,ev.Date,_isCustomHome?_homeDir:null,asof);}
             return quote;
         }
         private static double UncachedQuote(UsageEvent ev,ModelRate rate,double cost)
@@ -1999,7 +2001,6 @@ namespace TokLens
 
         public void ComputeEventCost(UsageEvent ev, out double actualUsd, out double baselineUsd, out ModelRate rate)
         {
-            if(string.IsNullOrWhiteSpace(ev.Provider)||ev.Provider=="unknown")ev.Provider=UsageServiceTier.InferProvider(ev.Model);
             ComputeBucketCost(ev.Model,ev.Turns,ev.FreshInput,ev.Output,ev.CacheRead,ev.CacheWrite,ev.CacheWrite1h,0,out actualUsd,out baselineUsd,out rate);
             if(ev.LoggedCostUsd>0&&!double.IsNaN(ev.LoggedCostUsd)&&!double.IsInfinity(ev.LoggedCostUsd)&&ev.LoggedCostUsd<=1000000000.0)
             {actualUsd=ev.LoggedCostUsd;baselineUsd=Math.Max(actualUsd,baselineUsd);ev.CostBasis="reported";ev.PricingVersion="source-reported";ev.StandardEquivalentUsd=null;ev.ServiceTierPremiumUsd=null;return;}
@@ -2013,31 +2014,29 @@ namespace TokLens
             // those modes still require their own dated tier price below.
             if((tier=="unknown"||tier=="standard")&&string.Equals(rate.Source,"custom",StringComparison.OrdinalIgnoreCase))
             {ev.PricingVersion="custom-model-price";return;}
-            if(tier=="unknown")
+            ServiceTierPriceMatch match=FindTierPrice(ev,tier=="unknown"?"standard":tier);
+            if(match!=null&&ServiceTierPricing.Supports(match.Price,ev))
             {
-                ServiceTierPrice reference=FindTierPrice(ev,"standard");
-                if(reference!=null&&ServiceTierPricing.Supports(reference,ev)){actualUsd=ServiceTierPricing.Quote(reference,ev,out rate);baselineUsd=UncachedQuote(ev,rate,actualUsd);ev.PricingVersion=(reference.version??reference.effective_from)+"|"+reference.source;}
-            }
-            if(tier!="unknown")
-            {
-                ServiceTierPrice quote=FindTierPrice(ev,tier);
-                if(quote!=null&&!ServiceTierPricing.Supports(quote,ev))quote=null;
-                if(quote!=null)
+                actualUsd=ServiceTierPricing.Quote(match.Price,ev,out rate);
+                baselineUsd=UncachedQuote(ev,rate,actualUsd);
+                ev.CostBasis=match.IsCurrentReference?"estimated_current_reference":match.IsProviderReference?"estimated_official_reference":
+                    tier=="unknown"?"estimated_unknown_tier":requestedOnly?"estimated_requested_tier":"estimated_tier_price";
+                ev.PricingVersion=match.PricingVersion;
+                if(tier!="unknown")
                 {
-                    actualUsd=ServiceTierPricing.Quote(quote,ev,out rate);
-                    baselineUsd=UncachedQuote(ev,rate,actualUsd);
-                    ev.CostBasis=requestedOnly?"estimated_requested_tier":"estimated_tier_price";
-                    ev.PricingVersion=(quote.version??quote.effective_from)+"|"+quote.source;
-                    ServiceTierPrice standard=FindTierPrice(ev,"standard");
+                    // Both quotes use the selected provider/model and the SAME
+                    // reference date. A historical amount is never compared with
+                    // a current Standard tariff or an unrelated relay's price.
+                    string comparisonKey=match.Price.provider+"|"+match.Price.model+"|"+match.ReferenceDate;
+                    ServiceTierPrice standard;
+                    if(!_comparisonQuotes.TryGetValue(comparisonKey,out standard))
+                        _comparisonQuotes[comparisonKey]=standard=ServiceTierPricing.Find(match.Price.provider,match.Price.model,"standard",match.ReferenceDate,_isCustomHome?_homeDir:null);
                     if(standard!=null&&ServiceTierPricing.Supports(standard,ev))
-                    {
-                        ModelRate ignored;double reference=ServiceTierPricing.Quote(standard,ev,out ignored);
-                        ev.StandardEquivalentUsd=reference;ev.ServiceTierPremiumUsd=Math.Max(0,actualUsd-reference);
-                    }
+                    {ModelRate ignored;double reference=ServiceTierPricing.Quote(standard,ev,out ignored);ev.StandardEquivalentUsd=reference;ev.ServiceTierPremiumUsd=Math.Max(0,actualUsd-reference);}
                 }
-                else if(tier!="standard")
-                {actualUsd=0;baselineUsd=0;rate=new ModelRate(0,0,0,0,"unpriced");ev.CostBasis="unpriced";ev.PricingVersion="";}
             }
+            else if(match!=null||(tier!="standard"&&tier!="unknown"))
+            {actualUsd=0;baselineUsd=0;rate=new ModelRate(0,0,0,0,"unpriced");ev.CostBasis="unpriced";ev.PricingVersion="";}
             if(rate.Source=="unpriced")ev.CostBasis="unpriced";
         }
 
@@ -2050,7 +2049,7 @@ namespace TokLens
                 if (r == null || r.TotalTokens <= 0) continue;
                 // A remote bill is a quote made with a particular tier and dated source.
                 // Do not replace it with a local standard-tier price or overwrite reported charges.
-                if(r.CostBasis=="reported"||UsageServiceTier.Effective(r)!="unknown")continue;
+                if((!string.IsNullOrEmpty(r.CostBasis)&&r.CostBasis!="legacy_unknown")||UsageServiceTier.Effective(r)!="unknown")continue;
 
                 ModelRate rate = Lookup(r.Model);
                 bool isCustom = string.Equals(rate.Source, "custom", StringComparison.OrdinalIgnoreCase);

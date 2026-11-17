@@ -198,6 +198,11 @@ namespace TokLens
         private TextBlock _headerSummaryBadgeText;
         private Shapes.Ellipse _headerSummaryDot;
         private Button _syncCloudBtn;
+        private TierPricingView _tierPane;
+        private UIElement _standardPane;
+        private Button _tierTab;
+        private Button _standardTab;
+        private bool _showTierPrices = true;
 
         private TextBox _searchBox;
         private TextBlock _searchPlaceholder;
@@ -263,7 +268,7 @@ namespace TokLens
 
             Title = "计价规则 — " + AppConstants.ProductTitle;
             Width = 940;
-            Height = 620;
+            Height = 720;
             MinWidth = 700;
             MinHeight = 480;
             WindowStartupLocation = (Owner != null) ? WindowStartupLocation.CenterOwner : WindowStartupLocation.CenterScreen;
@@ -400,8 +405,37 @@ namespace TokLens
 
         private UIElement BuildWorkspaceBody()
         {
+            Grid workspace=new Grid {Margin=new Thickness(16,12,16,10)};
+            workspace.RowDefinitions.Add(new RowDefinition {Height=GridLength.Auto});
+            workspace.RowDefinitions.Add(new RowDefinition {Height=new GridLength(1,GridUnitType.Star)});
+            StackPanel tabs=new StackPanel {Orientation=Orientation.Horizontal};
+            _tierTab=ModernControlsFactory.CreateButton("档位参考价","primary");_tierTab.Tag="tier-pricing-tab";_tierTab.Height=30;
+            _standardTab=ModernControlsFactory.CreateButton("普通价与自定义","secondary");_standardTab.Tag="standard-pricing-tab";_standardTab.Height=30;_standardTab.Margin=new Thickness(8,0,0,0);
+            _tierTab.Click+=delegate {ShowPricingPage(true);};_standardTab.Click+=delegate {ShowPricingPage(false);};
+            tabs.Children.Add(_tierTab);tabs.Children.Add(_standardTab);workspace.Children.Add(tabs);
+            Grid host=new Grid();Grid.SetRow(host,1);workspace.Children.Add(host);
+            _standardPane=BuildStandardWorkspace();host.Children.Add(_standardPane);
+            _tierPane=new TierPricingView(_homeDir,_activeModelList);host.Children.Add(_tierPane);
+            ShowPricingPage(true);return workspace;
+        }
+
+        private void ShowPricingPage(bool tiers)
+        {
+            _showTierPrices=tiers;
+            if(_tierPane!=null)_tierPane.Visibility=tiers?Visibility.Visible:Visibility.Collapsed;
+            if(_standardPane!=null)_standardPane.Visibility=tiers?Visibility.Collapsed:Visibility.Visible;
+            if(_syncCloudBtn!=null)_syncCloudBtn.Visibility=tiers?Visibility.Collapsed:Visibility.Visible;
+            _tierTab.Template=ModernControlsFactory.CreateButton("",tiers?"primary":"secondary").Template;
+            _standardTab.Template=ModernControlsFactory.CreateButton("",tiers?"secondary":"primary").Template;
+            if(tiers){_tierTab.Foreground=Brushes.White;_standardTab.SetResourceReference(Control.ForegroundProperty,"FgPrimary");}
+            else{_standardTab.Foreground=Brushes.White;_tierTab.SetResourceReference(Control.ForegroundProperty,"FgPrimary");}
+            UpdateHeaderAndFooterMeta();
+        }
+
+        private UIElement BuildStandardWorkspace()
+        {
             Grid body = new Grid();
-            body.Margin = new Thickness(16, 12, 16, 10);
+            body.Margin = new Thickness(0, 12, 0, 0);
             body.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             body.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
             body.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -769,7 +803,7 @@ namespace TokLens
             titleLeft.Children.Add(editIcon);
 
             TextBlock editorTitle = new TextBlock();
-            editorTitle.Text = "自定义单价覆盖编辑器";
+            editorTitle.Text = "普通档位自定义单价";
             editorTitle.FontSize = DesignSystem.TextBody;
             editorTitle.FontWeight = FontWeights.SemiBold;
             editorTitle.VerticalAlignment = VerticalAlignment.Center;
@@ -871,7 +905,8 @@ namespace TokLens
             actionRow.Children.Add(actionBtns);
 
             TextBlock pathNote = new TextBlock();
-            pathNote.Text = "持久化至 %APPDATA%\\TokLens\\custom_prices.json（若 ~/.toklens 同名配置存在将自动同步），保存后全局账单即时重算";
+            pathNote.Text = "仅覆盖普通档位参考价；Fast / Ultrafast / Flex 使用独立规则。保存后重算相关估值。";
+            pathNote.ToolTip = "普通价规则保存在 custom_prices.json；其他档位不继承此处的价格或快捷倍率。";
             pathNote.FontSize = DesignSystem.TextCaption;
             pathNote.VerticalAlignment = VerticalAlignment.Center;
             pathNote.Margin = new Thickness(0, 0, 12, 0);
@@ -1098,16 +1133,19 @@ namespace TokLens
         {
             get
             {
-                string appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
-                if (string.IsNullOrWhiteSpace(appData))
-                    appData = _homeDir;
-                return Path.Combine(appData, "TokLens", "custom_prices.json");
+                return IsCustomHome ? Path.Combine(_homeDir,".toklens","custom_prices.json") : Path.Combine(SyncService.AppConfigDir,"custom_prices.json");
             }
+        }
+
+        private bool IsCustomHome
+        {
+            get {return !string.Equals(_homeDir.TrimEnd('\\','/'),Environment.GetFolderPath(Environment.SpecialFolder.UserProfile).TrimEnd('\\','/'),StringComparison.OrdinalIgnoreCase);}
         }
 
         private List<string> GetExistingLegacyCustomPaths()
         {
             List<string> paths = new List<string>();
+            if(IsCustomHome)return paths;
             string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
             if (!string.IsNullOrWhiteSpace(userProfile))
             {
@@ -1350,6 +1388,7 @@ namespace TokLens
                 }
                 else if (resolved != null &&
                          !string.Equals(resolved.Source, "custom", StringComparison.OrdinalIgnoreCase) &&
+                         !string.Equals(resolved.Source, "unpriced", StringComparison.OrdinalIgnoreCase) &&
                          !string.Equals(resolved.Source, "fallback", StringComparison.OrdinalIgnoreCase))
                 {
                     hasOfficial = true;
@@ -1396,6 +1435,11 @@ namespace TokLens
                     sBd = cloudBd;
                     sFg = cloudFg;
                 }
+                else if (resolved == null || string.Equals(resolved.Source, "unpriced", StringComparison.OrdinalIgnoreCase))
+                {
+                    curIn=curOut=curCr=curCw=0;srcKind="unpriced";srcRank=5;badgeText="未计价";
+                    sBg=fallbackBg;sBd=fallbackBd;sFg=fallbackFg;
+                }
                 else if (resolved != null && string.Equals(resolved.Source, "fallback", StringComparison.OrdinalIgnoreCase))
                 {
                     curIn = resolved.InputPerM;
@@ -1439,13 +1483,13 @@ namespace TokLens
                 row.ProviderDotBrush = DesignSystem.BrushHex(DesignSystem.GetProviderColorHex(displayId, _isDark));
 
                 row.InputPerM = curIn;
-                row.InputText = FormatDollarPerM(curIn);
+                row.InputText = srcKind=="unpriced"?"—":FormatDollarPerM(curIn);
                 row.OutputPerM = curOut;
-                row.OutputText = FormatDollarPerM(curOut);
+                row.OutputText = srcKind=="unpriced"?"—":FormatDollarPerM(curOut);
                 row.CacheReadPerM = curCr;
-                row.CacheReadText = FormatDollarPerM(curCr);
+                row.CacheReadText = srcKind=="unpriced"?"—":FormatDollarPerM(curCr);
                 row.CacheWritePerM = curCw;
-                row.CacheWriteText = FormatDollarPerM(curCw);
+                row.CacheWriteText = srcKind=="unpriced"?"—":FormatDollarPerM(curCw);
 
                 row.HasOfficialRate = hasOfficial;
                 row.OfficialInput = offIn;
@@ -1489,6 +1533,13 @@ namespace TokLens
 
         private void UpdateHeaderAndFooterMeta()
         {
+            if(_showTierPrices)
+            {
+                if(_headerSummaryBadgeText!=null)_headerSummaryBadgeText.Text="4 档位 · 按日期查看";
+                if(_footerRightMetaText!=null)_footerRightMetaText.Text="Ctrl+F 选择模型 · Esc 关闭";
+                if(_statusText!=null)SetStatus("档位参考价与普通自定义价分别管理","neutral");
+                return;
+            }
             if (_headerSummaryBadgeText != null)
             {
                 _headerSummaryBadgeText.Text = string.Format(
@@ -2158,6 +2209,7 @@ namespace TokLens
         {
             if (e.Key == Key.F && (Keyboard.Modifiers & ModifierKeys.Control) == ModifierKeys.Control)
             {
+                if(_showTierPrices&&_tierPane!=null){_tierPane.FocusModel();e.Handled=true;return;}
                 if (_searchBox != null)
                 {
                     _searchBox.Focus();
