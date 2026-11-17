@@ -1,31 +1,31 @@
 {
-    "version":  "2.4.0",
-    "description":  "Real-time AI token monitor and equivalent billing lens across Windows, WSL2, macOS, and Linux VPS (知微 · TokLens)",
-    "homepage":  "https://github.com/YePiXpert/TokLens",
-    "license":  "MIT",
-    "notes":  "Run \u0027TokLens\u0027 to launch the desktop dashboard, or \u0027TokLens --export-html report.html\u0027 for headless CLI export. Ledger \u0026 settings persist safely in %APPDATA%\\TokLens.",
-    "architecture":  {
-                         "64bit":  {
-                                       "url":  "https://github.com/YePiXpert/TokLens/releases/download/v2.4.0/TokLens-v2.4.0-win-x64-portable.zip",
-                                       "hash":  "b881cdc4351bc03d53b06ab18e03a663af1305f428222ba16e6694a9678e0c0c"
-                                   }
-                     },
-    "bin":  "TokLens.exe",
-    "shortcuts":  [
-                      [
-                          "TokLens.exe",
-                          "知微 · TokLens"
-                      ]
-                  ],
-    "checkver":  "github",
-    "autoupdate":  {
-                       "architecture":  {
-                                            "64bit":  {
-                                                          "url":  "https://github.com/YePiXpert/TokLens/releases/download/v$version/TokLens-v$version-win-x64-portable.zip"
-                                                      }
-                                        },
-                       "hash":  {
-                                    "url":  "$baseurl/SHA256SUMS.txt"
-                                }
-                   }
+  "version": "2.4.1",
+  "description": "Real-time AI token monitor and equivalent billing lens across Windows, WSL2, macOS, and Linux VPS (知微 · TokLens)",
+  "homepage": "https://github.com/YePiXpert/TokLens",
+  "license": "MIT",
+  "notes": "Run 'TokLens' to launch the desktop dashboard, or 'TokLens --export-html report.html' for headless CLI export. Ledger & settings persist safely in %APPDATA%\\TokLens.",
+  "architecture": {
+    "64bit": {
+      "url": "https://github.com/YePiXpert/TokLens/releases/download/v2.4.1/TokLens-v2.4.1-win-x64-portable.zip",
+      "hash": "8844c7df9b6f71dddf1af76697ed84ab1dc948dff5a8276ac6481817e3aa2658"
+    }
+  },
+  "bin": "TokLens.exe",
+  "shortcuts": [
+    [
+      "TokLens.exe",
+      "知微 · TokLens"
+    ]
+  ],
+  "checkver": "github",
+  "autoupdate": {
+    "architecture": {
+      "64bit": {
+        "url": "https://github.com/YePiXpert/TokLens/releases/download/v$version/TokLens-v$version-win-x64-portable.zip"
+      }
+    },
+    "hash": {
+      "url": "$baseurl/SHA256SUMS.txt"
+    }
+  }
 }
