@@ -6,12 +6,14 @@ TokLens 从 AI 编程工具已有的本地日志中统计 Token、会话和 API 
 
 ## 第一次使用
 
-1. 从 [Releases](https://github.com/YePiXpert/TokLens/releases) 下载 `TokLens.exe`，或解压对应版本的 Windows 便携包。
+1. 从 [Releases](https://github.com/YePiXpert/TokLens/releases) 下载 **`TokLens.exe`**，双击运行；Windows 只需这一个文件。可选 ZIP 里也只有同一个 EXE。
 2. 运行你平时使用的 AI 编程工具，完成一次请求，再启动 TokLens。
 3. 在「环境检查」核对发现了哪些日志、哪些来源无记录或读取失败。没有记录不等于零用量；日志格式变化、权限不足、远程运行、工具未保存日志都会影响覆盖。
 4. 在「请求明细」抽查工具、模型、Token 构成、服务档位及估值来源。需要跨设备时再配置 Gist 或 WebDAV；本机统计无需先登录同步服务。
 
-Windows 10/11 使用系统 .NET Framework/WPF 与 SQLite。远端探针使用 Python 标准库；读取 `.jsonl.zst` 归档需要支持 Zstandard 的 Python 版本，推荐 Python 3.14。较旧 Python 仍可读普通 JSONL，无法解析的压缩文件不会被伪造成零用量。
+Windows 无需安装；配置、账本与缓存默认保存在 `%APPDATA%\TokLens`，换 EXE 会保留这些数据，移动 EXE 不会一起搬走数据。
+
+Windows 10/11 使用系统 .NET Framework/WPF 与 SQLite。远端探针与 macOS 脚本是单独提供的可选附件，Windows 桌面无需下载它们。远端探针使用 Python 标准库；读取 `.jsonl.zst` 归档需要支持 Zstandard 的 Python 版本，推荐 Python 3.14。较旧 Python 仍可读普通 JSONL，无法解析的压缩文件不会被伪造成零用量。
 
 ## 常驻控件
 
@@ -107,6 +109,6 @@ powershell -ExecutionPolicy Bypass -File packaging\package_release.ps1 -VerifyOn
 
 `version.txt` 是版本源；构建脚本同步 C#、程序集和 Python 版本，并把同一份档位价格快照嵌入桌面与探针。CI 运行 C# 套件、Python 单元测试和共享核算样例，验证版本、ZIP 内容、SHA-256 与包管理清单，再允许标签发布。
 
-便携包名为 `TokLens-v<完整版本>-win-x64-portable.zip`。`packaging/scoop` 与 `packaging/winget` 是清单文件；生成或更新文件不代表已经提交到包管理器的公共仓库。发布前须使用最终构建重新生成对应哈希。
+Windows 主下载为单文件 `TokLens.exe`；可选便携包名为 `TokLens-v<完整版本>-win-x64-portable.zip`，内容仅有该 EXE。远端探针、macOS 脚本及校验清单作为独立发布附件。`packaging/scoop` 与 `packaging/winget` 是清单文件；生成或更新文件不代表已经提交到包管理器的公共仓库。发布前须使用最终构建重新生成对应哈希。
 
 更多：[更新日志](CHANGELOG.md) · [架构与数据契约](docs/ARCHITECTURE.md)
