@@ -18,7 +18,9 @@ $manifestNew = [regex]::Replace($manifest, $identityPattern, {
     [regex]::Replace($match.Value, '\bversion="[^"]+"', ('version="' + $version + '.0"'))
 })
 $agentPath = Join-Path $root 'vps\toklens_agent.py'
-$agent = [IO.File]::ReadAllText($agentPath)
+# Git's Windows checkout may convert Python to CRLF. Normalize before the
+# whole-line replacement so its regex cannot consume only the trailing CR.
+$agent = [IO.File]::ReadAllText($agentPath).Replace("`r`n", "`n")
 $pricing = Get-Content -LiteralPath (Join-Path $root 'pricing\service_tier_prices.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 $pricingJson = ConvertTo-Json -InputObject @($pricing) -Depth 20 -Compress
 # JSON is parsed at runtime rather than assuming JSON booleans/null are Python literals.
