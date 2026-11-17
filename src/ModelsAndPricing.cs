@@ -1047,7 +1047,9 @@ namespace TokLens
         private static string _lastCloudUpdated = "";
 
         private static readonly Regex SpaceUnderscoreRegex = new Regex(@"[\s_]+", RegexOptions.Compiled);
-        private static readonly Regex TierSuffixRegex = new Regex(@"-(?:xhigh|high|medium|low|minimal|thinking|nothinking|reasoning|preview|latest|beta|exp|experimental|max|auto|online|nitro|exacto|1m)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+        // Price-distinct variants (auto/max/fast/1m/routing modes) require their
+        // own exact quote; stripping them silently turns missing prices into money.
+        private static readonly Regex TierSuffixRegex = new Regex(@"-(?:xhigh|high|medium|low|minimal|thinking|nothinking|reasoning|preview|latest|beta|exp|experimental)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
         private static readonly Regex DateSuffixRegex = new Regex(@"-(?:20\d{6}|20\d{2}-\d{2}-\d{2}|\d{4})$", RegexOptions.Compiled);
         private static readonly Regex ClaudeDotVerRegex = new Regex(@"^(claude-(?:opus|sonnet|haiku|fable|mythos)-\d+)\.(\d+.*)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
         private static readonly Regex ClaudeDashVerRegex = new Regex(@"^(claude-(?:opus|sonnet|haiku|fable|mythos)-\d+)-(\d+)(?=-|$)(.*)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -2006,6 +2008,11 @@ namespace TokLens
             ev.CostBasis=tier=="unknown"?"estimated_unknown_tier":requestedOnly?"estimated_requested_tier":"estimated_standard";
             ev.PricingVersion="standard-reference-v2.4.0";
             ev.StandardEquivalentUsd=null;ev.ServiceTierPremiumUsd=null;
+            // A model-specific user quote (including an explicit zero price)
+            // overrides the standard reference. It does not quote Fast/Flex:
+            // those modes still require their own dated tier price below.
+            if((tier=="unknown"||tier=="standard")&&string.Equals(rate.Source,"custom",StringComparison.OrdinalIgnoreCase))
+            {ev.PricingVersion="custom-model-price";return;}
             if(tier=="unknown")
             {
                 ServiceTierPrice reference=FindTierPrice(ev,"standard");

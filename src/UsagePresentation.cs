@@ -157,8 +157,9 @@ namespace TokLens
                 _tiers.Children.Add(Text(g.BasisLabel + (g.ComparableRequests > 0 ? " · 相同用量额外估值 " + FormatterUtil.FormatMoney(g.PremiumUsd, cny, rate) + "（" + g.ComparableRequests + " 次可比）" : ""), true));
             }
             if (groups.Count == 0) _tiers.Children.Add(Text("当前范围暂无用量。", true));
+            string tierCoverage = total > 0 && unknown == total ? "当前范围 Fast 暂不可判定 · " + unknown.ToString("N0", CultureInfo.InvariantCulture) + " 次无可用档位信息" : string.Format(CultureInfo.InvariantCulture, "已识别 Fast / Ultrafast {0:N0} 次 · 档位未知 {1:N0} 次", fast, unknown);
             _header.Text = result == null ? "正在发现本机工具与日志…" : string.Format(CultureInfo.InvariantCulture,
-                "本机采集：{0}  ·  {1} 个工具  |  当前范围 Fast / Ultrafast {2:N0} 次 · 档位未知 {3:N0} 次", errors > 0 ? "需要检查" : found > 0 ? "已读取" : "等待日志", found, fast, unknown);
+                "本机采集：{0}  ·  {1} 个工具  |  {2}", errors > 0 ? "需要检查" : found > 0 ? "已读取" : "等待日志", found, tierCoverage);
             _intro.Text = hasUsage ? "本机采集状态与当前筛选用量分别展示。Fast（已请求）表示日志尚未证明实际执行档位。" : "无需登录即可读取本机用量；先完成一次 AI 请求，再查看采集结果。跨设备同步可以稍后配置。";
             _scope.Text = "服务档位 · 当前筛选范围 · " + total.ToString("N0", CultureInfo.InvariantCulture) + " 次请求";
             if (_initialState && result != null) { _expander.IsExpanded = !hasUsage || errors > 0; _initialState = false; }

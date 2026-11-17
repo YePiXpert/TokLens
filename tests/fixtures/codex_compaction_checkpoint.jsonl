@@ -1,0 +1,5 @@
+{"timestamp":"2026-11-17T12:00:00Z","type":"session_meta","payload":{"id":"compaction-checkpoint","model":"gpt-6.1-sol"}}
+{"timestamp":"2026-11-17T12:00:01Z","type":"token_usage_record","payload":{"response_id":"compaction-response","usage":{"input_tokens":300,"output_tokens":30},"thread_token_usage":{"input_tokens":400,"output_tokens":50}}}
+{"timestamp":"2026-11-17T12:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":400,"output_tokens":50}}}}
+{"timestamp":"2026-11-17T12:00:03Z","type":"compacted","payload":{"compaction_response_id":"compaction-response"}}
+{"timestamp":"2026-11-17T12:00:04Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":700,"output_tokens":80},"last_token_usage":{"input_tokens":300,"output_tokens":30}}}}

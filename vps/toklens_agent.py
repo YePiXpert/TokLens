@@ -34,12 +34,12 @@ try:
 except ImportError:
     fcntl = None
 
-AGENT_VERSION = "2.4.0"
+AGENT_VERSION = "2.4.1"
 BUNDLED_TIER_PRICES = json.loads(r'''[{"provider":"openai","model":"gpt-6.1-sol","tier":"standard","effective_from":"2026-11-17","input_per_m":2,"output_per_m":10,"cache_read_per_m":0.1,"cache_write_per_m":2.5,"cache_write_long_per_m":5,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":4,"long_output_per_m":15,"long_cache_read_per_m":0.2,"long_cache_write_per_m":5,"long_cache_write_long_per_m":10},{"provider":"openai","model":"gpt-6.1-sol","tier":"fast","effective_from":"2026-11-17","input_per_m":4,"output_per_m":20,"cache_read_per_m":0.2,"cache_write_per_m":5,"cache_write_long_per_m":10,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":8,"long_output_per_m":30,"long_cache_read_per_m":0.4,"long_cache_write_per_m":10,"long_cache_write_long_per_m":20},{"provider":"openai","model":"gpt-6.1-sol","tier":"ultrafast","effective_from":"2026-11-17","input_per_m":12,"output_per_m":60,"cache_read_per_m":0.6,"cache_write_per_m":15,"cache_write_long_per_m":30,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":24,"long_output_per_m":90,"long_cache_read_per_m":1.2,"long_cache_write_per_m":30,"long_cache_write_long_per_m":60},{"provider":"openai","model":"gpt-6-astra","tier":"standard","effective_from":"2026-11-17","input_per_m":10,"output_per_m":50,"cache_read_per_m":1,"cache_write_per_m":12.5,"cache_write_long_per_m":25,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":20,"long_output_per_m":75,"long_cache_read_per_m":2,"long_cache_write_per_m":25,"long_cache_write_long_per_m":50},{"provider":"openai","model":"gpt-6-astra","tier":"fast","effective_from":"2026-11-17","input_per_m":20,"output_per_m":100,"cache_read_per_m":2,"cache_write_per_m":25,"cache_write_long_per_m":50,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":40,"long_output_per_m":150,"long_cache_read_per_m":4,"long_cache_write_per_m":50,"long_cache_write_long_per_m":100},{"provider":"openai","model":"gpt-6-astra","tier":"ultrafast","effective_from":"2026-11-17","input_per_m":60,"output_per_m":300,"cache_read_per_m":6,"cache_write_per_m":75,"cache_write_long_per_m":150,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":120,"long_output_per_m":450,"long_cache_read_per_m":12,"long_cache_write_per_m":150,"long_cache_write_long_per_m":300},{"provider":"openai","model":"gpt-6.1-terra","tier":"standard","effective_from":"2026-11-17","input_per_m":1,"output_per_m":5,"cache_read_per_m":0.05,"cache_write_per_m":1.25,"cache_write_long_per_m":2.5,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":2,"long_output_per_m":7.5,"long_cache_read_per_m":0.1,"long_cache_write_per_m":2.5,"long_cache_write_long_per_m":5},{"provider":"openai","model":"gpt-6.1-terra","tier":"fast","effective_from":"2026-11-17","input_per_m":2,"output_per_m":10,"cache_read_per_m":0.1,"cache_write_per_m":2.5,"cache_write_long_per_m":5,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":4,"long_output_per_m":15,"long_cache_read_per_m":0.2,"long_cache_write_per_m":5,"long_cache_write_long_per_m":10},{"provider":"openai","model":"gpt-6-sol","tier":"standard","effective_from":"2026-11-17","input_per_m":2,"output_per_m":10,"cache_read_per_m":0.2,"cache_write_per_m":2.5,"cache_write_long_per_m":5,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":4,"long_output_per_m":15,"long_cache_read_per_m":0.4,"long_cache_write_per_m":5,"long_cache_write_long_per_m":10},{"provider":"openai","model":"gpt-6-sol","tier":"fast","effective_from":"2026-11-17","input_per_m":4,"output_per_m":20,"cache_read_per_m":0.4,"cache_write_per_m":5,"cache_write_long_per_m":10,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":8,"long_output_per_m":30,"long_cache_read_per_m":0.8,"long_cache_write_per_m":10,"long_cache_write_long_per_m":20},{"provider":"openai","model":"gpt-6-luna","tier":"standard","effective_from":"2026-11-17","input_per_m":0.1,"output_per_m":0.5,"cache_read_per_m":0.01,"cache_write_per_m":0.125,"cache_write_long_per_m":0.25,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":0.2,"long_output_per_m":0.75,"long_cache_read_per_m":0.02,"long_cache_write_per_m":0.25,"long_cache_write_long_per_m":0.5},{"provider":"openai","model":"gpt-6-luna","tier":"fast","effective_from":"2026-11-17","input_per_m":0.2,"output_per_m":1,"cache_read_per_m":0.02,"cache_write_per_m":0.25,"cache_write_long_per_m":0.5,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":0.4,"long_output_per_m":1.5,"long_cache_read_per_m":0.04,"long_cache_write_per_m":0.5,"long_cache_write_long_per_m":1},{"provider":"openai","model":"gpt-5.6-sol","tier":"standard","effective_from":"2026-11-17","input_per_m":4,"output_per_m":20,"cache_read_per_m":0.4,"cache_write_per_m":5,"cache_write_long_per_m":10,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":8,"long_output_per_m":30,"long_cache_read_per_m":0.8,"long_cache_write_per_m":10,"long_cache_write_long_per_m":20,"effective_until":"2026-11-30"},{"provider":"openai","model":"gpt-5.6-sol","tier":"fast","effective_from":"2026-11-17","input_per_m":8,"output_per_m":40,"cache_read_per_m":0.8,"cache_write_per_m":10,"cache_write_long_per_m":20,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":16,"long_output_per_m":60,"long_cache_read_per_m":1.6,"long_cache_write_per_m":20,"long_cache_write_long_per_m":40,"effective_until":"2026-11-30"},{"provider":"openai","model":"gpt-5.5","tier":"standard","effective_from":"2026-11-17","input_per_m":5,"output_per_m":30,"cache_read_per_m":0.5,"cache_write_per_m":0,"cache_write_long_per_m":0,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":10,"long_output_per_m":45,"long_cache_read_per_m":1,"long_cache_write_per_m":0,"long_cache_write_long_per_m":0},{"provider":"openai","model":"gpt-5.5","tier":"fast","effective_from":"2026-11-17","input_per_m":12.5,"output_per_m":75,"cache_read_per_m":1.25,"cache_write_per_m":0,"cache_write_long_per_m":0,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","max_prompt_tokens":272000},{"provider":"openai","model":"gpt-5.4","tier":"standard","effective_from":"2026-11-17","input_per_m":2.5,"output_per_m":15,"cache_read_per_m":0.25,"cache_write_per_m":0,"cache_write_long_per_m":0,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","long_input_per_m":5,"long_output_per_m":22.5,"long_cache_read_per_m":0.5,"long_cache_write_per_m":0,"long_cache_write_long_per_m":0},{"provider":"openai","model":"gpt-5.4","tier":"fast","effective_from":"2026-11-17","input_per_m":5,"output_per_m":30,"cache_read_per_m":0.5,"cache_write_per_m":0,"cache_write_long_per_m":0,"cache_write_long_duration":"12h","long_context_threshold":272000,"source":"https://developers.openai.com/api/docs/pricing.md","version":"official-2026-11-17","notes":"USD API reference; excludes tools, regional surcharges and subscription quota multipliers. Snapshot applies from verification date.","max_prompt_tokens":272000},{"provider":"anthropic","model":"claude-fable-5-2","tier":"standard","effective_from":"2026-11-17","input_per_m":8,"output_per_m":40,"cache_read_per_m":0.2,"cache_write_per_m":10,"cache_write_long_per_m":16,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-fable-5-2","tier":"fast","effective_from":"2026-11-17","input_per_m":16,"output_per_m":80,"cache_read_per_m":0.4,"cache_write_per_m":20,"cache_write_long_per_m":32,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-mythos-5-2","tier":"standard","effective_from":"2026-11-17","input_per_m":8,"output_per_m":40,"cache_read_per_m":0.2,"cache_write_per_m":10,"cache_write_long_per_m":16,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-mythos-5-2","tier":"fast","effective_from":"2026-11-17","input_per_m":16,"output_per_m":80,"cache_read_per_m":0.4,"cache_write_per_m":20,"cache_write_long_per_m":32,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-opus-5-5","tier":"standard","effective_from":"2026-11-17","input_per_m":4,"output_per_m":20,"cache_read_per_m":0.2,"cache_write_per_m":5,"cache_write_long_per_m":8,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-opus-5-5","tier":"fast","effective_from":"2026-11-17","input_per_m":8,"output_per_m":40,"cache_read_per_m":0.4,"cache_write_per_m":10,"cache_write_long_per_m":16,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-opus-5","tier":"standard","effective_from":"2026-11-17","input_per_m":5,"output_per_m":25,"cache_read_per_m":0.5,"cache_write_per_m":6.25,"cache_write_long_per_m":10,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-opus-5","tier":"fast","effective_from":"2026-11-17","input_per_m":10,"output_per_m":50,"cache_read_per_m":1,"cache_write_per_m":12.5,"cache_write_long_per_m":20,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-opus-4-8","tier":"standard","effective_from":"2026-11-17","input_per_m":5,"output_per_m":25,"cache_read_per_m":0.5,"cache_write_per_m":6.25,"cache_write_long_per_m":10,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."},{"provider":"anthropic","model":"claude-opus-4-8","tier":"fast","effective_from":"2026-11-17","input_per_m":10,"output_per_m":50,"cache_read_per_m":1,"cache_write_per_m":12.5,"cache_write_long_per_m":20,"cache_write_long_duration":"1h","source":"https://platform.claude.com/docs/en/about-claude/pricing","version":"official-2026-11-17","notes":"Anthropic first-party USD API reference; full context window; excludes regional surcharges and tools."}]''')  # Generated from pricing/service_tier_prices.json.
 SCHEMA_VERSION = "toklens.node.v2"
-SCANNER_REV = 30
+SCANNER_REV = 31
 RECONCILED_REVISION = 28
-CURSOR_SCHEMA_VERSION = "toklens.cursor.v2.10"
+CURSOR_SCHEMA_VERSION = "toklens.cursor.v2.11"
 CRON_MARKER = "# toklens-auto-sync"
 MAX_SQLITE_TEMP_COPY_BYTES = 128 * 1024 * 1024  # 128 MB 保护阈值，防止打满 VPS /tmp tmpfs
 LOG_MAX_BYTES = 131072  # 128 KB 触发滚动
@@ -722,6 +722,7 @@ class PricingLookup:
 
     def __init__(self, home: Path, allow_network: bool = True):
         self.rates = dict(BUILTIN_RATES)
+        self.custom_keys = set()
         self.tier_prices = []
         try:
             tier_file = Path(home).expanduser() / ".toklens" / "service_tier_prices.json"
@@ -761,6 +762,7 @@ class PricingLookup:
                                     max(0.0, safe_float(item.get("cache_read"))),
                                     max(0.0, safe_float(item.get("cache_write"))),
                                 )
+                                self.custom_keys.add(normalize_model(str(mid), str(mid).strip().lower()))
         except Exception:
             pass
 
@@ -953,24 +955,32 @@ class PricingLookup:
                 return False
         return True
 
-    def lookup(self, raw_model: str):
+    def _lookup_key(self, raw_model: str):
         slug = normalize_model(raw_model, "unknown")
         if slug in self.rates:
-            return self.rates[slug]
+            return slug
         stripped = re.sub(r"-(high|medium|low|minimal|thinking|preview|latest)$", "", slug, flags=re.I)
         if stripped in self.rates:
-            return self.rates[stripped]
+            return stripped
         no_date = re.sub(r"-(?:\d{8}|\d{4}-\d{2}-\d{2})$", "", stripped)
         if no_date in self.rates:
-            return self.rates[no_date]
+            return no_date
+        return None
 
+    def lookup(self, raw_model: str):
         # Unknown rates stay explicitly unpriced; do not borrow another model.
-        return (0.0, 0.0, 0.0, 0.0)
+        key = self._lookup_key(raw_model)
+        return self.rates[key] if key is not None else (0.0, 0.0, 0.0, 0.0)
 
-    def lookup_tier(self, model, provider, actual_tier, date, input_tokens=0):
+    def lookup_tier(self, model, provider, actual_tier, date, input_tokens=0, allow_custom=True):
         tier = normalize_service_tier(actual_tier)
+        custom_key = self._lookup_key(model) if allow_custom else None
+        if tier in ("standard", "unknown") and custom_key in self.custom_keys:
+            rates = self.rates[custom_key]
+            long_write = max(rates[3], rates[0] * 2.0) if provider == "anthropic" else rates[3]
+            return rates + (long_write,), "estimated_unknown_tier" if tier == "unknown" else "estimated_standard", "custom-model-price"
         if tier == "unknown":
-            rates, basis, version = self.lookup_tier(model, provider, "standard", date, input_tokens)
+            rates, basis, version = self.lookup_tier(model, provider, "standard", date, input_tokens, allow_custom=allow_custom)
             return rates, "estimated_unknown_tier" if basis != "unpriced" else basis, version
         matched = [p for p in self.tier_prices if str(p.get("provider", "")).lower() == provider.lower()
                    and normalize_model(p.get("model"), "unknown") == normalize_model(model, "unknown")
@@ -995,10 +1005,11 @@ class PricingLookup:
             return tuple(rates) + (cw1h_rate,), "estimated_tier_price", str(selected["version"]) + "|" + str(selected["source"])
         if tier in ("fast", "ultrafast", "flex"):
             return (0.0, 0.0, 0.0, 0.0, 0.0), "unpriced", ""
-        rates = self.lookup(model)
-        if not any(rates):
-            return rates + (0.0,), "unpriced", ""
-        return rates + (max(rates[3], rates[0] * 2.0) if provider == "anthropic" else rates[3],), "estimated_unknown_tier" if tier == "unknown" else "estimated_standard", "standard-reference-v" + AGENT_VERSION
+        rate_key = self._lookup_key(model)
+        if rate_key is None:
+            return (0.0, 0.0, 0.0, 0.0, 0.0), "unpriced", ""
+        rates = self.rates[rate_key]
+        return rates + (max(rates[3], rates[0] * 2.0) if provider == "anthropic" else rates[3],), "estimated_unknown_tier" if tier == "unknown" else "estimated_standard", "standard-reference-v2.4.0"
 
 
 def normalize_service_tier(value):
@@ -1011,13 +1022,13 @@ def tier_metadata(value=None, requested="unknown", provider="unknown"):
     """Only response evidence establishes actual service tier; session preferences do not."""
     value = value if isinstance(value, dict) else {}
     result = {"requested_tier": normalize_service_tier(requested), "actual_tier": "unknown",
-              "tier_evidence": "session:requested" if normalize_service_tier(requested) != "unknown" else "", "provider": str(value.get("provider") or value.get("model_provider") or provider).lower()}
+              "tier_evidence": "session:requested" if normalize_service_tier(requested) != "unknown" else "", "provider": str(value.get("provider") or value.get("model_provider") or value.get("model_provider_id") or provider).lower()}
     for key in ("requested_service_tier", "service_tier"):
         if key in value:
             result["requested_tier"] = normalize_service_tier(value[key])
             result["tier_evidence"] = key + "=" + str(value[key])
             break
-    if result["requested_tier"] == "unknown" and isinstance(value.get("fast_mode"), bool):
+    if not any(key in value for key in ("requested_service_tier", "service_tier")) and isinstance(value.get("fast_mode"), bool):
         result["requested_tier"] = "fast" if value["fast_mode"] else "standard"
         result["tier_evidence"] = "fast_mode=" + str(value["fast_mode"]).lower()
     response = value.get("response") if isinstance(value.get("response"), dict) else {}
@@ -1325,7 +1336,7 @@ def _init_ledger_connection(db_path: Path):
         if cur_ver != CURSOR_SCHEMA_VERSION:
             if cur_ver:
                 conn.commit()
-                backup = sqlite3.connect(str(db_path) + ".before-v30." + str(time.time_ns()) + ".db")
+                backup = sqlite3.connect(str(db_path) + ".before-v" + str(SCANNER_REV) + "." + str(time.time_ns()) + ".db")
                 try:
                     conn.backup(backup)
                 finally:
@@ -1633,16 +1644,54 @@ class CodexUsageState:
         self.rows = {}
         for index, ev in enumerate(events or []):
             self.rows[str(ev[9]) if len(ev) > 9 and ev[9] else "legacy:" + str(index)] = list(ev)
+        # Incremental replay protects earlier intent, even when it was unknown.
+        # A full source reparse may replace old cached intent with log evidence.
+        self.protected_requested = set(self.rows) if meta is not None else set()
         self.seen = list(self.meta.get("seen") or [])
+        batch = self.meta.get("uncheckpointed") or {}
+        self.uncheckpointed = {str(k): list(v) for k, v in batch.items() if isinstance(v, list) and len(v) == 4} if isinstance(batch, dict) else {}
+        self.compactions = set(self.meta.get("compactions") or [])
 
     @staticmethod
     def counters(value):
         if not isinstance(value, dict):
             return None
         inp, out = safe_int(value.get("input_tokens")), safe_int(value.get("output_tokens"))
-        read = min(inp, first_pos_int(value.get("cached_input_tokens"), value.get("cache_read_input_tokens"), value.get("cached_tokens")))
-        write = min(inp - read, first_pos_int(value.get("cache_write_input_tokens"), value.get("cache_creation_input_tokens")))
+        read = min(inp, max(safe_int(value.get(k)) for k in ("cached_input_tokens", "cache_read_input_tokens", "cached_tokens")))
+        write = min(inp - read, max(safe_int(value.get(k)) for k in ("cache_write_input_tokens", "cache_creation_input_tokens")))
         return [inp, out, read, write]
+
+    @staticmethod
+    def valid_embedded_usage(value):
+        if not isinstance(value, dict) or "input_tokens" not in value or "output_tokens" not in value:
+            return False
+        fields = ("input_tokens", "output_tokens", "cached_input_tokens", "cache_read_input_tokens", "cached_tokens", "cache_write_input_tokens", "cache_creation_input_tokens")
+        parsed = {}
+        for field in fields:
+            if field not in value:
+                continue
+            raw = value[field]
+            if isinstance(raw, bool) or raw is None:
+                return False
+            if isinstance(raw, float):
+                if not raw.is_integer():
+                    return False
+                number = int(raw)
+            elif isinstance(raw, int):
+                number = raw
+            elif isinstance(raw, str) and re.fullmatch(r"[+-]?[0-9]+", raw.strip()):
+                try:
+                    number = int(raw.strip())
+                except ValueError:
+                    return False
+            else:
+                return False
+            if number < 0 or number > 1000000000000000:
+                return False
+            parsed[field] = number
+        read = max(parsed.get(k, 0) for k in ("cached_input_tokens", "cache_read_input_tokens", "cached_tokens"))
+        write = max(parsed.get(k, 0) for k in ("cache_write_input_tokens", "cache_creation_input_tokens"))
+        return parsed["input_tokens"] + parsed["output_tokens"] > 0 and read + write <= parsed["input_tokens"]
 
     def remember(self, signature):
         if signature in self.seen:
@@ -1651,23 +1700,51 @@ class CodexUsageState:
         self.seen = self.seen[-128:]
         return True
 
-    def emit(self, usage, raw_ts, response=None, evidence=None):
+    def event_key(self, usage, raw_ts, response=None):
+        return "codex-response:" + str(response) if response else "codex:" + str(self.meta["tid"]) + ":" + str(_usage_epoch_ms(raw_ts, self.fallback)) + ":" + ",".join(map(str, usage))
+
+    def emit(self, usage, raw_ts, response=None, evidence=None, key_override=None):
         inp, out, read, write = usage
         if inp + out <= 0:
             return ""
         read, write = min(inp, read), min(inp - min(inp, read), write)
         ms = _usage_epoch_ms(raw_ts, self.fallback)
-        key = "codex-response:" + response if response else "codex:" + str(self.meta["tid"]) + ":" + str(ms) + ":" + ",".join(map(str, usage))
+        key = key_override or self.event_key(usage, raw_ts, response)
         row = ["OpenAI Codex", self.meta["mdl"], to_local_date(raw_ts, self.fallback, self.tz_offset_min), inp - read - write, out, read, write, 0.0, 1, key, 0, self.meta["tid"], ms]
-        metadata = tier_metadata(evidence, self.meta.get("requested_tier"), "openai")
+        metadata = tier_metadata(evidence, self.meta.get("requested_tier"), self.meta.get("provider", "openai"))
+        if metadata["tier_evidence"] in ("", "session:requested") and self.meta.get("requested_evidence"):
+            metadata["tier_evidence"] = self.meta["requested_evidence"]
         previous = event_tier_metadata(self.rows[key]) if key in self.rows else {}
-        if previous.get("requested_tier", "unknown") != "unknown":
+        old_row = self.rows.get(key)
+        if old_row is not None and old_row[1] != "unknown" and (key in self.protected_requested or row[1] == "unknown"):
+            row[1] = old_row[1]
+        response_model = (evidence.get("model") or evidence.get("model_name")) if isinstance(evidence, dict) else None
+        if response_model:
+            row[1] = normalize_model(response_model, "unknown")
+        if key in self.protected_requested and "requested_tier" in previous:
             metadata["requested_tier"] = previous["requested_tier"]
+            if metadata["actual_tier"] == "unknown":
+                metadata["tier_evidence"] = previous.get("tier_evidence", "")
         if metadata["actual_tier"] == "unknown" and previous.get("actual_tier", "unknown") != "unknown":
             metadata["actual_tier"] = previous["actual_tier"]
             metadata["tier_evidence"] = previous.get("tier_evidence", "")
         self.rows[key] = attach_tier_metadata(row, metadata)
+        self.protected_requested.add(key)
         return key
+
+    def record_usage(self, payload, timestamp):
+        usage = self.counters(payload.get("usage"))
+        if usage is None:
+            return
+        key = self.event_key(usage, timestamp, payload.get("response_id"))
+        old_pending_key = self.meta.get("pending_key")
+        if key not in self.protected_requested or key in self.uncheckpointed:
+            self.uncheckpointed[key] = usage
+        self.meta["pending_key"] = self.emit(usage, timestamp, payload.get("response_id"), payload)
+        self.meta["pending"] = usage
+        checkpoint = self.counters(payload.get("thread_token_usage"))
+        if checkpoint is not None or old_pending_key != key:
+            self.meta["pending_thread_total"] = checkpoint
 
     def on_line(self, line, _index=0):
         obj = json.loads(line)
@@ -1676,19 +1753,34 @@ class CodexUsageState:
         typ, p, ts = obj.get("type"), obj["payload"], obj.get("timestamp")
         if typ == "session_meta":
             self.meta["tid"] = str(p.get("id") or self.meta["tid"])
-            self.meta["parent"] = str(p.get("forked_from_id") or "")
-            self.meta["fork_ms"] = _usage_epoch_ms(ts, self.fallback)
-        if typ in ("session_meta", "turn_context") or p.get("type") == "thread_settings_applied":
-            if p.get("model"):
-                self.meta["mdl"] = normalize_model(str(p["model"]), "unknown")
+            source = p.get("source") if isinstance(p.get("source"), dict) else {}
+            subagent = source.get("subagent") if isinstance(source.get("subagent"), dict) else {}
+            spawn = subagent.get("thread_spawn") if isinstance(subagent.get("thread_spawn"), dict) else {}
+            self.meta["parent"] = str(p.get("forked_from_id") or spawn.get("parent_thread_id") or "")
+            self.meta["fork_ms"] = _usage_epoch_ms(ts, 0)
+        is_thread_settings = typ == "event_msg" and p.get("type") == "thread_settings_applied"
+        if typ in ("session_meta", "turn_context") or is_thread_settings:
+            settings = p.get("thread_settings") if is_thread_settings else None
+            settings = settings if isinstance(settings, dict) else p
+            if settings.get("model"):
+                self.meta["mdl"] = normalize_model(str(settings["model"]), "unknown")
+            provider = settings.get("provider") or settings.get("model_provider") or settings.get("model_provider_id")
+            if provider:
+                self.meta["provider"] = str(provider).lower()
             # Preferences establish requested tier only, never actual execution.
-            if "service_tier" in p or "requested_service_tier" in p or "fast_mode" in p:
-                self.meta["requested_tier"] = tier_metadata(p)["requested_tier"]
+            if any(key in settings for key in ("service_tier", "requested_service_tier", "fast_mode")):
+                self.meta["requested_tier"] = tier_metadata(settings)["requested_tier"]
+                self.meta["requested_evidence"] = "thread_settings:requested" if is_thread_settings else "session:requested"
         if typ == "token_usage_record":
-            usage = self.counters(p.get("usage"))
-            if usage is not None:
-                self.meta["pending_key"] = self.emit(usage, ts, p.get("response_id"), p)
-                self.meta["pending"] = usage
+            self.record_usage(p, ts)
+            return
+        if typ == "compacted":
+            response_id = str(p.get("compaction_response_id") or "")
+            if response_id:
+                self.compactions.add("codex-response:" + response_id)
+                embedded = p.get("latest_token_usage_record")
+                if isinstance(embedded, dict) and embedded.get("response_id") == response_id and self.valid_embedded_usage(embedded.get("usage")):
+                    self.record_usage(embedded, ts)
             return
         if typ != "event_msg" or p.get("type") != "token_count" or not isinstance(p.get("info"), dict):
             return
@@ -1698,29 +1790,53 @@ class CodexUsageState:
             self.meta["mdl"] = normalize_model(str(model), "unknown")
         last, total = self.counters(info.get("last_token_usage")), self.counters(info.get("total_token_usage"))
         previous = self.meta.get("previous")
+        unchanged_total = total is not None and previous is not None and total == previous
         reset = total is not None and previous is not None and sum(total[:2]) < sum(previous[:2])
-        if reset and last is None:
+        if reset:
+            # Equal snapshots in different counter epochs are distinct usage.
+            # Response-ID records and their original intent remain untouched.
             self.seen.clear()
         duplicate = total is not None and not self.remember(json.dumps([total, last], separators=(",", ":")))
+        # A changed last snapshot does not establish another request when the
+        # cumulative counters have not advanced. Native response IDs above are
+        # already recorded independently and still take part in pairing below.
+        duplicate = duplicate or unchanged_total
         usage = last if last is not None else ([max(0, total[i] - (previous[i] if previous and not reset else 0)) for i in range(4)] if total is not None else None)
+        checkpoint = self.meta.pop("pending_thread_total", None)
+        matched_checkpoint = total is not None and not unchanged_total and checkpoint is not None and total == checkpoint and self.meta.get("pending_key") in self.rows
+        if matched_checkpoint:
+            # The native records already carry their own response identities.
+            # A confirmed thread checkpoint contributes only the uncovered gap.
+            native = [sum(values[i] for values in self.uncheckpointed.values()) for i in range(4)]
+            if not self.uncheckpointed:
+                native = self.meta.get("pending") or [0, 0, 0, 0]
+            usage = [max(0, total[i] - (previous[i] if previous and not reset else 0) - native[i]) for i in range(4)]
+            usage[2] = min(usage[0], usage[2])
+            usage[3] = min(usage[0] - usage[2], usage[3])
         if total is not None:
             self.meta["previous"] = total
         pending = self.meta.pop("pending", None)
-        covered = pending is not None and (pending == usage or last is not None and last[0] + last[1] == 0)
+        covered = usage[0] + usage[1] == 0 if matched_checkpoint else pending is not None and self.meta.get("pending_key") not in self.compactions and (pending == usage or last is not None and last[0] + last[1] == 0)
         pending_key = self.meta.pop("pending_key", "")
-        if covered and model and pending_key in self.rows:
+        if (covered or matched_checkpoint) and model and pending_key in self.rows:
             self.rows[pending_key][1] = self.meta["mdl"]
-        if covered and pending_key in self.rows:
-            extra = tier_metadata(info, self.meta.get("requested_tier"), "openai")
+        if (covered or matched_checkpoint) and pending_key in self.rows:
             existing = event_tier_metadata(self.rows[pending_key])
-            if extra["actual_tier"] != "unknown" or existing.get("actual_tier", "unknown") == "unknown":
+            extra = tier_metadata(info, existing.get("requested_tier"), existing.get("provider", "openai"))
+            if "requested_tier" in existing:
+                extra["requested_tier"] = existing["requested_tier"]
+            if extra["actual_tier"] != "unknown":
                 attach_tier_metadata(self.rows[pending_key], extra)
         if not duplicate and not covered and usage is not None:
             if total is not None or self.remember(str(ts) + "|" + json.dumps(usage)):
-                self.emit(usage, ts, evidence=info)
+                remainder_key = "codex-checkpoint:" + str(self.meta["tid"]) + ":" + str(_usage_epoch_ms(ts, self.fallback)) + ":" + ",".join(map(str, total)) if matched_checkpoint else None
+                self.emit(usage, ts, evidence=info, key_override=remainder_key)
+        self.uncheckpointed.clear()
 
     def state(self):
         self.meta["seen"] = self.seen
+        self.meta["uncheckpointed"] = self.uncheckpointed
+        self.meta["compactions"] = sorted(self.compactions)
         self.meta["accounting_rev"] = SCANNER_REV
         return self.meta
 
@@ -1805,17 +1921,40 @@ class MultiHarnessScanner:
             meta = cursor.get("meta") or {}
             if meta.get("tid") and meta.get("parent"):
                 parents[str(meta["tid"])] = (str(meta["parent"]), safe_int(meta.get("fork_ms")))
-        for ev, tid in self.request_events.values():
+        for key, (ev, tid) in self.request_events.items():
             if len(ev) > 12 and ev[0] == "OpenAI Codex":
-                timelines.setdefault(str(ev[11] or tid), set()).add((ev[12], *ev[3:7]))
+                timelines.setdefault(str(ev[11] or tid), []).append((key, ev))
+        inherited = set()
+        for child, (parent, fork_ms) in parents.items():
+            if fork_ms <= 0 or child == parent:
+                continue
+            parent_rows = [ev for _, ev in timelines.get(parent, []) if 0 < ev[12] <= fork_ms]
+            if not parent_rows:
+                continue
+            next_parent = None
+            for key, ev in timelines.get(child, []):
+                # Only a contiguous inherited prefix before the first native
+                # response can alias a known parent. Never erase native IDs.
+                if key.startswith("codex-response:"):
+                    break
+                def matches(parent_event):
+                    return ev[3:7] == parent_event[3:7] and ev[12] > 0 and ev[12] in (parent_event[12], fork_ms)
+                if next_parent is None:
+                    next_parent = next((i for i, item in enumerate(parent_rows) if matches(item)), -1)
+                if next_parent < 0 or next_parent >= len(parent_rows) or not matches(parent_rows[next_parent]):
+                    break
+                inherited.add(key)
+                next_parent += 1
         aliases = {}
         for key, (ev, tid) in self.request_events.items():
+            if key in inherited:
+                continue
+            if key.startswith("codex-checkpoint:"):
+                self._emit_ev_list([ev])
+                continue
             if len(ev) > 12 and ev[0] == "OpenAI Codex":
                 tid = str(ev[11] or tid)
                 signature = (ev[12], *ev[3:7])
-                parent = parents.get(tid)
-                if parent and ev[12] <= parent[1] and signature in timelines.get(parent[0], set()):
-                    continue
                 alias = (tid, signature)
                 previous = aliases.get(alias)
                 if previous is not None and not (key.startswith("codex-response:") and previous.startswith("codex-response:") and key != previous):
@@ -2372,7 +2511,7 @@ class MultiHarnessScanner:
 
                         def on_line(line, index):
                             nonlocal failed
-                            if not any(word in line for word in ("token_count", "token_usage_record", "turn_context", "thread_settings_applied", "session_meta")):
+                            if not any(word in line for word in ("token_count", "token_usage_record", "turn_context", "thread_settings_applied", "session_meta", "compacted")):
                                 return
                             try:
                                 parser.on_line(line, index)
@@ -3538,6 +3677,7 @@ class MultiHarnessScanner:
             turns = max(1, min(1_000_000_000, safe_int(turns)))
             effective_tier = actual_tier if actual_tier != "unknown" else requested
             rates, basis, pricing_version = self.pricing.lookup_tier(model, provider, effective_tier, dt, fi + cr + cw)
+            price_available = basis != "unpriced"
             if actual_tier == "unknown" and requested != "unknown" and basis != "unpriced":
                 basis = "estimated_requested_tier"
             inp_r, out_r, cr_r, cw_r, cw1h_r = rates
@@ -3548,13 +3688,13 @@ class MultiHarnessScanner:
             if safe_logged > 0:
                 basis, pricing_version = "reported", "source-reported"
             standard_equivalent, premium = None, None
-            if basis in ("estimated_tier_price", "estimated_standard", "estimated_requested_tier") and effective_tier != "unknown":
-                standard_rates, standard_basis, _ = self.pricing.lookup_tier(model, provider, "standard", dt, fi + cr + cw)
-                if standard_basis != "unpriced":
+            if basis in ("estimated_tier_price", "estimated_requested_tier") and pricing_version != "custom-model-price" and effective_tier != "unknown":
+                standard_rates, standard_basis, _ = self.pricing.lookup_tier(model, provider, "standard", dt, fi + cr + cw, allow_custom=effective_tier == "standard")
+                if standard_basis == "estimated_tier_price":
                     standard_equivalent = (fi * standard_rates[0] + out_tok * standard_rates[1] + cr * standard_rates[2] + cw5m * standard_rates[3] + cw1h_c * standard_rates[4]) / 1e6
                     premium = max(0.0, actual - standard_equivalent)
             baseline = max(base, actual)
-            rate_lbl = f"${inp_r:g} / ${out_r:g}" if any((inp_r, out_r, cr_r, cw_r)) else "未定价"
+            rate_lbl = f"${inp_r:g} / ${out_r:g}" if price_available else "未定价"
             k = (dt, tool, model, requested, actual_tier, basis, pricing_version, provider)
             if k not in buckets:
                 buckets[k] = [dt, tool, model, 0, 0, 0, 0, 0, 0.0, 0.0, rate_lbl, requested, actual_tier, str(metadata.get("tier_evidence") or ""), basis, pricing_version, provider, 0.0 if standard_equivalent is not None else None, 0.0 if premium is not None else None]

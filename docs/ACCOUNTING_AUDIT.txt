@@ -1,0 +1,44 @@
+TokLens 2.4.1 统计口径交叉核验
+核验日期：2026-11-17
+
+结论
+金额接近另一款软件不足以证明核算正确。本轮按日志字段、请求身份、累计计数、档位证据、价格来源分项核对，并把已确认差异转为 C# / Python 回归样例。
+核验方式为公开源码审阅、合成日志回放与 TokLens 测试；并未把三款参考软件的完整桌面程序在同一账户上运行一遍。
+
+参考版本与来源
+1. CC Switch：ed6d51e590ff8a34431ca60eacfc78e12704075b
+   https://github.com/farion1231/cc-switch/blob/ed6d51e590ff8a34431ca60eacfc78e12704075b/src-tauri/src/services/session_usage_codex.rs
+   https://github.com/farion1231/cc-switch/blob/ed6d51e590ff8a34431ca60eacfc78e12704075b/src-tauri/src/proxy/usage/calculator.rs
+2. ccusage：58866ba681343634ab6e5add61f18f3b70aa98f7
+   https://github.com/ccusage/ccusage/blob/58866ba681343634ab6e5add61f18f3b70aa98f7/rust/adapters/codex/src/parser.rs
+   https://github.com/ccusage/ccusage/blob/58866ba681343634ab6e5add61f18f3b70aa98f7/rust/adapters/codex/src/speed.rs
+   https://github.com/ccusage/ccusage/blob/58866ba681343634ab6e5add61f18f3b70aa98f7/rust/adapters/codex/src/compaction_tests.rs
+   https://github.com/ccusage/ccusage/blob/58866ba681343634ab6e5add61f18f3b70aa98f7/rust/adapters/codex/src/aggregate.rs#L1927-L1936
+3. Magpie：00b2c11a6b481bc1c2a909dfa9f5396f618fdd28
+   https://github.com/yetone/magpie/blob/00b2c11a6b481bc1c2a909dfa9f5396f618fdd28/internal/sessions/codex_usage.go
+   https://github.com/yetone/magpie/blob/00b2c11a6b481bc1c2a909dfa9f5396f618fdd28/internal/catalog/catalog.go
+   https://usemagpie.ai/docs/usage
+4. 官方定价与本次内置规则：
+   https://developers.openai.com/api/docs/pricing.md
+   pricing/service_tier_prices.json（每条规则保留来源、生效日期和版本）
+
+逐项结果
+• Token 构成：Codex input 已含缓存读取，fresh input 必须扣除缓存，不能把 input 再与 cached input 相加。推理 Token 属于输出的组成部分，不额外加到总量。参考项目与 TokLens 的这项口径一致。
+• 逐次与累计：优先使用有效 last usage；仅有 total 时计算增量。补测计数重置、累计量不变而 last 被修改、同一原生 response 的重复观察。存在独立 response ID 的请求不因相同用量而被删除。
+• 分叉会话：必须有明确 parent 和可核对的父账；仅剔除子会话最前方可证实的有序继承前缀。允许日志把继承项时间精确改写为 fork 时间；遇到原生 response ID 或首个不匹配就停止。相同原生 ID 另行全局去重；缺父证据、仅时间接近均不猜测删除。
+• 上下文压缩：thread counter 与 legacy counter 可能不同，不能普遍相减。修复仅在明确 thread checkpoint 与后续 total 四分量完全一致时扣除已经记录的 native batch；压缩 marker 不吞掉之后同量的普通请求。共享样例覆盖逐行恢复与重复响应。
+• 内嵌压缩记录：支持 compacted.latest_token_usage_record，但必须与 compaction_response_id 完全匹配且数值有效。它与后续同 ID 原生记录只入账一次；无用量的 marker 或身份不匹配的内容不补造用量。
+• Fast：新版 Codex 的历史事件可使用 event_msg → thread_settings_applied → thread_settings.service_tier。已修复漏读嵌套。请求 priority 归为“Fast 已请求”；没有响应证据时实际档位仍未知。
+• 参考项目的差别：CC Switch 本次审阅的本地会话入账路径未按 Fast 单独计价；不能用其总额校准 Fast。ccusage 支持历史设置，也可用当前 config / 强制 speed 选项作为缺失档位的定价兜底。TokLens 不据当前配置回填历史事实，因此无证据历史可能与其默认输出不同。
+• 价格：Magpie 区分明确零价和未定价，并避免把 auto/max/fast 等可能不同价的变体归到基础价。TokLens 已补齐相应保护。明确自定义普通价格优先于内置普通价；Fast 等仍需对应档位报价。
+• 时间范围：对比前要一致的设备、时区、日期边界、日志范围和模型。Magpie 的 --last / --days 是截至当前的滚动窗口，不能直接当作从当地午夜起的“今日”。
+
+回归入口
+tests/run_tests.ps1
+python -m unittest discover -s tests -p 'test_*.py' -v
+关键样例：codex_thread_settings、codex_counter_reset、codex_unchanged_total、codex_fork_parent/child、codex_compaction_checkpoint/batch、codex_embedded_compaction，以及 service_tier_cases。
+发布 CI 还会检查版本一致、单文件 ZIP、EXE 版本、SHA-256、更新替换与回滚事务。
+
+仍需保留的边界
+本轮验证不等于保证所有未来日志格式都正确；缺失的日志、缺失实际档位和未知价格不能从总额补造。旧历史缺少父源时仍保留已有记录。官方订阅实付与余额需要官方账户数据，API 参考估值不能替代它们。
+服务档位价格快照只对其生效区间负责；本轮核验的当前单价不会自动追溯证明更早日期。自定义基础价不代表特定代理实际收取的 Fast 费用。

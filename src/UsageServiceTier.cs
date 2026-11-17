@@ -88,7 +88,7 @@ namespace TokLens
             if(requested!="unknown"||requestedRaw!=null)
             {target.RequestedServiceTier=requested;if(Normalize(target.ActualServiceTier)=="unknown")target.TierEvidence=source+":requested";}
             if(actual!="unknown") {target.ActualServiceTier=actual;target.TierEvidence="response:actual";}
-            string provider=S(data,"provider")??S(data,"model_provider");
+            string provider=S(data,"provider")??S(data,"model_provider")??S(data,"model_provider_id");
             if(!string.IsNullOrWhiteSpace(provider))target.Provider=provider.ToLowerInvariant();
             string cwd=S(data,"cwd")??S(data,"workspace"); if(!string.IsNullOrWhiteSpace(cwd))target.Workspace=cwd;
             string session=S(data,"session_id")??S(data,"conversation_id");if(!string.IsNullOrWhiteSpace(session))target.SessionId=session;

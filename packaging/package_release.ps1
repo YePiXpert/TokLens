@@ -39,7 +39,8 @@ function Assert-Release {
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip=[IO.Compression.ZipFile]::OpenRead($zipPath)
     try {
-        foreach ($entry in @('TokLens.exe','vps/toklens_agent.py','vps/install_macos_launchd.sh','pricing/service_tier_prices.json','README.md','version.txt')) {
+        if ($zip.Entries.Count -ne 1) { throw 'The Windows portable archive must contain only TokLens.exe.' }
+        foreach ($entry in @('TokLens.exe')) {
             $found=$zip.GetEntry($entry)
             if ($null -eq $found -or $found.Length -eq 0) { throw "Missing or empty archive entry: $entry" }
         }
@@ -53,7 +54,7 @@ if (-not $SkipBuild) {
     try { & cmd.exe /d /c 'build.bat --nopause'; if ($LASTEXITCODE -ne 0) { throw 'Build failed.' } } finally { Pop-Location }
 }
 New-Item -ItemType Directory -Path $dist,$manifestDir -Force | Out-Null
-$sources=[ordered]@{'TokLens.exe'='TokLens.exe';'vps/toklens_agent.py'='vps/toklens_agent.py';'vps/install_macos_launchd.sh'='vps/install_macos_launchd.sh';'pricing/service_tier_prices.json'='pricing/service_tier_prices.json';'README.md'='README.md';'version.txt'='version.txt'}
+$sources=[ordered]@{'TokLens.exe'='TokLens.exe'}
 foreach ($relative in $sources.Values) {
     $path=Join-Path $root $relative
     if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -eq 0) { throw "Missing or empty input: $relative" }

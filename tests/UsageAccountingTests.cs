@@ -174,7 +174,7 @@ internal static class UsageAccountingTests
         using (WinSqlite db = WinSqlite.OpenReadWrite(LocalUsageStore.DbFilePath)) db.ExecRequired("UPDATE kv_meta SET v='toklens.store.v2.7' WHERE k='schema'");
         ResetStore(); scan = new TokenScanner(home, false).Run();
         Check(scan.Records[0].TotalTokens == 120, "migration preserves deleted request cursors when no live files remain");
-        Check(Directory.GetFiles(Path.GetDirectoryName(LocalUsageStore.DbFilePath), "*.before-v2.11.*.db").Length > 0, "migration creates SQLite-consistent backup");
+        Check(Directory.GetFiles(Path.GetDirectoryName(LocalUsageStore.DbFilePath), "*"+LocalUsageStore.UpgradeBackupPrefix+"*.db").Length > 0, "migration creates SQLite-consistent backup");
     }
     private static void StoreFailures(string root)
     {

@@ -59,6 +59,35 @@ internal static class ServiceTierTests
         Check(decoded.Count==3&&decoded[0].Workspace=="C:/project"&&decoded[1].ActualServiceTier=="unknown"&&decoded[2].ActualServiceTier=="fast","cursor metadata roundtrip");
         UsageEvent legacy=LocalUsageStore.DeserializeEvents("OpenAI Codex\tgpt-6.1-sol\t2026-11-17\t1\t2\t0\t0\t0\t1")[0];
         Check(legacy.RequestedServiceTier=="unknown"&&legacy.ActualServiceTier=="unknown","old cursor never becomes standard");
+
+        CodexUsageParser desktop=new CodexUsageParser("OpenAI Codex","desktop-thread",now,"",null);
+        desktop.OnLine(Frame("turn_context",O("model","gpt-6-astra"),now),0);
+        desktop.OnLine(Frame("token_usage_record",O("response_id","before","usage",Usage()),now.AddSeconds(1)),1);
+        desktop.OnLine(Frame("event_msg",O("type","thread_settings_applied","thread_settings",O("model","gpt-6.1-sol","model_provider_id","openai","service_tier","priority")),now.AddSeconds(2)),2);
+        desktop.OnLine(Frame("token_usage_record",O("response_id","fast","usage",Usage()),now.AddSeconds(3)),3);
+        Check(desktop.Events[0].RequestedServiceTier=="unknown","later desktop settings never backfill earlier requests");
+        Check(desktop.Events[1].RequestedServiceTier=="fast"&&desktop.Events[1].ActualServiceTier=="unknown"&&desktop.Events[1].TierEvidence=="thread_settings:requested","native desktop nested settings establish requested Fast evidence only");
+        Check(desktop.Events[1].Model=="gpt-6.1-sol"&&desktop.Events[1].Provider=="openai","native desktop nested model and provider are used");
+        desktop.OnLine(Frame("token_usage_record",O("response_id","before","usage",Usage()),now.AddMilliseconds(3500)),3);
+        Check(desktop.Events[0].RequestedServiceTier=="unknown","replaying an originally unknown response after Fast does not backfill it");
+        desktop=new CodexUsageParser("OpenAI Codex","desktop-thread",now,desktop.SerializeState(),desktop.Events);
+        desktop.OnLine(Frame("token_usage_record",O("response_id","before","usage",Usage()),now.AddMilliseconds(3600)),3);
+        Check(desktop.Events[0].RequestedServiceTier=="unknown","incremental cursor replay also preserves an originally unknown intent");
+        desktop.OnLine(Frame("event_msg",O("type","thread_settings_applied","thread_settings",O("model","gpt-6-astra")),now.AddSeconds(4)),4);
+        desktop.OnLine(Frame("token_usage_record",O("response_id","resumed","usage",Usage(),"response",O("service_tier","default")),now.AddSeconds(5)),5);
+        Check(desktop.Events[2].RequestedServiceTier=="fast"&&desktop.Events[2].ActualServiceTier=="standard","resumed desktop settings persist while response tier remains authoritative");
+        desktop.OnLine(Frame("event_msg",O("type","thread_settings_applied","thread_settings",O("service_tier",null)),now.AddSeconds(6)),6);
+        desktop.OnLine(Frame("token_usage_record",O("response_id","cleared","usage",Usage()),now.AddSeconds(7)),7);
+        Check(desktop.Events[3].RequestedServiceTier=="unknown"&&desktop.Events[3].ActualServiceTier=="unknown","explicit desktop null resets intent without inventing Standard");
+        desktop.OnLine(Frame("event_msg",O("type","thread_settings_applied","thread_settings",O("service_tier","priority")),now.AddSeconds(8)),8);
+        desktop.OnLine(Frame("event_msg",O("type","thread_settings_applied","thread_settings",O("service_tier","new-future-tier")),now.AddSeconds(9)),9);
+        desktop.OnLine(Frame("token_usage_record",O("response_id","future","usage",Usage()),now.AddSeconds(10)),10);
+        Check(desktop.Events[4].RequestedServiceTier=="unknown","unsupported desktop tier never leaks the prior Fast intent");
+        desktop.OnLine(Frame("token_usage_record",O("response_id","fast","usage",Usage()),now.AddSeconds(11)),11);
+        Check(desktop.Events[1].RequestedServiceTier=="fast","replayed desktop response keeps its original requested tier");
+        desktop.OnLine(Frame("response_item",O("type","thread_settings_applied","thread_settings",O("service_tier","priority","model","gpt-5.5")),now.AddSeconds(12)),12);
+        desktop.OnLine(Frame("token_usage_record",O("response_id","non-settings-item","usage",Usage()),now.AddSeconds(13)),13);
+        Check(desktop.Events[5].RequestedServiceTier=="unknown"&&desktop.Events[5].Model=="gpt-6-astra","only event_msg may apply thread settings; response-item content cannot change model or tier");
     }
     private static void PriceSupportLimits(string root)
     {
@@ -79,6 +108,112 @@ internal static class ServiceTierTests
             Equal(cost,4.25,model+" reported cost still wins above rate-table support limit");Check(ev.CostBasis=="reported",model+" reported cost provenance");
             ev.LoggedCostUsd=0;ev.ActualServiceTier="standard";engine.ComputeEventCost(ev,out cost,out baseline,out rate);
             Check(cost>0&&ev.CostBasis=="estimated_tier_price",model+" actual Standard uses its own supported long-context rate");
+        }
+    }
+    private static void SharedDesktopFixture()
+    {
+        CodexUsageParser parser=new CodexUsageParser("OpenAI Codex","fixture",DateTime.UtcNow,"",null);
+        foreach(string line in File.ReadLines(Path.Combine(Environment.CurrentDirectory,"tests","fixtures","codex_thread_settings.jsonl")))parser.OnLine(line,0);
+        string[] expected={"unknown","fast","fast","unknown","standard","unknown"};
+        Check(parser.Events.Count==expected.Length,"shared native desktop fixture preserves all six distinct responses");
+        for(int i=0;i<expected.Length;i++)
+        {
+            Check(parser.Events[i].RequestedServiceTier==expected[i],"shared desktop historical requested tier "+i);
+            Check(parser.Events[i].ActualServiceTier=="unknown","shared desktop actual tier stays unknown without response evidence "+i);
+        }
+        Check(parser.Events[1].TierEvidence=="thread_settings:requested"&&parser.Events[1].Model=="gpt-6-astra","shared desktop nested attribution and evidence");
+    }
+    private static void CounterResetEpoch()
+    {
+        CodexUsageParser parser=new CodexUsageParser("OpenAI Codex","counter-fixture",DateTime.UtcNow,"",null);
+        foreach(string line in File.ReadLines(Path.Combine(Environment.CurrentDirectory,"tests","fixtures","codex_counter_reset.jsonl")))parser.OnLine(line,0);
+        long input=0;foreach(UsageEvent ev in parser.Events)input+=ev.FreshInput;
+        Check(parser.Events.Count==3&&input==300,"counter reset with exact last usage allows an older signature in the new epoch but deduplicates its repeat");
+        DateTime now=DateTime.UtcNow;
+        parser=new CodexUsageParser("OpenAI Codex","id-fixture",now,"",null);
+        foreach(int i in new[]{0,1,2})
+        {
+            parser.OnLine(Frame("token_usage_record",O("response_id",i==1?"second":"first","usage",Usage()),now.AddSeconds(i*2)),i*2);
+            parser.OnLine(Frame("event_msg",O("type","token_count","info",O("total_token_usage",O("input_tokens",i==1?200:100,"output_tokens",i==1?40:20,"cached_input_tokens",i==1?50:25),"last_token_usage",Usage())),now.AddSeconds(i*2+1)),i*2+1);
+        }
+        Check(parser.Events.Count==2,"counter epoch reset never resets response-ID deduplication");
+    }
+    private static void UnchangedCumulativeTotal()
+    {
+        CodexUsageParser parser=new CodexUsageParser("OpenAI Codex","unchanged-total",DateTime.UtcNow,"",null);
+        string[] lines=File.ReadAllLines(Path.Combine(Environment.CurrentDirectory,"tests","fixtures","codex_unchanged_total.jsonl"));
+        for(int i=0;i<3;i++)parser.OnLine(lines[i],i);
+        Check(parser.Events.Count==1,"changed last usage cannot add a request when cumulative totals are unchanged");
+        parser=new CodexUsageParser("OpenAI Codex","unchanged-total",DateTime.UtcNow,parser.SerializeState(),parser.Events);
+        for(int i=3;i<lines.Length;i++)parser.OnLine(lines[i],i);
+        long input=0,output=0;foreach(UsageEvent ev in parser.Events){input+=ev.FreshInput+ev.CacheRead+ev.CacheWrite;output+=ev.Output;}
+        Check(parser.Events.Count==2&&input==200&&output==40,"unchanged totals do not suppress an independently identified response across cursor resume");
+        Check(parser.Events[1].ActualServiceTier=="fast","unchanged token snapshot may still enrich the matching response metadata");
+    }
+    private static void ReplayedResponseModel()
+    {
+        DateTime now=DateTime.UtcNow;CodexUsageParser parser=new CodexUsageParser("OpenAI Codex","replay-model",now,"",null);
+        parser.OnLine(Frame("turn_context",O("model","gpt-6-astra"),now),0);
+        parser.OnLine(Frame("token_usage_record",O("response_id","original","usage",Usage()),now.AddSeconds(1)),1);
+        parser=new CodexUsageParser("OpenAI Codex","replay-model",now,parser.SerializeState(),parser.Events);
+        parser.OnLine(Frame("turn_context",O("model","gpt-6.1-sol"),now.AddSeconds(2)),2);
+        parser.OnLine(Frame("token_usage_record",O("response_id","original","usage",Usage()),now.AddSeconds(3)),3);
+        Check(parser.Events.Count==1&&parser.Events[0].Model=="gpt-6-astra","replayed response cannot acquire a later turn's model");
+        parser.OnLine(Frame("token_usage_record",O("response_id","original","model","gpt-5.5","usage",Usage()),now.AddSeconds(4)),4);
+        Check(parser.Events[0].Model=="gpt-5.5","explicit model on the identified response may correct contextual model attribution");
+    }
+    private static void CompactionCheckpoints()
+    {
+        foreach(bool incremental in new[]{false,true})foreach(string name in new[]{"codex_compaction_checkpoint.jsonl","codex_compaction_batch.jsonl"})
+        {
+            CodexUsageParser parser=new CodexUsageParser("OpenAI Codex","checkpoint",DateTime.UtcNow,"",null);
+            foreach(string line in File.ReadLines(Path.Combine(Environment.CurrentDirectory,"tests","fixtures",name)))
+            {
+                parser.OnLine(line,0);
+                if(incremental)parser=new CodexUsageParser("OpenAI Codex","checkpoint",DateTime.UtcNow,parser.SerializeState(),parser.Events);
+            }
+            long input=0,output=0;foreach(UsageEvent ev in parser.Events){input+=ev.FreshInput+ev.CacheRead+ev.CacheWrite;output+=ev.Output;}
+            bool batch=name.Contains("batch");
+            Check(parser.Events.Count==(batch?2:3)&&input==(batch?400:700)&&output==(batch?50:80),"explicit thread checkpoint subtracts already recorded native batch once: "+name+" incremental="+incremental);
+        }
+        foreach(bool markerFirst in new[]{false,true})
+        {
+            DateTime now=DateTime.UtcNow;CodexUsageParser parser=new CodexUsageParser("OpenAI Codex","remote-compaction",now,"",null);
+            string marker=Frame("compacted",O("compaction_response_id","remote"),now);
+            string native=Frame("token_usage_record",O("response_id","remote","usage",O("input_tokens",300,"output_tokens",30)),now);
+            parser.OnLine(markerFirst?marker:native,0);
+            parser=new CodexUsageParser("OpenAI Codex","remote-compaction",now,parser.SerializeState(),parser.Events);
+            parser.OnLine(markerFirst?native:marker,1);
+            parser.OnLine(Frame("event_msg",O("type","token_count","info",O("total_token_usage",O("input_tokens",300,"output_tokens",30),"last_token_usage",O("input_tokens",300,"output_tokens",30))),now.AddSeconds(1)),2);
+            long input=0,output=0;foreach(UsageEvent ev in parser.Events){input+=ev.FreshInput;output+=ev.Output;}
+            Check(parser.Events.Count==2&&input==600&&output==60,"marked compaction does not consume a different equal-sized normal request; markerFirst="+markerFirst);
+        }
+        CodexUsageParser fork=new CodexUsageParser("OpenAI Codex","nested",DateTime.UtcNow,"",null);
+        fork.OnLine(Json.Serialize(O("type","session_meta","payload",O("id","child","source",O("subagent",O("thread_spawn",O("parent_thread_id","parent")))))),0);
+        Check(fork.ForkedFrom=="parent"&&fork.SpawnedSubagent&&fork.ForkedAtMs==0,"nested subagent parent is recorded but missing timestamp never invents a file-time fork boundary");
+    }
+    private static void EmbeddedCompaction()
+    {
+        string[] lines=File.ReadAllLines(Path.Combine(Environment.CurrentDirectory,"tests","fixtures","codex_embedded_compaction.jsonl"));
+        foreach(bool incremental in new[]{false,true})
+        {
+            CodexUsageParser parser=new CodexUsageParser("OpenAI Codex","embedded",DateTime.UtcNow,"",null);
+            for(int i=0;i<lines.Length;i++)
+            {
+                parser.OnLine(lines[i],i);
+                if(i>=1&&i<lines.Length-1)Check(parser.Events.Count==1,"matching embedded usage is counted once; duplicates and invalid markers add nothing: line="+i+" incremental="+incremental);
+                if(incremental)parser=new CodexUsageParser("OpenAI Codex","embedded",DateTime.UtcNow,parser.SerializeState(),parser.Events);
+            }
+            long input=0,output=0,read=0,write=0;foreach(UsageEvent ev in parser.Events){input+=ev.FreshInput+ev.CacheRead+ev.CacheWrite;output+=ev.Output;read+=ev.CacheRead;write+=ev.CacheWrite;}
+            Check(parser.Events.Count==2&&input==400&&output==50&&read==120&&write==60,"embedded checkpoint survives a duplicate top-level response that omits it; incremental="+incremental);
+            Check(parser.Events[0].Model=="gpt-6-astra"&&parser.Events[0].ActualServiceTier=="fast","embedded native record retains explicit model and actual tier evidence; incremental="+incremental);
+        }
+        DateTime now=DateTime.UtcNow;
+        foreach(object invalid in new object[]{O("input_tokens","bad","output_tokens",5),O("input_tokens",0,"output_tokens",0),O("input_tokens",1.5,"output_tokens",2),O("input_tokens",100,"output_tokens",10,"cached_input_tokens",-1)})
+        {
+            CodexUsageParser parser=new CodexUsageParser("OpenAI Codex","invalid-embedded",now,"",null);
+            parser.OnLine(Frame("compacted",O("compaction_response_id","invalid","latest_token_usage_record",O("response_id","invalid","usage",invalid)),now),0);
+            Check(parser.Events.Count==0,"invalid embedded numeric evidence never becomes a request");
         }
     }
     private static RecordBucket Bucket(string tier,int count,double cost)
@@ -112,7 +247,7 @@ internal static class ServiceTierTests
         }
         List<RecordBucket> rows=new List<RecordBucket>();LocalUsageStore.MergeAndSaveDailyArchive(home,rows);
         Check(rows.Count==1&&rows[0].ActualServiceTier=="unknown"&&rows[0].CostBasis=="legacy_unknown","migration preserves original history as unknown, not standard");
-        Check(Directory.GetFiles(store,"*.before-v2.11.*.db").Length==1,"migration creates a real backup before advancing schema");
+        Check(Directory.GetFiles(store,"*"+LocalUsageStore.UpgradeBackupPrefix+"*.db").Length==1,"migration creates a real backup before advancing schema");
         rows=new List<RecordBucket>{Bucket("fast",3,6)};LocalUsageStore.MergeAndSaveDailyArchive(home,rows);
         Check(rows.Count==1&&rows[0].Turns==5&&rows[0].ActualServiceTier=="unknown","partial new source cannot replace missing legacy history");
         rows=new List<RecordBucket>{Bucket("fast",3,6),Bucket("standard",2,2)};LocalUsageStore.MergeAndSaveDailyArchive(home,rows);
@@ -152,7 +287,7 @@ internal static class ServiceTierTests
     {
         string root=Path.Combine(Path.GetTempPath(),"TokLens_TierTests_"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(root);
         Environment.SetEnvironmentVariable("TOKLENS_CONFIG_DIR",Path.Combine(root,"config"));
-        try {Parser();Cloud();Migration(root);ScanAndWindow(root);Fixture(root);PriceSupportLimits(root);Console.WriteLine("PASS: "+checks+" service tier assertions");return 0;}
+        try {Parser();SharedDesktopFixture();CounterResetEpoch();UnchangedCumulativeTotal();ReplayedResponseModel();CompactionCheckpoints();EmbeddedCompaction();Cloud();Migration(root);ScanAndWindow(root);Fixture(root);PriceSupportLimits(root);Console.WriteLine("PASS: "+checks+" service tier assertions");return 0;}
         catch(Exception error){Console.Error.WriteLine(error);return 1;}
     }
 }

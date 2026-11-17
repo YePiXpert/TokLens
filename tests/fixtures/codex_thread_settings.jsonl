@@ -1,0 +1,13 @@
+{"timestamp":"2026-11-17T12:00:00Z","type":"session_meta","payload":{"id":"11111111-1111-1111-1111-111111111111"}}
+{"timestamp":"2026-11-17T12:00:01Z","type":"turn_context","payload":{"model":"gpt-6.1-sol"}}
+{"timestamp":"2026-11-17T12:00:02Z","type":"token_usage_record","payload":{"response_id":"before-settings","usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":50}}}
+{"timestamp":"2026-11-17T12:00:03Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-6-astra","model_provider_id":"openai","service_tier":"priority"}}}
+{"timestamp":"2026-11-17T12:00:04Z","type":"token_usage_record","payload":{"response_id":"fast-request","usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":50}}}
+{"timestamp":"2026-11-17T12:00:05Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-6-astra","model_provider_id":"openai"}}}
+{"timestamp":"2026-11-17T12:00:06Z","type":"token_usage_record","payload":{"response_id":"missing-tier-inherits","usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":50}}}
+{"timestamp":"2026-11-17T12:00:07Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-6-astra","model_provider_id":"openai","service_tier":null}}}
+{"timestamp":"2026-11-17T12:00:08Z","type":"token_usage_record","payload":{"response_id":"null-clears-tier","usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":50}}}
+{"timestamp":"2026-11-17T12:00:09Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-6-astra","model_provider_id":"openai","service_tier":"default"}}}
+{"timestamp":"2026-11-17T12:00:10Z","type":"token_usage_record","payload":{"response_id":"explicit-standard","usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":50}}}
+{"timestamp":"2026-11-17T12:00:11Z","type":"event_msg","payload":{"type":"thread_settings_applied","thread_settings":{"model":"gpt-6-astra","model_provider_id":"openai","service_tier":"unrecognized-tier"}}}
+{"timestamp":"2026-11-17T12:00:12Z","type":"token_usage_record","payload":{"response_id":"unknown-clears-tier","usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":50}}}

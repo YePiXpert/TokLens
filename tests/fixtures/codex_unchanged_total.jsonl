@@ -1,0 +1,6 @@
+{"timestamp":"2026-11-17T01:00:00Z","type":"session_meta","payload":{"id":"unchanged-total","model":"gpt-6.1-sol"}}
+{"timestamp":"2026-11-17T01:00:01Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":25},"last_token_usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":25}}}}
+{"timestamp":"2026-11-17T01:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":25},"last_token_usage":{"input_tokens":5,"output_tokens":1}}}}
+{"timestamp":"2026-11-17T01:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":25},"last_token_usage":{"input_tokens":0,"output_tokens":0}}}}
+{"timestamp":"2026-11-17T01:00:04Z","type":"token_usage_record","payload":{"response_id":"independent-response","usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":25}}}
+{"timestamp":"2026-11-17T01:00:05Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":25},"last_token_usage":{"input_tokens":100,"output_tokens":20,"cached_input_tokens":25},"actual_service_tier":"fast"}}}

@@ -18,7 +18,9 @@
 
 ## 档位证据
 
-`RequestedServiceTier` 记录请求设置；`ActualServiceTier` 只由明确响应证据建立。两者的标准化值为 `standard`、`fast`、`ultrafast`、`flex`、`unknown`。`priority → fast`，`default → standard`，未知原值保留在 `TierEvidence` 中。
+`RequestedServiceTier` 记录请求设置；`ActualServiceTier` 只由明确响应证据建立。两者的标准化值为 `standard`、`fast`、`ultrafast`、`flex`、`unknown`。`priority → fast`，`default → standard`；无法识别的值保持未知，不推断为普通档位。`TierEvidence` 记录证据所在的来源字段。
+
+Codex 支持 `event_msg → thread_settings_applied → thread_settings` 的嵌套历史设置。字段缺失沿用先前设置，显式 null 或无法识别的值清除先前档位。重放已有 response ID 不得用后来设置改写原请求的档位与模型。
 
 解析会话或 turn 的 `service_tier` 不代表响应实际执行档位；`actual_service_tier`、`response.service_tier` 等明确响应字段才能建立实际值。当前配置文件不用于回填历史。Provider、SessionId、Workspace 用于区分来源和选择会话，未知值不根据界面状态补全。
 
@@ -35,6 +37,8 @@
 | `legacy_unknown` | 旧汇总缺少请求证据，保留历史金额与未知属性 |
 
 服务档位价格按 provider、精确模型、tier、生效区间匹配。只在明确配置时应用长上下文分段和缓存写入时长价格。API 单价与订阅额度倍率是两个不同概念。
+
+明确的自定义模型基础价（含零价）优先于内置普通参考价；该覆盖仅用于 Standard 或档位未知的普通参考估值。Fast、Ultrafast、Flex 仍需要各自的档位报价，不套用普通自定义价，也不从中乘倍率推导。日志已经报告的金额优先于上述估值。
 
 `StandardEquivalentUsd` 是同次请求按 Standard 规则计算的参考值；`ServiceTierPremiumUsd` 是可比较估值的非负差额。两者无法建立时保持 null，不能把 null 呈现为节省了零元。`reported` 金额不拆出虚构的 API 档位溢价。
 
@@ -57,13 +61,13 @@
 }
 ```
 
-上述是字段示例，不是任何模型的价格推荐。可选字段包括 `effective_until`、`long_context_threshold`、`long_input_per_m`、`long_output_per_m`、`long_cache_read_per_m`、`long_cache_write_per_m`、`cache_write_long_per_m`、`cache_write_long_duration`、`long_cache_write_long_per_m`。超过上下文阈值但缺少对应规则时，不能继续装作精确计价。
+上述是字段示例，不是任何模型的价格推荐。可选字段包括 `effective_until`、`max_prompt_tokens`、`long_context_threshold`、`long_input_per_m`、`long_output_per_m`、`long_cache_read_per_m`、`long_cache_write_per_m`、`cache_write_long_per_m`、`cache_write_long_duration`、`long_cache_write_long_per_m`。超过该档位支持的最大输入或缺少适用规则时，保留未定价。`auto`、`max`、`fast`、`1m` 等可能改变价格的变体不得自动删除后缀后套用基础模型价格；精确配置的零价格仍是有效报价。
 
 Windows 从内嵌资源加载；Python 构建时内嵌同一快照，亦可读取相邻文件。用户配置目录的同名文件可补充已核实规则。构建检查阻止 Python 内嵌快照与源文件漂移。价格版本包含规则版本与来源 URL；历史事件仅使用其日期适用的记录。
 
 ## 节点快照
 
-顶层 schema 保持 `toklens.node.v2`；`scanner_rev=30` 标识档位核算版本。`records` 每行沿用前 11 列，追加到 19 列：
+顶层 schema 保持 `toklens.node.v2`；`scanner_rev=31` 标识档位核算版本。`records` 每行沿用前 11 列，追加到 19 列：
 
 | 索引 | 内容 |
 |---|---|

@@ -3,7 +3,7 @@ namespace TokLens
 {
     internal static class BuildVersion
     {
-        internal const string Version = "2.4.0";
-        internal const string AssemblyVersion = "2.4.0.0";
+        internal const string Version = "2.4.1";
+        internal const string AssemblyVersion = "2.4.1.0";
     }
 }

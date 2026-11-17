@@ -49,7 +49,9 @@ namespace TokLens
     // Persistent SQLite Cursor & Instant-Snapshot Store (%APPDATA%\TokLens\toklens.db)
     public static class LocalUsageStore
     {
-        private const string StoreSchema = "toklens.store.v2.11";
+        private const string StoreSchema = "toklens.store.v2.12";
+        internal static string UpgradeBackupPrefix
+        { get { return ".before-"+StoreSchema.Substring("toklens.store.".Length)+"."; } }
         private static readonly object StoreLock = new object();
         private static Dictionary<string, FileCursorEntry> _memCursors = null;
 
@@ -95,7 +97,7 @@ namespace TokLens
             {
                 if (!string.IsNullOrEmpty(curVer))
                 {
-                    string backupPath = DbFilePath + ".before-v2.11." + DateTime.UtcNow.ToString("yyyyMMddHHmmssfff", CultureInfo.InvariantCulture) + ".db";
+                    string backupPath = DbFilePath + UpgradeBackupPrefix + DateTime.UtcNow.ToString("yyyyMMddHHmmssfff", CultureInfo.InvariantCulture) + ".db";
                     if (!db.BackupTo(backupPath))
                         throw new IOException("账本升级前备份失败，已停止迁移：" + backupPath);
                 }
@@ -1174,7 +1176,7 @@ namespace TokLens
         private static readonly Regex AgySenderRegex = new Regex(@"\bsender=([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\b", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         private static readonly byte[][] ClaudeKeywords = new byte[][] { Utf8LineScanner.KwInputTokens, Utf8LineScanner.KwEntrypoint, Utf8LineScanner.KwApiRequest, Utf8LineScanner.KwTypeUser };
-        private static readonly byte[][] CodexKeywords = new byte[][] { Utf8LineScanner.KwTurnContext, Utf8LineScanner.KwTokenCount, Utf8LineScanner.KwSessionMeta, Utf8LineScanner.KwCallOutput, Utf8LineScanner.KwUserMessage, Utf8LineScanner.KwTaskStarted, Encoding.ASCII.GetBytes("token_usage_record"), Encoding.ASCII.GetBytes("thread_settings_applied") };
+        private static readonly byte[][] CodexKeywords = new byte[][] { Utf8LineScanner.KwTurnContext, Utf8LineScanner.KwTokenCount, Utf8LineScanner.KwSessionMeta, Utf8LineScanner.KwCallOutput, Utf8LineScanner.KwUserMessage, Utf8LineScanner.KwTaskStarted, Encoding.ASCII.GetBytes("token_usage_record"), Encoding.ASCII.GetBytes("thread_settings_applied"), Encoding.ASCII.GetBytes("compacted") };
         private static readonly byte[][] AgyKeywords = new byte[][] { Utf8LineScanner.KwInputTokens, Utf8LineScanner.KwModelSelection, Utf8LineScanner.KwCreatedAt };
         private static readonly byte[][] KimiKeywords = new byte[][] { Utf8LineScanner.KwUsageRecord, Utf8LineScanner.KwLlmRequest };
 
@@ -2343,7 +2345,7 @@ namespace TokLens
                     {
                         if (compressed)
                         {
-                            if (WinZstdReader.TryScanLines(fp, new string[] { "turn_context", "token_count", "token_usage_record", "session_meta", "thread_settings_applied", "call_output", "task_started", "user_message" }, onLine)) validEnd = size;
+                            if (WinZstdReader.TryScanLines(fp, new string[] { "turn_context", "token_count", "token_usage_record", "session_meta", "thread_settings_applied", "compacted", "call_output", "task_started", "user_message" }, onLine)) validEnd = size;
                             else _failedExactTools.Add(toolName);
                         }
                         else Utf8LineScanner.ScanFromOffset(ToLongPath(fp), offset, 0, mtime, parser.Reset, CodexKeywords, onLine, out validEnd, out finalLine);
@@ -5103,42 +5105,86 @@ namespace TokLens
             return ev.TimestampMs.ToString(CultureInfo.InvariantCulture) + ":" + ev.FreshInput.ToString(CultureInfo.InvariantCulture) + "," + ev.Output.ToString(CultureInfo.InvariantCulture) + "," + ev.CacheRead.ToString(CultureInfo.InvariantCulture) + "," + ev.CacheWrite.ToString(CultureInfo.InvariantCulture);
         }
 
-        private void DeduplicateRequests()
+        private static string CodexEventIdentity(UsageEvent ev)
         {
-            Dictionary<string, UsageEvent> unique = new Dictionary<string, UsageEvent>(StringComparer.Ordinal);
-            Dictionary<string, string> aliases = new Dictionary<string, string>(StringComparer.Ordinal);
-            Dictionary<string, HashSet<string>> threadRequests = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
-            Dictionary<string, string> parents = new Dictionary<string, string>(StringComparer.Ordinal);
-            Dictionary<string, long> forks = new Dictionary<string, long>(StringComparer.Ordinal);
+            return ev.Tool + "|" + ev.SessionId + "|" + (string.IsNullOrEmpty(ev.DedupKey) ? RequestSignature(ev) : ev.DedupKey);
+        }
+
+        private static bool MatchesForkHistory(UsageEvent child, UsageEvent parent, long forkMs)
+        {
+            // Codex can rewrite copied history to the exact fork instant. A
+            // nearby timestamp alone is never evidence that a request is a copy.
+            return parent.TimestampMs > 0 && parent.TimestampMs <= forkMs &&
+                (child.TimestampMs == parent.TimestampMs || child.TimestampMs == forkMs) &&
+                child.FreshInput == parent.FreshInput && child.Output == parent.Output &&
+                child.CacheRead == parent.CacheRead && child.CacheWrite == parent.CacheWrite;
+        }
+
+        private HashSet<string> FindInheritedCodexRequests()
+        {
+            Dictionary<string, List<UsageEvent>> threads = new Dictionary<string, List<UsageEvent>>(StringComparer.Ordinal);
+            HashSet<string> seen = new HashSet<string>(StringComparer.Ordinal);
+            foreach (UsageEvent ev in _events)
+            {
+                if (ev == null || !(ev.Tool ?? "").StartsWith("OpenAI Codex", StringComparison.Ordinal) ||
+                    string.IsNullOrEmpty(ev.SessionId) || !seen.Add(CodexEventIdentity(ev))) continue;
+                List<UsageEvent> requests;
+                if (!threads.TryGetValue(ev.SessionId, out requests)) threads[ev.SessionId] = requests = new List<UsageEvent>();
+                // Keep source order: inherited and native records may all have
+                // the same timestamp, so sorting cannot locate the boundary.
+                requests.Add(ev);
+            }
+            HashSet<string> inherited = new HashSet<string>(StringComparer.Ordinal);
             foreach (FileCursorEntry cursor in _cursors.Values)
             {
                 string tid = ExtractMetaField(cursor.ExtraMeta, "tid", "");
                 string parent = ExtractMetaField(cursor.ExtraMeta, "parent", "");
-                long cutoff;
-                if (tid.Length > 0 && parent.Length > 0 && long.TryParse(ExtractMetaField(cursor.ExtraMeta, "fork_ms", "0"), out cutoff))
-                { parents[tid] = parent; forks[tid] = cutoff; }
+                long forkMs;
+                List<UsageEvent> childRequests, parentRequests;
+                if (tid.Length == 0 || parent.Length == 0 || tid == parent ||
+                    !long.TryParse(ExtractMetaField(cursor.ExtraMeta, "fork_ms", "0"), out forkMs) || forkMs <= 0 ||
+                    !threads.TryGetValue(tid, out childRequests) || !threads.TryGetValue(parent, out parentRequests)) continue;
+                int parentIndex = -1;
+                foreach (UsageEvent child in childRequests)
+                {
+                    // A response ID is independent request evidence. Only the
+                    // leading snapshot history can be inherited; native IDs
+                    // retain the normal response-ID deduplication below.
+                    if ((child.DedupKey ?? "").StartsWith("codex-response:", StringComparison.Ordinal) ||
+                        child.TimestampMs <= 0 || child.TimestampMs > forkMs) break;
+                    if (parentIndex < 0)
+                    {
+                        for (int i = 0; i < parentRequests.Count; i++)
+                            if (MatchesForkHistory(child, parentRequests[i], forkMs)) { parentIndex = i; break; }
+                    }
+                    if (parentIndex < 0 || parentIndex >= parentRequests.Count ||
+                        !MatchesForkHistory(child, parentRequests[parentIndex], forkMs)) break;
+                    inherited.Add(CodexEventIdentity(child));
+                    // A parent request can prove only one child history entry;
+                    // a mismatch terminates the verified contiguous prefix.
+                    parentIndex++;
+                }
             }
-            foreach (UsageEvent ev in _events)
-            {
-                if (ev == null || !(ev.Tool ?? "").StartsWith("OpenAI Codex", StringComparison.Ordinal) || string.IsNullOrEmpty(ev.SessionId)) continue;
-                HashSet<string> signatures;
-                if (!threadRequests.TryGetValue(ev.SessionId, out signatures)) threadRequests[ev.SessionId] = signatures = new HashSet<string>(StringComparer.Ordinal);
-                signatures.Add(RequestSignature(ev));
-            }
+            return inherited;
+        }
+
+        private void DeduplicateRequests()
+        {
+            Dictionary<string, UsageEvent> unique = new Dictionary<string, UsageEvent>(StringComparer.Ordinal);
+            Dictionary<string, string> aliases = new Dictionary<string, string>(StringComparer.Ordinal);
+            HashSet<string> inherited = FindInheritedCodexRequests();
             int unkeyed = 0;
             foreach (UsageEvent ev in _events)
             {
                 if (ev == null) continue;
-                string parent;
-                HashSet<string> parentRequests;
-                if (!string.IsNullOrEmpty(ev.SessionId) && parents.TryGetValue(ev.SessionId, out parent) &&
-                    ev.TimestampMs > 0 && ev.TimestampMs <= forks[ev.SessionId] &&
-                    threadRequests.TryGetValue(parent, out parentRequests) && parentRequests.Contains(RequestSignature(ev))) continue;
+                if (inherited.Contains(CodexEventIdentity(ev))) continue;
                 string key = ev.DedupKey ?? "";
                 if (!UsageAccounting.HasRequestLedger(ev.Tool)) key = "other:" + (++unkeyed).ToString(CultureInfo.InvariantCulture);
                 bool codex = (ev.Tool ?? "").StartsWith("OpenAI Codex", StringComparison.Ordinal);
                 if (key.Length == 0) key = "unkeyed:" + (++unkeyed).ToString(CultureInfo.InvariantCulture);
-                if (codex && ev.TimestampMs > 0 && !string.IsNullOrEmpty(ev.SessionId))
+                // A cumulative checkpoint remainder is independently measured,
+                // even when it happens to equal a native request at this instant.
+                if (codex && !key.StartsWith("codex-checkpoint:", StringComparison.Ordinal) && ev.TimestampMs > 0 && !string.IsNullOrEmpty(ev.SessionId))
                 {
                     string signature = ev.SessionId + "|" + RequestSignature(ev), existing;
                     if (aliases.TryGetValue(signature, out existing) &&
