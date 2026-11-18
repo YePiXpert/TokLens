@@ -49,7 +49,7 @@ namespace TokLens
     // Persistent SQLite Cursor & Instant-Snapshot Store (%APPDATA%\TokLens\toklens.db)
     public static class LocalUsageStore
     {
-        private const string StoreSchema = "toklens.store.v2.12";
+        private const string StoreSchema = "toklens.store.v2.13";
         internal static string UpgradeBackupPrefix
         { get { return ".before-"+StoreSchema.Substring("toklens.store.".Length)+"."; } }
         private static readonly object StoreLock = new object();
@@ -1154,13 +1154,75 @@ namespace TokLens
         {ProviderHealth h;if(!_providerHealth.TryGetValue(tool,out h))_providerHealth[tool]=h=new ProviderHealth { Tool=tool };return h;}
         private void ParseFailure(string tool,string message)
         {ProviderHealth h=Health(tool);h.SkippedRecords++;h.Status="error";h.Error=message;_failedExactTools.Add(tool);}
+        // A scanner's name is a label for a group of log formats, not always the tool the
+        // rows end up under (the Claude Code scanner also yields "Claude Desktop"; "Dsh"
+        // yields "DeepSeek (DSH)"). Remember which scanner produced each tool so health is
+        // reported per tool instead of once for the label and again for the tool.
+        private readonly List<string> _sources=new List<string>();
+        private readonly Dictionary<string,string> _toolSource=new Dictionary<string,string>(StringComparer.Ordinal);
+        private readonly Dictionary<string,string> _sourceAlias=new Dictionary<string,string>(StringComparer.Ordinal);
         private void RunProvider(string tool,Action action,params string[] roots)
         {
             ProviderHealth previous=_activeHealth,h=Health(tool);_activeHealth=h;
+            if(!_sources.Contains(tool))_sources.Add(tool);
+            int firstEvent=_events.Count;
             foreach(string root in roots)if(Directory.Exists(Path.Combine(_home,root)))h.Status="no_data";
             try {action();if(h.Status!="error"&&h.FilesFound>0){h.Status="no_data";h.LastSuccessMs=UsageAccounting.UtcMilliseconds();}}
             catch(Exception error){ParseFailure(tool,error.GetType().Name+": "+error.Message);}
-            finally {_activeHealth=previous;}
+            finally
+            {
+                for(int i=firstEvent;i<_events.Count;i++)
+                {
+                    UsageEvent ev=_events[i];
+                    if(ev!=null&&!string.IsNullOrEmpty(ev.Tool)&&!_toolSource.ContainsKey(ev.Tool))_toolSource[ev.Tool]=tool;
+                }
+                _activeHealth=previous;
+            }
+        }
+        // TrackVisitedFile counts a file for the running scanner. When its rows belong to
+        // a concrete tool of that scanner, the file is that tool's and is counted once.
+        private void AttributeFile(string tool)
+        {
+            ProviderHealth owner=Health(tool);
+            if(owner==_activeHealth)return;
+            owner.FilesFound++;
+            if(_activeHealth!=null&&_activeHealth.FilesFound>0)_activeHealth.FilesFound--;
+        }
+        // Reduces scanner bookkeeping to the rows a person can act on.
+        private List<ProviderHealth> FinalizeHealth(long accountingTime)
+        {
+            foreach(KeyValuePair<string,string> alias in _sourceAlias)
+            {
+                ProviderHealth part=Health(alias.Key),whole=Health(alias.Value);
+                if(part.Status=="error")continue;
+                whole.FilesFound+=part.FilesFound;part.FilesFound=0;
+                if(whole.Status=="not_installed"&&part.Status!="not_installed")whole.Status=part.Status;
+                if(part.LastSuccessMs>whole.LastSuccessMs)whole.LastSuccessMs=part.LastSuccessMs;
+                part.Status="not_installed";
+            }
+            HashSet<string> folded=new HashSet<string>(StringComparer.Ordinal);
+            foreach(string source in _sources)
+            {
+                List<string> members=new List<string>();
+                foreach(KeyValuePair<string,string> link in _toolSource)if(link.Value==source&&link.Key!=source)members.Add(link.Key);
+                if(members.Count==0)continue;
+                ProviderHealth group=Health(source);
+                foreach(string member in members)Health(member).Source=source;
+                if(_toolSource.ContainsKey(source))continue;
+                // The label produced nothing under its own name: its tools stand for it.
+                if(members.Count==1){Health(members[0]).FilesFound+=group.FilesFound;group.FilesFound=0;}
+                if(group.Status!="error")folded.Add(source);
+            }
+            List<ProviderHealth> rows=new List<ProviderHealth>();
+            foreach(ProviderHealth h in _providerHealth.Values)
+            {
+                if(folded.Contains(h.Tool))continue;
+                // An existing directory with no log file in it is not a discovered log.
+                if(h.Status=="no_data"&&h.FilesFound==0)h.Status="not_installed";
+                if(h.Status=="ok")h.LastSuccessMs=accountingTime;
+                rows.Add(h);
+            }
+            return rows;
         }
 
         private readonly HashSet<string> _failedExactTools = new HashSet<string>(StringComparer.Ordinal);
@@ -1277,7 +1339,7 @@ namespace TokLens
             RunProvider("MobileClaw",delegate { ScanMobileClaw(); },".mobileclaw");
             RunProvider("OpenCode",delegate { ScanOpenCode(); },".local/share/opencode");
             RunProvider("WorkBuddy / CodeBuddy",delegate { ScanWorkBuddyAndCodeBuddy(); },".workbuddy");
-            RunProvider("Dsh",delegate { ScanDsh(); },".dsh");
+            RunProvider("DeepSeek (DSH)",delegate { ScanDsh(); },".dsh");
             RunProvider("Command Code",delegate { ScanCommandCode(); },".commandcode");
             RunProvider("Cline / Roo / Kilo",delegate { ScanVsCodeClineFamily(); },"AppData/Roaming/Code");
             RunProvider("OpenClaw",delegate { ScanOpenClaw(_home); },".openclaw");
@@ -1294,6 +1356,7 @@ namespace TokLens
             RunProvider("Zed",delegate { ScanZed(); },"AppData/Local/Zed");
             RunProvider("Custom Harness",delegate { ScanCustomRules(_home); },".toklens");
             RunProvider("Codex archive",delegate { ScanCodexSqliteArchive(); },".codex");
+            _sourceAlias["Codex archive"]="OpenAI Codex";
 
             if (_scanWsl)
             {
@@ -2148,6 +2211,10 @@ namespace TokLens
                                     UsageServiceTier.ReadEvidence(parsed,metadata,"request");
                                     Dictionary<string,object> message=AsDict(metadata!=null&&metadata.ContainsKey("message")?metadata["message"]:null);
                                     UsageServiceTier.ReadEvidence(parsed,message,"request");
+                                    UsageServiceTier.ReadAnthropicUsage(parsed,AsDict(message!=null&&message.ContainsKey("usage")?message["usage"]:null));
+                                    // Claude logs name no channel. Like the Codex parser and the Python
+                                    // probe, fall back to the model's own vendor so both price the same.
+                                    if(parsed.Provider=="unknown")parsed.Provider=UsageServiceTier.InferProvider(model);
                                 }
                             },
                             out validEnd,
@@ -2208,6 +2275,7 @@ namespace TokLens
                         item.IsDirty = true;
                     }
                 }
+                AttributeFile(finalTool);
 
                 bool toolUpdated = false;
                 for (int e = 0; e < item.Events.Count; e++)
@@ -3613,6 +3681,7 @@ namespace TokLens
                 long fSize, fMtime;
                 if (!TryGetFileStat(uf, out fSize, out fMtime)) continue;
                 TrackVisitedFile(uf);
+                AttributeFile(label);
 
                 FileCursorEntry cur;
                 if (_cursors.TryGetValue(uf, out cur) && cur.FileSize == fSize && cur.MtimeTicks == fMtime)
@@ -3888,7 +3957,6 @@ namespace TokLens
             ProviderHealth health=Health(toolName);
             if(Directory.Exists(ToLongPath(rootDir)))health.Status="no_data";
             List<string> files = SafeFindFiles(rootDir, pattern, true,delegate { ParseFailure(toolName,"无法枚举日志目录"); });
-            if(_activeHealth!=health)health.FilesFound+=files.Count;
             if (files.Count == 0) return;
             JavaScriptSerializer js = null;
             Dictionary<string, UsageEvent> dedup = new Dictionary<string, UsageEvent>(StringComparer.Ordinal);
@@ -3900,6 +3968,7 @@ namespace TokLens
                 long fSize, fMtime;
                 if (!TryGetFileStat(fp, out fSize, out fMtime)) continue;
                 TrackVisitedFile(fp);
+                AttributeFile(toolName);
 
                 FileCursorEntry cur;
                 if (_cursors.TryGetValue(fp, out cur) && cur.FileSize == fSize && cur.MtimeTicks == fMtime)
@@ -5324,11 +5393,11 @@ namespace TokLens
             foreach(UsageEvent ev in _events)
             {
                 ProviderHealth h=Health(ev.Tool);h.ParsedRequests+=Math.Max(1,ev.Turns);
+                if(ev.TimestampMs>h.LastRequestMs)h.LastRequestMs=ev.TimestampMs;
                 if(h.Status!="error")h.Status="ok";
             }
             foreach(string tool in _failedExactTools){ProviderHealth h=Health(tool);h.Status="error";if(h.Error.Length==0)h.Error="部分源记录无法读取，保留历史数据并等待重试";}
-            foreach(ProviderHealth h in _providerHealth.Values)
-            {if(h.Status=="ok")h.LastSuccessMs=accountingTime;res.ProviderHealth.Add(h);}
+            res.ProviderHealth.AddRange(FinalizeHealth(accountingTime));
             res.Warnings.AddRange(_warnings);
             foreach (string tool in _failedExactTools) res.Warnings.Add(tool + " 部分源记录无法读取，本次保留旧账本，不覆盖历史。");
             return res;

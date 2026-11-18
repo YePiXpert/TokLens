@@ -1,4 +1,4 @@
-param([string[]]$Suite = @('UsageAccountingTests', 'ProductAccountingTests', 'ServiceTierTests', 'PricingAliasTests', 'ReferencePricingTests', 'PricingStudioTests', 'CacheUpgradeTests', 'ForkAccountingTests', 'HudBehaviorTests', 'ProductUiTests', 'UsagePresentationTests', 'AppUpdateTests'))
+param([string[]]$Suite = @('UsageAccountingTests', 'ProductAccountingTests', 'ServiceTierTests', 'PricingAliasTests', 'ReferencePricingTests', 'PricingStudioTests', 'CacheUpgradeTests', 'ForkAccountingTests', 'HudBehaviorTests', 'ProductUiTests', 'UsagePresentationTests', 'CollectionHealthTests', 'AppUpdateTests'))
 $ErrorActionPreference = 'Stop'
 $taskRoot = Split-Path -Parent $PSScriptRoot
 $taskFramework = Join-Path $env:SystemRoot 'Microsoft.NET\Framework64\v4.0.30319'

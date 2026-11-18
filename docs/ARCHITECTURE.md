@@ -22,6 +22,8 @@
 
 Codex 支持 `event_msg → thread_settings_applied → thread_settings` 的嵌套历史设置。字段缺失沿用先前设置，显式 null 或无法识别的值清除先前档位。重放已有 response ID 不得用后来设置改写原请求的档位与模型。
 
+Claude Code / Claude Desktop 的响应把实际执行方式写在 `message.usage` 里，而不是顶层或 `message` 上：`usage.speed = fast` 建立实际档位 Fast；`usage.service_tier = standard`（`speed` 缺省或为 `standard`）建立 Standard。Anthropic 的 `service_tier = priority` 是预留容量而不是 Fast，不经过 `priority → fast` 这条 OpenAI 别名；它与 `batch`、无法识别的取值一样保持未知。日志没有渠道字段时，Provider 取模型所属厂商，与 Codex 解析器和 Python 探针一致。
+
 解析会话或 turn 的 `service_tier` 不代表响应实际执行档位；`actual_service_tier`、`response.service_tier` 等明确响应字段才能建立实际值。当前配置文件不用于回填历史。Provider、SessionId、Workspace 用于区分来源和选择会话，未知值不根据界面状态补全。
 
 ## 估值依据
@@ -71,7 +73,7 @@ Windows 从内嵌资源加载；Python 构建时内嵌同一快照，亦可读�
 
 ## 节点快照
 
-顶层 schema 保持 `toklens.node.v2`；`scanner_rev=32` 标识档位核算版本。`records` 每行沿用前 11 列，追加到 19 列：
+顶层 schema 保持 `toklens.node.v2`；`scanner_rev=33` 标识档位核算版本。`records` 每行沿用前 11 列，追加到 19 列：
 
 | 索引 | 内容 |
 |---|---|
@@ -88,7 +90,23 @@ Windows 从内嵌资源加载；Python 构建时内嵌同一快照，亦可读�
 
 SQLite 迁移前备份；仍存在的日志重新解析，丢失的日志仅保留此前游标与汇总。新旧节点混跑无法保证档位维度完整，请同步升级所有节点。
 
+## 采集状态
+
+扫描器名是一组日志格式的标签，不一定是用量最终归属的工具名（Claude Code 扫描器同时产出 Claude Desktop，DSH 扫描器产出 DeepSeek (DSH)）。`ProviderHealth` 按工具给出一行：
+
+| Status | 含义 |
+|---|---|
+| `ok` | 读到用量；`FilesFound`、`ParsedRequests`、`LastRequestMs` 属于该工具，`Source` 记录产出它的扫描器 |
+| `no_data` | 找到日志文件，但没有解析出用量 |
+| `error` | 日志无法完整读取；保留历史数据并等待重试 |
+| `stale` | 启动时从快照恢复、尚未完成首次重扫 |
+| `not_installed` | 没有找到日志文件。目录存在（例如与其他工具共用的目录）不算发现日志 |
+
+扫描器标签自己没有产出用量、而它的工具有时，标签不单独成行；一个文件只计入一个工具。内部扫描步骤（Codex 归档）并入对应工具。
+
 ## UI 与实时状态
+
+概览顶部的采集状态条只陈述读到的事实：多少个工具读取正常、多少个有日志但没有用量、是否有读取异常，以及当前筛选范围内各服务档位的请求数。没有档位证据的请求显示为「档位未知」，不写成 0 次 Fast。每个工具的文件数、请求数与各档位的金额依据在点击后的明细里。
 
 悬浮控件使用明确的本机范围，可跟随最新请求或固定会话。数据年龄、日志读取错误、活跃与空闲不混为一个状态。输入上限优先日志实际值，模型标称值仅作参照。缺官方额度来源时显示未连接；本地 Token 计数不推算账户剩余百分比。
 

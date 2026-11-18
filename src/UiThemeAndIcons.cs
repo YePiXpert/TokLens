@@ -1019,6 +1019,8 @@ namespace TokLens
         public const string Help          = "M 8,2 A 6,6 0 1 1 7.99,2 M 6.3,6.3 A 1.7,1.7 0 1 1 8.8,7.9 C 8.2,8.3 8,8.7 8,9.4 M 8,11.8 L 8,12.0";
         public const string Capsule       = "M 4.5,4.5 L 11.5,4.5 A 3.5,3.5 0 0 1 11.5,11.5 L 4.5,11.5 A 3.5,3.5 0 0 1 4.5,4.5 Z M 5.5,8 L 7.5,8";
         public const string History       = "M 3.2,5.5 A 5.5,5.5 0 1 1 2.8,9.5 M 2.5,2.8 L 2.8,6 L 6,5.6 M 8,5.2 L 8,8.3 L 10.4,9.8";
+        public const string Chat          = "M 2.5,3 L 13.5,3 L 13.5,10.8 L 7.6,10.8 L 4.6,13.6 L 4.6,10.8 L 2.5,10.8 Z M 5.2,6 L 10.8,6 M 5.2,8.2 L 8.8,8.2";
+        public const string Tag           = "M 2.4,8.6 L 8.6,2.4 L 13.6,2.4 L 13.6,7.4 L 7.4,13.6 Z M 10.7,5.2 L 10.8,5.3";
 
         public static Path CreateIcon(string pathData, double size, string strokeResourceKey)
         {
@@ -1629,6 +1631,53 @@ namespace TokLens
         }
     }
 
+    // 一张表里「哪些次要列现在显示」的唯一决定者。两类原因会让一列不显示：
+    // 宽度不够（按 dropOrder 依次收起），或这列此刻没有数据可看（SetAvailable(false)）。
+    // 两者都经过这里，不会出现一处刚隐藏、另一处又显示回来的情况。
+    internal sealed class ResponsiveColumns
+    {
+        private readonly DataGrid _grid;
+        private readonly DataGridColumn[] _dropOrder;
+        private readonly HashSet<DataGridColumn> _unavailable = new HashSet<DataGridColumn>();
+
+        public ResponsiveColumns(DataGrid grid, DataGridColumn[] dropOrder)
+        {
+            _grid = grid; _dropOrder = dropOrder ?? new DataGridColumn[0];
+            if (_grid != null) _grid.SizeChanged += delegate(object s, SizeChangedEventArgs e) { Apply(); };
+        }
+
+        public void SetAvailable(DataGridColumn column, bool available)
+        {
+            if (column == null) return;
+            if (available) _unavailable.Remove(column); else _unavailable.Add(column);
+        }
+
+        private static double WidthOf(DataGridColumn c)
+        {
+            if (c.Width.IsAbsolute) return c.Width.Value;
+            return c.Width.IsStar ? Math.Max(c.MinWidth, 20.0) : Math.Max(c.MinWidth, c.ActualWidth);
+        }
+
+        public void Apply()
+        {
+            if (_grid == null) return;
+            foreach (DataGridColumn c in _dropOrder)
+                c.Visibility = _unavailable.Contains(c) ? Visibility.Collapsed : Visibility.Visible;
+            double available = _grid.ActualWidth - 14.0; // 垂直滚动条的位置
+            if (available <= 0) return;
+            double needed = 0;
+            foreach (DataGridColumn c in _grid.Columns)
+                if (c.Visibility == Visibility.Visible) needed += WidthOf(c);
+            for (int i = 0; i < _dropOrder.Length && needed > available; i++)
+            {
+                DataGridColumn c = _dropOrder[i];
+                if (c.Visibility != Visibility.Visible) continue;
+                needed -= WidthOf(c);
+                c.Visibility = Visibility.Collapsed;
+            }
+        }
+    }
+
     internal static class ModernDataGridFactory
     {
         private sealed class RatioToWidthConverter : IValueConverter
@@ -1864,7 +1913,9 @@ namespace TokLens
             col.Width = width;
             if (width.IsStar)
             {
-                col.MinWidth = 118;
+                // 按比例分宽的列只保证一个能读的下限；需要更宽的列由调用方自己设 MinWidth。
+                // （此前统一 118px：8 个等分列的表在窄窗口里就已经超宽，出现横向滚动条和被截断的金额。）
+                col.MinWidth = 78;
             }
 
             if (rightAlign && dg != null && dg.ColumnHeaderStyle != null)
@@ -1928,6 +1979,75 @@ namespace TokLens
             dt.VisualTree = pill;
             col.CellTemplate = dt;
             return col;
+        }
+
+        // 服务档位列：Standard 是不抢眼的中性胶囊；Fast / Ultrafast 是加价档，用警示色；Flex 用成功色。
+        // 只有请求证据、响应未证实的档位画成空心描边。档位未知不占视觉重量，只显示「—」。
+        // 证据与金额来源写在悬停提示里，表格里不再为它们各占一列。
+        public static DataGridTemplateColumn MakeTierColumn(string header, DataGridLength width)
+        {
+            DataGridTemplateColumn col = new DataGridTemplateColumn();
+            col.Header = header;
+            col.SortMemberPath = "ServiceTierLabel";
+            col.Width = width;
+
+            DataTemplate dt = new DataTemplate();
+            FrameworkElementFactory pill = new FrameworkElementFactory(typeof(Border), "TierPill");
+            pill.SetValue(Border.CornerRadiusProperty, new CornerRadius(4));
+            pill.SetValue(Border.PaddingProperty, new Thickness(6, 1, 6, 1));
+            pill.SetValue(Border.BorderThicknessProperty, new Thickness(1));
+            pill.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Left);
+            pill.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
+            pill.SetValue(Border.BackgroundProperty, new DynamicResourceExtension("BgSurface"));
+            pill.SetValue(Border.BorderBrushProperty, new DynamicResourceExtension("BorderCard"));
+            pill.SetBinding(FrameworkElement.ToolTipProperty, new Binding("ServiceTierHint"));
+            pill.SetValue(ToolTipService.ShowDurationProperty, 20000);
+
+            FrameworkElementFactory txt = new FrameworkElementFactory(typeof(TextBlock), "TierText");
+            txt.SetBinding(TextBlock.TextProperty, new Binding("ServiceTierLabel"));
+            txt.SetValue(TextBlock.FontFamilyProperty, DesignSystem.FontUi);
+            txt.SetValue(TextBlock.FontSizeProperty, DesignSystem.TextCaption);
+            txt.SetValue(TextBlock.FontWeightProperty, FontWeights.Medium);
+            txt.SetValue(TextBlock.ForegroundProperty, new DynamicResourceExtension("FgSecondary"));
+            txt.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis);
+            pill.AppendChild(txt);
+            dt.VisualTree = pill;
+
+            AddTierTone(dt, "standard-requested", "FgSecondary", null, "BorderStrong");
+            AddTierTone(dt, "fast", "SemanticWarning", "SemanticWarningBg", "SemanticWarningBorder");
+            AddTierTone(dt, "fast-requested", "SemanticWarning", null, "SemanticWarningBorder");
+            AddTierTone(dt, "ultrafast", "SemanticDanger", "SemanticDangerBg", "SemanticDangerBorder");
+            AddTierTone(dt, "ultrafast-requested", "SemanticDanger", null, "SemanticDangerBorder");
+            AddTierTone(dt, "flex", "SemanticSuccess", "SemanticSuccessBg", "SemanticSuccessBorder");
+            AddTierTone(dt, "flex-requested", "SemanticSuccess", null, "SemanticSuccessBorder");
+
+            DataTrigger unknown = new DataTrigger { Binding = new Binding("ServiceTierKind"), Value = "unknown" };
+            unknown.Setters.Add(new Setter(Border.BackgroundProperty, Brushes.Transparent, "TierPill"));
+            unknown.Setters.Add(new Setter(Border.BorderBrushProperty, Brushes.Transparent, "TierPill"));
+            unknown.Setters.Add(new Setter(Border.PaddingProperty, new Thickness(1, 1, 6, 1), "TierPill"));
+            unknown.Setters.Add(new Setter(TextBlock.TextProperty, "—", "TierText"));
+            unknown.Setters.Add(new Setter(TextBlock.ForegroundProperty, new DynamicResourceExtension("FgMuted"), "TierText"));
+            dt.Triggers.Add(unknown);
+
+            col.CellTemplate = dt;
+            return col;
+        }
+
+        private static void AddTierTone(DataTemplate template, string kind, string textKey, string fillKey, string borderKey)
+        {
+            DataTrigger trigger = new DataTrigger { Binding = new Binding("ServiceTierKind"), Value = kind };
+            trigger.Setters.Add(new Setter(TextBlock.ForegroundProperty, new DynamicResourceExtension(textKey), "TierText"));
+            if (fillKey == null) trigger.Setters.Add(new Setter(Border.BackgroundProperty, Brushes.Transparent, "TierPill"));
+            else trigger.Setters.Add(new Setter(Border.BackgroundProperty, new DynamicResourceExtension(fillKey), "TierPill"));
+            trigger.Setters.Add(new Setter(Border.BorderBrushProperty, new DynamicResourceExtension(borderKey), "TierPill"));
+            template.Triggers.Add(trigger);
+        }
+
+        // 窗口变窄时按给定顺序依次隐藏次要列，直到剩余列放得下；变宽后自动恢复。
+        // 取代「所有列固定宽度、放不下就把表头和内容一起截断」的做法。
+        public static ResponsiveColumns EnableResponsiveColumns(DataGrid dg, params DataGridColumn[] dropOrder)
+        {
+            return new ResponsiveColumns(dg, dropOrder);
         }
 
         public static DataGridTemplateColumn MakeShareBarColumn(

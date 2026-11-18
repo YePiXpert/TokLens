@@ -2550,7 +2550,7 @@ namespace TokLens
             Border card3 = CreateMetricCardShell(
                 UiIcons.Models,
                 "AccentText",
-                "本地 SQLite 账本引擎",
+                "本地账本",
                 _openConfigDirBtn,
                 out _cardLedgerMainText,
                 out _cardLedgerSubText);
@@ -2780,11 +2780,12 @@ namespace TokLens
             _probeDataGrid.Columns.Add(CreateProbeNameColumn());
 
             // 列 3：分类胶囊
-            _probeDataGrid.Columns.Add(ModernDataGridFactory.MakeBadgeColumn(
+            DataGridColumn categoryCol = ModernDataGridFactory.MakeBadgeColumn(
                 "分类",
                 "Category",
                 "Category",
-                new DataGridLength(132)));
+                new DataGridLength(124));
+            _probeDataGrid.Columns.Add(categoryCol);
 
             // 列 4：文件数
             _probeDataGrid.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(
@@ -2792,35 +2793,41 @@ namespace TokLens
                 "文件数",
                 "FileCountText",
                 "FileCount",
-                new DataGridLength(74),
+                new DataGridLength(70),
                 true,
                 true,
                 false));
 
             // 列 5：占用体积
-            _probeDataGrid.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(
+            DataGridColumn sizeCol = ModernDataGridFactory.MakeTextOrMonoColumn(
                 _probeDataGrid,
                 "占用体积",
                 "TotalSizeText",
                 "TotalBytes",
-                new DataGridLength(92),
+                new DataGridLength(88),
                 true,
                 true,
-                false));
+                false);
+            _probeDataGrid.Columns.Add(sizeCol);
 
             // 列 6：最近更新
-            _probeDataGrid.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(
+            DataGridColumn updatedCol = ModernDataGridFactory.MakeTextOrMonoColumn(
                 _probeDataGrid,
                 "最近更新",
                 "LastModifiedText",
                 "LastModifiedTicks",
-                new DataGridLength(116),
+                new DataGridLength(112),
                 true,
                 true,
-                false));
+                false);
+            _probeDataGrid.Columns.Add(updatedCol);
 
             // 列 7：诊断说明（自适应剩余空间 + 悬浮完整详情 ToolTip）
-            _probeDataGrid.Columns.Add(CreateDiagnosticHintColumn());
+            // 排障提示是这张表的重点：窗口变窄时先收起体积、分类、更新时间，不去挤它。
+            DataGridColumn hintCol = CreateDiagnosticHintColumn();
+            hintCol.MinWidth = 190.0;
+            _probeDataGrid.Columns.Add(hintCol);
+            ModernDataGridFactory.EnableResponsiveColumns(_probeDataGrid, sizeCol, categoryCol, updatedCol);
 
             // 列 8：快捷打开目录按钮
             _probeDataGrid.Columns.Add(CreateOpenFolderActionColumn());
@@ -2958,7 +2965,7 @@ namespace TokLens
         private static DataGridTemplateColumn CreateDiagnosticHintColumn()
         {
             DataGridTemplateColumn col = new DataGridTemplateColumn();
-            col.Header = "诊断说明与排障提示 (双击行打开路径)";
+            col.Header = "诊断说明（双击行打开路径）";
             col.SortMemberPath = "DiagnosticHint";
             col.Width = new DataGridLength(1, DataGridLengthUnitType.Star);
 

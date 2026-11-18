@@ -130,6 +130,41 @@ class AccountingTests(unittest.TestCase):
             self.assertEqual(next(r for r in rows if r[0] == "2026-11-16")[11], "unknown")
             self.assertEqual(rows, agent.MultiHarnessScanner(home, allow_network_pricing=False).scan_all())
 
+    def test_claude_delivered_tier_comes_from_message_usage(self):
+        # Anthropic reports the delivered mode inside message.usage; nothing on the message
+        # or the request carries it. Shared with tests/CollectionHealthTests.cs.
+        self.assertEqual(agent.anthropic_usage_tier({"service_tier": "standard", "speed": "standard"}), ("standard", "message.usage.service_tier=standard"))
+        self.assertEqual(agent.anthropic_usage_tier({"service_tier": "standard", "speed": "fast"}), ("fast", "message.usage.speed=fast"))
+        self.assertEqual(agent.anthropic_usage_tier({"service_tier": "standard"})[0], "standard")
+        for ambiguous in ({"service_tier": "priority", "speed": "standard"}, {"service_tier": "batch"}, {"service_tier": "standard", "speed": "turbo"}, {}, None):
+            self.assertIsNone(agent.anthropic_usage_tier(ambiguous), ambiguous)
+        with tempfile.TemporaryDirectory(prefix="toklens-claude-tier-") as temp, mock.patch.dict(os.environ, {"CLAUDE_CONFIG_DIR": ""}):
+            home = Path(temp)
+            path = home / ".claude" / "projects" / "C--desktop-project" / "desktop-session.jsonl"
+            path.parent.mkdir(parents=True)
+            path.write_text((Path(__file__).parent / "fixtures" / "claude_usage_tiers.jsonl").read_text(encoding="utf-8"), encoding="utf-8")
+            scanner = agent.MultiHarnessScanner(home, allow_network_pricing=False)
+            scanner.scan_claude()
+            scanner.cursor_store.flush()
+            rows = scanner.build_records()
+            self.assertEqual({r[1] for r in rows}, {"Claude Desktop"})
+            self.assertEqual({r[16] for r in rows}, {"anthropic"})
+            turns = {}
+            for r in rows:
+                turns[(r[11], r[12])] = turns.get((r[11], r[12]), 0) + r[3]
+            # standard + tier-only are Standard, speed=fast is Fast; priority, batch and a
+            # usage block without either field stay unknown. No request preference is invented.
+            self.assertEqual(turns, {("unknown", "standard"): 2, ("unknown", "fast"): 1, ("unknown", "unknown"): 3})
+            standard = next(r for r in rows if r[12] == "standard")
+            fast = next(r for r in rows if r[12] == "fast")
+            self.assertAlmostEqual(standard[8], (100 * 4 + 20 * 20 + 1000 * 0.2 + 50 * 5 + 100 * 4 + 24 * 20 + 1000 * 0.2 + 50 * 5) / 1e6, places=9)
+            self.assertAlmostEqual(fast[8], (100 * 8 + 21 * 40 + 1000 * 0.4 + 50 * 10) / 1e6, places=9)
+            self.assertEqual(fast[14], "estimated_tier_price")
+            self.assertIn("message.usage.speed=fast", fast[13])
+            replay = agent.MultiHarnessScanner(home, allow_network_pricing=False)
+            replay.scan_claude()
+            self.assertEqual(replay.build_records(), rows)
+
     def test_tier_baseline_and_mixed_long_context_rates(self):
         with tempfile.TemporaryDirectory(prefix="toklens-tier-") as temp:
             scanner = agent.MultiHarnessScanner(Path(temp), allow_network_pricing=False)

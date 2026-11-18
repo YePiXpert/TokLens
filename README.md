@@ -38,7 +38,7 @@ Windows 10/11 使用系统 .NET Framework/WPF 与 SQLite。远端探针与 macOS
 | 档位证据 | 取自哪个日志字段 |
 | 估值依据、价格版本 | 日志报告金额、已知档位参考价、请求档位估算、未知档位参考价或未定价 |
 
-`priority` 归一为 Fast，`default` 归一为 Standard；模型名、推理强度和服务档位分开处理。只出现 `-fast` 后缀但没有对应价格时，不删掉后缀偷偷套普通价。
+`priority` 归一为 Fast，`default` 归一为 Standard；模型名、推理强度和服务档位分开处理。Claude Code / Claude Desktop 的实际档位取自响应 `usage` 里的 `speed` 与 `service_tier`：`speed = fast` 是 Fast，`service_tier = standard` 是 Standard；Anthropic 的 `priority` 是预留容量，不当作 Fast。只出现 `-fast` 后缀但没有对应价格时，不删掉后缀偷偷套普通价。
 
 - **实际档位已知**：优先用实际档位及请求日期匹配价格。
 - **只有请求 Fast 的证据**：可以按该档位估值，但明确标为“按请求档位估算”，不宣称实际已走 Fast。

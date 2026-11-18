@@ -9,7 +9,7 @@ namespace TokLens
     // combine mutually exclusive versions of the same requests into a fake bill.
     internal static class UsageAccounting
     {
-        public const int Revision = 32;
+        public const int Revision = 33;
         public const int ReconciledRevision = 28;
 
         public static string Partition(string date, string tool)
