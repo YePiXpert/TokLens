@@ -46,21 +46,26 @@ internal static class ProductUiTests
         {
             MainWindow main=new MainWindow(root,true);string cfgPath=SyncService.ConfigFilePath;string cfgBefore=File.Exists(cfgPath)?File.ReadAllText(cfgPath):null;main.RunHeadlessUiSelfTest();
             Border[] nav=Field<Border[]>(main,"_navRows");int visible=0;foreach(Border b in nav)if(b!=null&&b.Visibility==Visibility.Visible)visible++;
-            Check(nav.Length==10&&visible==9,"every page has its own sidebar row; only the optional subscriptions page is hidden by default");Check(typeof(MainWindow).Assembly.GetType("TokLens.WhatIfSimulatorView")==null,"simulator code removed from build");
-            Check(typeof(MainWindow).GetField("_navChildPanels",BindingFlags.NonPublic|BindingFlags.Instance)==null,"section captions are labels, not a second set of destinations");
+            Check(nav.Length==6&&visible==5,"the sidebar lists pages rather than every view; only the optional subscriptions page is hidden by default");Check(typeof(MainWindow).Assembly.GetType("TokLens.WhatIfSimulatorView")==null,"simulator code removed from build");
+            Check(typeof(MainWindow).GetField("_navSectionCaptions",BindingFlags.NonPublic|BindingFlags.Instance)==null&&typeof(MainWindow).Assembly.GetType("TokLens.CommandPaletteOverlay")==null&&typeof(MainWindow).Assembly.GetType("TokLens.ShortcutAndGuideWindow")==null&&typeof(MainWindow).Assembly.GetType("TokLens.RequestInspectorPanel")==null,"the sidebar has no sections, and the command palette, guide window and request drawer are gone from the build");
+            Check(typeof(MainWindow).GetMethod("ExportMarkdownWithDialog",BindingFlags.NonPublic|BindingFlags.Instance)==null&&typeof(MainWindow).GetMethod("ExportJsonWithDialog",BindingFlags.NonPublic|BindingFlags.Instance)==null&&!Array.Exists(typeof(ReportExporter).GetMethods(),delegate(MethodInfo m){return m.Name.Contains("Markdown");}),"the export menu offers the HTML report and the CSV ledger only");
             Check((File.Exists(cfgPath)?File.ReadAllText(cfgPath):null)==cfgBefore,"UI self-test never writes to the saved config");
             Check(typeof(SyncConfig).GetField("DailyBudgetUsd")==null,"daily budget feature removed from the config model");
             StackPanel cards=Field<StackPanel>(main,"_deviceCardsStack");Check(cards.Children.Count>1&&((Border)cards.Children[0]).Child!=null,"device cards render their content");
             Call(main,"SwitchActiveView",2);int highlighted=0;foreach(Border b in nav)if(b!=null&&(bool)b.Tag)highlighted++;
-            Check((bool)nav[2].Tag&&highlighted==1&&Field<TextBlock>(main,"_viewGroupText").Text=="用量 /","exactly one sidebar row is highlighted and the page title names its section");
+            Check((bool)nav[2].Tag&&highlighted==1&&Field<TextBlock>(main,"_viewTitleText").Text=="用量","exactly one sidebar row is highlighted and the title names the page");
+            Border[] pageTabs=Field<Border[]>(main,"_pageTabContainers");Check(pageTabs[0]==null&&pageTabs[2].Visibility==Visibility.Visible&&pageTabs[1].Visibility==Visibility.Collapsed&&pageTabs[5].Visibility==Visibility.Collapsed,"a page with several views shows its own switcher, and only its own");
+            Call(main,"SwitchActiveView",7);Check((bool)nav[2].Tag&&Field<int>(main,"_activeView")==7,"switching view inside a page keeps the same sidebar row");
+            Call(main,"SwitchActivePage",1);int inRequests=Field<int>(main,"_activeView");Check((inRequests==1||inRequests==5)&&(bool)nav[1].Tag&&pageTabs[1].Visibility==Visibility.Visible,"a sidebar row opens that page and shows its switcher");
+            Call(main,"SwitchActivePage",2);Check(Field<int>(main,"_activeView")==7,"coming back to a page restores the view that was open");Call(main,"SwitchActiveView",2);
             Check(Field<DockPanel>(main,"_pageToolbar").Visibility==Visibility.Visible&&Field<Border>(main,"_rangeContainer").Visibility==Visibility.Visible,"usage pages show the filter toolbar");
             Call(main,"SwitchActiveView",3);Check(Field<Border>(main,"_rangeContainer").Visibility==Visibility.Collapsed&&Field<TextBlock>(main,"_pageScopeText").Text.Contains("全部历史"),"project page states its own scope instead of a time filter it ignores");
-            Call(main,"SwitchActiveView",9);Border pricingRow=Field<Border>(main,"_navPricingRow");
-            Check(pricingRow.Visibility==Visibility.Visible&&!(bool)pricingRow.Tag&&Field<DockPanel>(main,"_pageToolbar").Visibility==Visibility.Collapsed,"pricing rules sit in the settings section but never show as the current page, and settings has no data filters");
-            Call(main,"SwitchActiveView",8);Check(Field<TextBlock>(Field<object>(main,"_doctorView"),"_bannerStatusText").Text=="未检查","environment check never reports healthy before it has run");
+            Call(main,"SwitchActiveView",9);Button pricing=Field<Button>(main,"_pricingRulesBtn");
+            Check(pricing.Visibility==Visibility.Visible&&(bool)nav[5].Tag&&Field<DockPanel>(main,"_pageToolbar").Visibility==Visibility.Collapsed,"pricing rules open from the settings page, and settings has no data filters");
+            Call(main,"SwitchActiveView",8);Check(Field<TextBlock>(Field<object>(main,"_doctorView"),"_bannerStatusText").Text=="未检查","environment check never reports healthy before it has run");Check((bool)nav[5].Tag&&pricing.Visibility==Visibility.Visible,"the environment check is a view of the settings page");Call(main,"SwitchActiveView",0);Check(pricing.Visibility==Visibility.Collapsed,"the pricing rules entry appears on the settings page only");
             Call(main,"ApplyResponsiveSidebar",1167.0);Check(!Field<bool>(main,"_sidebarCollapsed"),"the default window size keeps the labelled sidebar");
             Call(main,"ApplyResponsiveSidebar",940.0);bool narrowCollapsed=Field<bool>(main,"_sidebarCollapsed");int reachable=0;foreach(Border b in nav)if(b!=null&&b.Visibility==Visibility.Visible)reachable++;
-            Check(narrowCollapsed&&reachable==9&&Field<TextBlock[]>(main,"_navRowLabels")[2].Visibility==Visibility.Collapsed,"collapsed to icons, every page is still one click away");
+            Check(narrowCollapsed&&reachable==5&&Field<TextBlock[]>(main,"_navRowLabels")[2].Visibility==Visibility.Collapsed,"collapsed to icons, every page is still one click away");
             Call(main,"ApplyResponsiveSidebar",1320.0);Check(!Field<bool>(main,"_sidebarCollapsed")&&Field<TextBlock[]>(main,"_navRowLabels")[2].Visibility==Visibility.Visible,"sidebar restores its labels when widened");
             Call(main,"SwitchActiveView",7);UIElement[] pages=Field<UIElement[]>(main,"_viewPages");FrameworkElement heat=(FrameworkElement)Field<object>(main,"_heatmapView");
             Check(heat!=null&&heat.Parent==pages[7]&&pages[7].Visibility==Visibility.Visible,"daily summary hosts the 365-day usage calendar");
@@ -69,6 +74,10 @@ internal static class ProductUiTests
             Call(main,"SwitchActiveView",4);Check(Field<int>(main,"_activeView")==0,"the subscriptions page cannot be opened while the feature is off");
             Field<SyncConfig>(main,"_syncCfg").ShowSubscriptions=true;Call(main,"ApplySubscriptionFeature");Check(nav[4].Visibility==Visibility.Visible,"turning the setting on shows the subscriptions page");
             Call(main,"SwitchActiveView",4);Check(Field<int>(main,"_activeView")==4&&Field<Button>(main,"_deviceSelectorBtn").Visibility==Visibility.Collapsed&&Field<Border>(main,"_rangeContainer").Visibility==Visibility.Collapsed,"subscription page shows no device or time filter");Capture((FrameworkElement)main.Content,Path.Combine(output,"subscriptions-full-light.png"),1320,860);
+            typeof(MainWindow).GetField("_remoteNodes",BindingFlags.NonPublic|BindingFlags.Instance).SetValue(main,new List<NodeSnapshot>());typeof(MainWindow).GetField("_knownDeviceCount",BindingFlags.NonPublic|BindingFlags.Instance).SetValue(main,1);
+            Call(main,"ApplyDevicesPageAvailability");Check(nav[3].Visibility==Visibility.Collapsed,"with one device and no sync configured there is no devices page to show");
+            Call(main,"SwitchActiveView",6);Check(Field<int>(main,"_activeView")==0,"the devices page cannot be opened while there is nothing to compare");
+            Field<SyncConfig>(main,"_syncCfg").GistId="abc";Call(main,"ApplyDevicesPageAvailability");Check(nav[3].Visibility==Visibility.Visible,"configuring sync brings the devices page back");Field<SyncConfig>(main,"_syncCfg").GistId="";
             MiniHudWindow hud=new MiniHudWindow(false,null,null);
             long now=(long)(DateTime.UtcNow-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;
             HudTelemetry sample=new HudTelemetry { Tool="OpenAI Codex",Model="gpt-6.1-sol",TimestampMs=now,Output=824,DurationMs=10000,TimingSource="request",TodayUsd=215.72,LastHourUsd=12.5,Last15Usd=3.2,LastCostUsd=0.42,ContextTokens=234000,ContextLimit=1000000,TodayTokens=469180000,TodayRequests=2333,CacheHitRate=0.97 };
@@ -96,19 +105,6 @@ internal static class ProductUiTests
             Check(Field<TextBlock>(hud,"_status").Text.Contains("空闲"),"old request is idle");
             Check(Field<TextBlock>(hud,"_cardTiming").Text.Contains("未提供可靠"),"missing timing is stated instead of inferred");
             hud.Close();
-
-            RequestInspectorPanel inspector=new RequestInspectorPanel(root,null,null);
-            LiveRequestRowView timed=new LiveRequestRowView {Output=10,DurationMs=10,TimingSource="request",Tps=999};
-            Call(inspector,"BindTelemetryMetrics",timed,10L);
-            Check(Field<TextBlock>(inspector,"_durationMainText").Text=="10ms"&&Field<TextBlock>(inspector,"_tpsMainText").Text=="1000.0","request inspector accepts real short timings and recalculates TPS");
-            timed.DurationMs=1200000;Call(inspector,"BindTelemetryMetrics",timed,600L);
-            Check(Field<TextBlock>(inspector,"_durationMainText").Text!="—"&&Field<TextBlock>(inspector,"_tpsMainText").Text=="0.5","request inspector accepts real long timings");
-            timed.TimingSource="";Call(inspector,"BindTelemetryMetrics",timed,600L);
-            Check(Field<TextBlock>(inspector,"_tpsMainText").Text=="—","request inspector rejects unverified cached speed");
-            string detail=(string)typeof(RequestInspectorPanel).GetMethod("BuildForensicsJson",BindingFlags.NonPublic|BindingFlags.Instance).Invoke(inspector,new object[]{timed});
-            var detailMap=(Dictionary<string,object>)new System.Web.Script.Serialization.JavaScriptSerializer().DeserializeObject(detail);
-            var telemetry=(Dictionary<string,object>)detailMap["telemetry"];
-            Check(Convert.ToInt32(telemetry["duration_ms"])==0&&Convert.ToString(telemetry["tps_kind"])=="unavailable","request JSON carries the same timing provenance as the UI");
 
             SyncConfig config=new SyncConfig();SubscriptionCostsView view=new SubscriptionCostsView();Window owner=new Window { Content=view };DesignSystem.ApplyTheme(owner,false);
             view.Bind(config,delegate(SyncConfig c){SyncService.SaveConfig(c);});

@@ -118,22 +118,6 @@ namespace TokLens
             rows.Sort(delegate(UsageTierTotal a, UsageTierTotal b) { return b.Requests.CompareTo(a.Requests); });
             return rows;
         }
-
-        public static string Markdown(IEnumerable<RecordBucket> records, bool cny, double rate)
-        {
-            StringBuilder sb = new StringBuilder();
-            sb.AppendLine("### 服务档位与计价证据");
-            sb.AppendLine();
-            sb.AppendLine("| 档位 | 金额来源 | 请求数 | Token | 金额 | 未计价请求 | 档位额外估值 |");
-            sb.AppendLine("| --- | --- | ---: | ---: | ---: | ---: | ---: |");
-            foreach (UsageTierTotal r in Group(records)) sb.AppendLine(string.Format(CultureInfo.InvariantCulture,
-                "| {0} | {1} | {2} | {3} | {4} | {5} | {6} |", r.Label, r.BasisLabel, r.Requests, r.Tokens, r.UnpricedRequests == r.Requests && r.Requests > 0 ? "—" : FormatterUtil.FormatMoney(r.CostUsd, cny, rate), r.UnpricedRequests,
-                r.ComparableRequests > 0 ? FormatterUtil.FormatMoney(r.PremiumUsd, cny, rate) + "（" + r.ComparableRequests + " 次可比）" : "—"));
-            sb.AppendLine();
-            sb.AppendLine("已请求档位不证明实际执行档位。未知档位保留标准参考估值；未计价部分不包含在金额中。Token 数不乘 Fast 倍率；以上金额不代表订阅扣款或剩余额度。");
-            sb.AppendLine();
-            return sb.ToString();
-        }
     }
 
     // 概览页顶部的采集状态条：一行摘要（本机采集是否正常 + 当前筛选范围的服务档位构成），
