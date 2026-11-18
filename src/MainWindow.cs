@@ -327,13 +327,13 @@ namespace TokLens
 
     public sealed class MainWindow : Window
     {
-        // 十一大独立全高旗舰视图索引
+        // 视图索引。视图按页面分组（见 PageViews），侧栏只列页面。
         private const int ViewOverview = 0;
         private const int ViewLiveStream = 1;
         private const int ViewModels = 2;
         private const int ViewProjects = 3;
         private const int ViewInsights = 4;
-        private const int ViewBloat = 5;
+        private const int ViewSessions = 5;
         private const int ViewDevices = 6;
         private const int ViewDailyExport = 7;
         private const int ViewDoctor = 8;
@@ -347,7 +347,7 @@ namespace TokLens
         // 其他天数走「自定义…」，避免预设和自由输入框并排占用顶栏空间。
         private static readonly int[] PresetRangeDays = new int[] { 1, 7, 30, 0 };
 
-        // 每个页面只有一个名字：侧栏、页面标题、命令面板、快捷键提示都用这里的叫法。
+        // 视图的名字：页面标题旁的切换条用这里的叫法。
         private static readonly string[] ViewTitles = new string[]
         {
             "概览",
@@ -355,7 +355,7 @@ namespace TokLens
             "模型与工具",
             "项目",
             "订阅与费用",
-            "会话分析",
+            "会话",
             "设备",
             "每日汇总",
             "环境检查",
@@ -445,10 +445,9 @@ namespace TokLens
         private DateTime _hudAlertUntilUtc = DateTime.MinValue;
         private string _hudAlertText = "";
 
-        // 布局核心骨架（供 0.0px 零跳动无头自测断言）与全局命令面板覆盖层
+        // 布局核心骨架（供 0.0px 零跳动无头自测断言）
         private Border _rootShellBorder;
         private ToastManager _toastManager;
-        private CommandPaletteOverlay _commandPalette;
         private ColumnDefinition _sidebarColDef;
         private Border _sidebarBorder;
         private Border _topContextBarBorder;
@@ -462,11 +461,6 @@ namespace TokLens
         private Border[] _navRowBars;
         private TextBlock[] _navRowLabels;
         private Shapes.Path[] _navRowIcons;
-        private readonly List<FrameworkElement> _navSectionCaptions = new List<FrameworkElement>(); // 展开时的分区标题
-        private readonly List<FrameworkElement> _navSectionRules = new List<FrameworkElement>();    // 折叠后代替标题的分隔线
-        private Border _navPricingRow;         // 计价规则：打开独立窗口，不是页面
-        private TextBlock _navPricingLabel;
-        private FrameworkElement _navPricingHint;
         private Shapes.Ellipse _navLiveNewDot;
         private Border _navDeviceCountBadge;
         private TextBlock _navDeviceCountText;
@@ -479,12 +473,16 @@ namespace TokLens
         private Shapes.Path _themeToggleIcon;
         private Button _sidebarRefreshBtn;
         private Button _sidebarHudBtn;
-        private Button _sidebarHelpBtn;
         private Button _sidebarCollapseBtn;
 
         // 顶栏上下文与全局筛选控件
-        private TextBlock _viewGroupText;
         private TextBlock _viewTitleText;
+        private StackPanel _pageTabsHost;           // 标题旁的视图切换条：每个多视图页面一组
+        private Border[] _pageTabContainers;
+        private Button[][] _pageTabButtons;
+        private Button _pricingRulesBtn;             // 「设置」页切换条旁的计价规则入口（另开窗口）
+        private readonly int[] _pageLastView = new int[] { ViewOverview, ViewLiveStream, ViewModels, ViewDevices, ViewInsights, ViewSettings };
+        private int _knownDeviceCount = 1;
         private TextBlock _viewSubContextText;
         private Border _inlineAlertBadge;
         private TextBlock _inlineAlertText;
@@ -506,13 +504,13 @@ namespace TokLens
         // 设置页「更多」菜单里的开机自启项
         private MenuItem _autoStartMenuItem;
 
-        // 十一大全高视图根节点与专项分析引擎视图
+        // 各视图的根节点
         private Grid _workspaceHostGrid;
         private UIElement[] _viewPages;
         private ProjectAttributionView _projectView;
         private SubscriptionCostsView _subscriptionView;
         private UsageHeatmapView _heatmapView;
-        private SessionBloatAnalyzerView _bloatView;
+        private SessionListView _sessionView;
         private DiagnosticsDoctorView _doctorView;
         private SyncSettingsView _settingsView;
         private bool _doctorLoadedOnce = false;
@@ -562,19 +560,16 @@ namespace TokLens
         private DataGrid _overviewLiveGrid;
         private Border _overviewLiveEmpty;
 
-        // 视图 1（实时请求流）控件与右侧单笔账单透视抽屉
+        // 视图 1（实时请求流）控件
         private TextBox _liveSearchInput;
         private Button _liveClearFilterBtn;
         private Button _livePauseBtn;
         private Shapes.Path _livePauseIcon;
         private TextBlock _livePauseBtnText;
-        private Button _toggleInspectorBtn;
         private TextBlock _liveStreamSummaryText;
         private DataGrid _liveGrid;
         private Border _liveEmptyOverlay;
         private TextBlock _liveEmptyTitle;
-        private ColumnDefinition _requestInspectorGapCol;
-        private RequestInspectorPanel _requestInspector;
 
         // 视图 2（模型与工具账单）控件
         private Grid _modelStackedBarGrid;
@@ -927,17 +922,6 @@ namespace TokLens
                 WinForms.ToolStripMenuItem updateItem = new WinForms.ToolStripMenuItem("检查应用更新…");
                 updateItem.Click += delegate { Dispatcher.BeginInvoke(new Action(OpenAppUpdateDialog)); };
                 _trayMenu.Items.Add(updateItem);
-
-                WinForms.ToolStripMenuItem guideItem = new WinForms.ToolStripMenuItem("快捷键与 GitHub 令牌原理解析 (F1)");
-                guideItem.Click += delegate(object s, EventArgs e)
-                {
-                    Dispatcher.BeginInvoke(new Action(delegate()
-                    {
-                        RestoreAndActivateFromTray();
-                        OpenShortcutAndGuideDialog(1);
-                    }));
-                };
-                _trayMenu.Items.Add(guideItem);
 
                 _trayMinimizeToggleItem = new WinForms.ToolStripMenuItem("关闭窗口时最小化到系统托盘");
                 _trayMinimizeToggleItem.Checked = _syncCfg != null && _syncCfg.MinimizeToTray;
@@ -1655,7 +1639,7 @@ namespace TokLens
             double baseTopH = _topContextBarBorder.ActualHeight;
             double baseSideW = _sidebarBorder.ActualWidth;
 
-            // 遍历全部 11 大全高旗舰视图，断言顶栏 48px 与侧栏 200px 实现 0.0px 零跳动
+            // 遍历全部视图，断言顶栏 48px 与侧栏 200px 实现 0.0px 零跳动
             for (int v = 0; v < TotalViewCount; v++)
             {
                 SwitchActiveView(v);
@@ -1681,24 +1665,6 @@ namespace TokLens
                         v, baseTopH, curTopH, baseSideW, curSideW));
                 }
             }
-
-            // 验证全局 Ctrl+K 命令面板开关与单笔请求账单透视抽屉无头渲染稳定性
-            OpenCommandPalette();
-            root.UpdateLayout();
-            if (_commandPalette != null && _commandPalette.IsOpen)
-                _commandPalette.Close();
-            root.UpdateLayout();
-
-            SwitchActiveView(ViewLiveStream);
-            if (_liveGrid != null && _liveGrid.Items.Count > 0)
-            {
-                LiveRequestRowView firstLive = _liveGrid.Items[0] as LiveRequestRowView;
-                if (firstLive != null)
-                    OpenRequestInspectorFor(firstLive);
-            }
-            root.UpdateLayout();
-            CloseRequestInspector();
-            root.UpdateLayout();
 
             // 测试侧边栏折叠 (58px) 与展开 (200px) 稳定性
             ToggleSidebarCollapsed();
@@ -1789,9 +1755,9 @@ namespace TokLens
                 if (_settingsView != null) _settingsView.ReloadFromConfig();
             });
             _viewPages[ViewInsights] = _subscriptionView;
-            _bloatView = new SessionBloatAnalyzerView();
-            _bloatView.Margin = new Thickness(16, 12, 16, 14);
-            _viewPages[ViewBloat] = _bloatView;
+            _sessionView = new SessionListView();
+            _sessionView.Margin = new Thickness(16, 12, 16, 14);
+            _viewPages[ViewSessions] = _sessionView;
             _viewPages[ViewDevices] = BuildDevicesView();
             _viewPages[ViewDailyExport] = BuildDailyExportView();
             _doctorView = new DiagnosticsDoctorView(_homeDir, ShowToastSafe);
@@ -1817,10 +1783,6 @@ namespace TokLens
             _rootShellBorder.Child = shellCols;
             outerLayer.Children.Add(_rootShellBorder);
 
-            _commandPalette = new CommandPaletteOverlay();
-            Panel.SetZIndex(_commandPalette, 950);
-            outerLayer.Children.Add(_commandPalette);
-
             UIElement toastHost = _toastManager.HostElement;
             Panel.SetZIndex(toastHost, 999);
             outerLayer.Children.Add(toastHost);
@@ -1828,25 +1790,39 @@ namespace TokLens
             return outerLayer;
         }
 
-        // 侧栏：每个页面一行、各有图标，按分区排列。分区标题只是标签，不是入口——
-        // 不再有「点分组等于点它的第一个子页面」的重复入口，折叠成图标后每个页面仍可直达。
-        private static readonly int[] NavPrimaryViews = new int[] { ViewOverview, ViewDevices, ViewInsights };
-        private static readonly int[] NavUsageViews = new int[] { ViewLiveStream, ViewModels, ViewProjects, ViewBloat, ViewDailyExport };
-        private static readonly int[] NavSettingsViews = new int[] { ViewSettings, ViewDoctor };
-        private const string NavSectionUsage = "用量";
-        private const string NavSectionSettings = "设置";
+        // 侧栏只列页面：概览、请求、用量、设备、订阅与费用（可选）、设置。
+        // 一个页面包含一个或多个视图；多于一个时标题旁出现切换条，侧栏不再给每个视图各占一行。
+        private const int PageOverview = 0;
+        private const int PageRequests = 1;
+        private const int PageUsage = 2;
+        private const int PageDevices = 3;
+        private const int PageSubscriptions = 4;
+        private const int PageSettings = 5;
+        private const int TotalPageCount = 6;
 
-        // 与 ViewTitles 同序：每个页面在侧栏里的图标。
-        private static readonly string[] ViewIcons = new string[]
+        private static readonly string[] PageTitles = new string[] { "概览", "请求", "用量", "设备", "订阅与费用", "设置" };
+        private static readonly string[] PageIcons = new string[]
         {
-            UiIcons.Overview, UiIcons.Activity, UiIcons.Models, UiIcons.Folder, UiIcons.Sparkles,
-            UiIcons.Chat, UiIcons.Devices, UiIcons.Calendar, UiIcons.Doctor, UiIcons.Settings
+            UiIcons.Overview, UiIcons.Activity, UiIcons.Models, UiIcons.Devices, UiIcons.Sparkles, UiIcons.Settings
+        };
+        private static readonly string[] PageShortcuts = new string[] { "Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+," };
+        private static readonly int[][] PageViews = new int[][]
+        {
+            new int[] { ViewOverview },
+            new int[] { ViewLiveStream, ViewSessions },
+            new int[] { ViewModels, ViewProjects, ViewDailyExport },
+            new int[] { ViewDevices },
+            new int[] { ViewInsights },
+            new int[] { ViewSettings, ViewDoctor }
         };
 
-        private static readonly string[] ViewShortcuts = new string[]
+        private static int PageOf(int view)
         {
-            "Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+7", "Ctrl+8", "Ctrl+9", "Ctrl+0", "Ctrl+,"
-        };
+            for (int p = 0; p < PageViews.Length; p++)
+                for (int i = 0; i < PageViews[p].Length; i++)
+                    if (PageViews[p][i] == view) return p;
+            return PageOverview;
+        }
 
         private UIElement BuildSidebar()
         {
@@ -1939,31 +1915,12 @@ namespace TokLens
             StackPanel navStack = new StackPanel();
             navStack.Margin = new Thickness(8, 8, 8, 6);
 
-            _navRows = new Border[TotalViewCount];
-            _navRowBars = new Border[TotalViewCount];
-            _navRowLabels = new TextBlock[TotalViewCount];
-            _navRowIcons = new Shapes.Path[TotalViewCount];
-            _navSectionCaptions.Clear();
-            _navSectionRules.Clear();
-
-            AddNavPageRows(navStack, NavPrimaryViews);
-            AddNavSection(navStack, NavSectionUsage);
-            AddNavPageRows(navStack, NavUsageViews);
-            AddNavSection(navStack, NavSectionSettings);
-            AddNavPageRows(navStack, NavSettingsViews);
-
-            // 计价规则是独立窗口而不是页面：放在设置分区，用外链角标说明会另开窗口，且从不显示为选中。
-            Border pricingBar;
-            Shapes.Path pricingIcon;
-            Grid pricingGrid;
-            _navPricingRow = BuildNavRow(UiIcons.Tag, "计价规则", "计价规则：模型单价、档位价格与自定义费率（另开窗口）",
-                delegate() { OpenPricingStudioDialog(null); }, out pricingBar, out _navPricingLabel, out pricingIcon, out pricingGrid);
-            Shapes.Path pricingHint = UiIcons.CreateIcon(UiIcons.ExternalLink, 10.5, "FgMuted");
-            pricingHint.Margin = new Thickness(4, 0, 9, 0);
-            Grid.SetColumn(pricingHint, 3);
-            pricingGrid.Children.Add(pricingHint);
-            _navPricingHint = pricingHint;
-            navStack.Children.Add(_navPricingRow);
+            _navRows = new Border[TotalPageCount];
+            _navRowBars = new Border[TotalPageCount];
+            _navRowLabels = new TextBlock[TotalPageCount];
+            _navRowIcons = new Shapes.Path[TotalPageCount];
+            for (int page = 0; page < TotalPageCount; page++)
+                AddNavPageRow(navStack, page);
 
             navScroll.Content = navStack;
             Grid.SetRow(navScroll, 1);
@@ -2080,14 +2037,6 @@ namespace TokLens
             };
             leftUtils.Children.Add(_sidebarHudBtn);
 
-            _sidebarHelpBtn = ModernControlsFactory.CreateIconGhostButton(UiIcons.Help, "快捷键速查与跨设备 GitHub 令牌原理解析 (F1)");
-            _sidebarHelpBtn.Margin = new Thickness(3, 0, 0, 0);
-            _sidebarHelpBtn.Click += delegate(object s, RoutedEventArgs e)
-            {
-                OpenShortcutAndGuideDialog(0);
-            };
-            leftUtils.Children.Add(_sidebarHelpBtn);
-
             utilDock.Children.Add(leftUtils);
             footerBar.Child = utilDock;
             Grid.SetRow(footerBar, 3);
@@ -2097,78 +2046,53 @@ namespace TokLens
             return _sidebarBorder;
         }
 
-        private void AddNavPageRows(StackPanel host, int[] views)
+        private void AddNavPageRow(StackPanel host, int page)
         {
-            for (int i = 0; i < views.Length; i++)
+            Border bar;
+            TextBlock label;
+            Shapes.Path icon;
+            Grid grid;
+            Border row = BuildNavRow(PageIcons[page], PageTitles[page], PageTitles[page] + " (" + PageShortcuts[page] + ")",
+                delegate() { SwitchActivePage(page); }, out bar, out label, out icon, out grid);
+            _navRows[page] = row;
+            _navRowBars[page] = bar;
+            _navRowLabels[page] = label;
+            _navRowIcons[page] = icon;
+            host.Children.Add(row);
+
+            if (page == PageDevices)
             {
-                int view = views[i];
-                Border bar;
-                TextBlock label;
-                Shapes.Path icon;
-                Grid grid;
-                Border row = BuildNavRow(ViewIcons[view], ViewTitles[view], ViewTitles[view] + " (" + ViewShortcuts[view] + ")",
-                    delegate() { SwitchActiveView(view); }, out bar, out label, out icon, out grid);
-                _navRows[view] = row;
-                _navRowBars[view] = bar;
-                _navRowLabels[view] = label;
-                _navRowIcons[view] = icon;
-                host.Children.Add(row);
+                _navDeviceCountBadge = new Border();
+                _navDeviceCountBadge.CornerRadius = new CornerRadius(8);
+                _navDeviceCountBadge.Padding = new Thickness(6, 1, 6, 1);
+                _navDeviceCountBadge.Margin = new Thickness(4, 0, 8, 0);
+                _navDeviceCountBadge.VerticalAlignment = VerticalAlignment.Center;
+                _navDeviceCountBadge.SetResourceReference(Border.BackgroundProperty, "BgElevated");
+                _navDeviceCountBadge.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
+                _navDeviceCountBadge.BorderThickness = new Thickness(1);
 
-                if (view == ViewDevices)
-                {
-                    _navDeviceCountBadge = new Border();
-                    _navDeviceCountBadge.CornerRadius = new CornerRadius(8);
-                    _navDeviceCountBadge.Padding = new Thickness(6, 1, 6, 1);
-                    _navDeviceCountBadge.Margin = new Thickness(4, 0, 8, 0);
-                    _navDeviceCountBadge.VerticalAlignment = VerticalAlignment.Center;
-                    _navDeviceCountBadge.SetResourceReference(Border.BackgroundProperty, "BgElevated");
-                    _navDeviceCountBadge.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
-                    _navDeviceCountBadge.BorderThickness = new Thickness(1);
+                _navDeviceCountText = new TextBlock();
+                _navDeviceCountText.Text = "1";
+                _navDeviceCountText.FontFamily = DesignSystem.FontMono;
+                _navDeviceCountText.FontSize = DesignSystem.TextCaption;
+                _navDeviceCountText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+                _navDeviceCountBadge.Child = _navDeviceCountText;
 
-                    _navDeviceCountText = new TextBlock();
-                    _navDeviceCountText.Text = "1";
-                    _navDeviceCountText.FontFamily = DesignSystem.FontMono;
-                    _navDeviceCountText.FontSize = DesignSystem.TextCaption;
-                    _navDeviceCountText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-                    _navDeviceCountBadge.Child = _navDeviceCountText;
-
-                    Grid.SetColumn(_navDeviceCountBadge, 3);
-                    grid.Children.Add(_navDeviceCountBadge);
-                }
-                else if (view == ViewLiveStream)
-                {
-                    _navLiveNewDot = new Shapes.Ellipse();
-                    _navLiveNewDot.Width = 6;
-                    _navLiveNewDot.Height = 6;
-                    _navLiveNewDot.Margin = new Thickness(4, 0, 10, 0);
-                    _navLiveNewDot.VerticalAlignment = VerticalAlignment.Center;
-                    _navLiveNewDot.Visibility = Visibility.Collapsed;
-                    _navLiveNewDot.SetResourceReference(Shapes.Shape.FillProperty, "SemanticSuccess");
-                    Grid.SetColumn(_navLiveNewDot, 3);
-                    grid.Children.Add(_navLiveNewDot);
-                }
+                Grid.SetColumn(_navDeviceCountBadge, 3);
+                grid.Children.Add(_navDeviceCountBadge);
             }
-        }
-
-        // 分区标题：展开时是一行小字标签，折叠成图标后换成一条分隔线。
-        private void AddNavSection(StackPanel host, string caption)
-        {
-            TextBlock text = new TextBlock();
-            text.Text = caption;
-            text.FontSize = DesignSystem.TextCaption;
-            text.FontWeight = FontWeights.Medium;
-            text.Margin = new Thickness(12, 14, 0, 5);
-            text.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-            _navSectionCaptions.Add(text);
-            host.Children.Add(text);
-
-            Border rule = new Border();
-            rule.Height = 1;
-            rule.Margin = new Thickness(9, 9, 9, 9);
-            rule.Visibility = Visibility.Collapsed;
-            rule.SetResourceReference(Border.BackgroundProperty, "BorderCard");
-            _navSectionRules.Add(rule);
-            host.Children.Add(rule);
+            else if (page == PageRequests)
+            {
+                _navLiveNewDot = new Shapes.Ellipse();
+                _navLiveNewDot.Width = 6;
+                _navLiveNewDot.Height = 6;
+                _navLiveNewDot.Margin = new Thickness(4, 0, 10, 0);
+                _navLiveNewDot.VerticalAlignment = VerticalAlignment.Center;
+                _navLiveNewDot.Visibility = Visibility.Collapsed;
+                _navLiveNewDot.SetResourceReference(Shapes.Shape.FillProperty, "SemanticSuccess");
+                Grid.SetColumn(_navLiveNewDot, 3);
+                grid.Children.Add(_navLiveNewDot);
+            }
         }
 
         private Border BuildNavRow(
@@ -2288,11 +2212,10 @@ namespace TokLens
             if (_sidebarDataPanel != null) _sidebarDataPanel.Visibility = expandedVis;
             if (_sidebarRefreshBtn != null) _sidebarRefreshBtn.Visibility = expandedVis;
             if (_sidebarHudBtn != null) _sidebarHudBtn.Visibility = expandedVis;
-            if (_sidebarHelpBtn != null) _sidebarHelpBtn.Visibility = expandedVis;
             if (_themeToggleBtn != null) _themeToggleBtn.Visibility = expandedVis;
             if (_navDeviceCountBadge != null) _navDeviceCountBadge.Visibility = expandedVis;
 
-            // 折叠后每个页面仍是一枚图标，可直接点到；只收起文字、角标，分区标题换成分隔线。
+            // 折叠后每个页面仍是一枚图标，可直接点到；只收起文字和角标。
             if (_navRowLabels != null)
             {
                 for (int i = 0; i < _navRowLabels.Length; i++)
@@ -2301,15 +2224,11 @@ namespace TokLens
                         _navRowLabels[i].Visibility = expandedVis;
                 }
             }
-            if (_navPricingLabel != null) _navPricingLabel.Visibility = expandedVis;
-            if (_navPricingHint != null) _navPricingHint.Visibility = expandedVis;
-            foreach (FrameworkElement caption in _navSectionCaptions) caption.Visibility = expandedVis;
-            foreach (FrameworkElement rule in _navSectionRules) rule.Visibility = _sidebarCollapsed ? Visibility.Visible : Visibility.Collapsed;
 
             UpdateNavVisuals();
         }
 
-        // -------------------- 顶栏：只放页面标题、搜索 / 跳转与同步状态；筛选和导出移到页面工具条 --------------------
+        // -------------------- 顶栏：页面标题、页面内的视图切换条与同步状态；筛选和导出在页面工具条 --------------------
         private UIElement BuildTopContextBar()
         {
             _topContextBarBorder = new Border();
@@ -2347,44 +2266,6 @@ namespace TokLens
             rightGroup.VerticalAlignment = VerticalAlignment.Center;
             WindowChrome.SetIsHitTestVisibleInChrome(rightGroup, true);
 
-            // 搜索 / 跳转入口（Ctrl+K 命令面板）
-            Button searchBtn = ModernControlsFactory.CreateButton("", "secondary");
-            searchBtn.Height = 28;
-            searchBtn.Width = 196;
-            searchBtn.Padding = new Thickness(9, 0, 8, 0);
-            searchBtn.ToolTip = "搜索页面、切换主题币种、导出报表或打开帮助 (Ctrl+K)";
-            DockPanel searchDock = new DockPanel { Width = 177, LastChildFill = true };
-            TextBlock searchKey = new TextBlock
-            {
-                Text = "Ctrl+K",
-                FontFamily = DesignSystem.FontMono,
-                FontSize = DesignSystem.TextCaption,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            searchKey.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-            DockPanel.SetDock(searchKey, Dock.Right);
-            searchDock.Children.Add(searchKey);
-            Shapes.Path searchIc = UiIcons.CreateIcon(UiIcons.Search, 12.5, "FgMuted");
-            searchIc.Margin = new Thickness(0, 0, 6, 0);
-            DockPanel.SetDock(searchIc, Dock.Left);
-            searchDock.Children.Add(searchIc);
-            TextBlock searchHint = new TextBlock
-            {
-                Text = "搜索或跳转…",
-                FontSize = DesignSystem.TextBody,
-                VerticalAlignment = VerticalAlignment.Center,
-                TextTrimming = TextTrimming.CharacterEllipsis
-            };
-            searchHint.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-            searchDock.Children.Add(searchHint);
-            searchBtn.Content = searchDock;
-            searchBtn.Click += delegate(object s, RoutedEventArgs e)
-            {
-                OpenCommandPalette();
-            };
-            WindowChrome.SetIsHitTestVisibleInChrome(searchBtn, true);
-            rightGroup.Children.Add(searchBtn);
-
             // 同步状态（点击进入同步设置）
             _syncStatusBtn = ModernControlsFactory.CreateButton("", "ghost");
             _syncStatusBtn.Height = 28;
@@ -2409,20 +2290,11 @@ namespace TokLens
             DockPanel.SetDock(rightGroup, Dock.Right);
             topDock.Children.Add(rightGroup);
 
-            // 左侧：分组 / 页面标题 + 告警胶囊 + 可截断的说明文字（标题本身永不截断）
+            // 左侧：页面标题 + 视图切换条 + 告警胶囊 + 可截断的说明文字（标题本身永不截断）
             DockPanel leftTitleDock = new DockPanel();
             leftTitleDock.LastChildFill = true;
             leftTitleDock.VerticalAlignment = VerticalAlignment.Center;
             leftTitleDock.Margin = new Thickness(0, 0, 12, 0);
-
-            _viewGroupText = new TextBlock();
-            _viewGroupText.FontSize = DesignSystem.TextTitle;
-            _viewGroupText.Margin = new Thickness(0, 0, 6, 0);
-            _viewGroupText.VerticalAlignment = VerticalAlignment.Center;
-            _viewGroupText.Visibility = Visibility.Collapsed;
-            _viewGroupText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-            DockPanel.SetDock(_viewGroupText, Dock.Left);
-            leftTitleDock.Children.Add(_viewGroupText);
 
             _viewTitleText = new TextBlock();
             _viewTitleText.Text = ViewTitles[0];
@@ -2432,6 +2304,41 @@ namespace TokLens
             _viewTitleText.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
             DockPanel.SetDock(_viewTitleText, Dock.Left);
             leftTitleDock.Children.Add(_viewTitleText);
+
+            // 页面内的视图切换条：只有包含多个视图的页面才有；当前页的那一组可见。
+            _pageTabsHost = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0, 0, 0) };
+            WindowChrome.SetIsHitTestVisibleInChrome(_pageTabsHost, true);
+            _pageTabContainers = new Border[TotalPageCount];
+            _pageTabButtons = new Button[TotalPageCount][];
+            for (int page = 0; page < TotalPageCount; page++)
+            {
+                if (PageViews[page].Length < 2) continue;
+                Border seg = ModernControlsFactory.CreateSegmentedContainer();
+                StackPanel segPanel = (StackPanel)seg.Child;
+                Button[] tabs = new Button[PageViews[page].Length];
+                for (int i = 0; i < tabs.Length; i++)
+                {
+                    int view = PageViews[page][i];
+                    tabs[i] = ModernControlsFactory.CreateSegmentedItem(ViewTitles[view]);
+                    tabs[i].Click += delegate(object s, RoutedEventArgs e) { SwitchActiveView(view); };
+                    segPanel.Children.Add(tabs[i]);
+                }
+                seg.Visibility = Visibility.Collapsed;
+                _pageTabContainers[page] = seg;
+                _pageTabButtons[page] = tabs;
+                _pageTabsHost.Children.Add(seg);
+            }
+
+            // 计价规则是独立窗口而不是视图：只在「设置」页的切换条旁给一个入口。
+            _pricingRulesBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Tag, "计价规则", "ghost");
+            _pricingRulesBtn.Height = 28;
+            _pricingRulesBtn.Margin = new Thickness(8, 0, 0, 0);
+            _pricingRulesBtn.ToolTip = "模型单价、档位价格与自定义费率（另开窗口）";
+            _pricingRulesBtn.Visibility = Visibility.Collapsed;
+            _pricingRulesBtn.Click += delegate(object s, RoutedEventArgs e) { OpenPricingStudioDialog(null); };
+            _pageTabsHost.Children.Add(_pricingRulesBtn);
+            DockPanel.SetDock(_pageTabsHost, Dock.Left);
+            leftTitleDock.Children.Add(_pageTabsHost);
 
             _inlineAlertBadge = new Border();
             _inlineAlertBadge.Height = 22;
@@ -2494,7 +2401,7 @@ namespace TokLens
             _exportMenuBtn = ModernControlsFactory.CreateButton("", "secondary");
             _exportMenuBtn.Height = 28;
             _exportMenuBtn.Padding = new Thickness(9, 0, 8, 0);
-            _exportMenuBtn.ToolTip = "按当前设备与时间范围导出 HTML 看板、Markdown、CSV 或 JSON 快照";
+            _exportMenuBtn.ToolTip = "按当前设备与时间范围导出网页看板或 CSV 对账明细";
 
             StackPanel expSp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             Shapes.Path expIcon = UiIcons.CreateIcon(UiIcons.Download, 13.5, null);
@@ -2668,13 +2575,15 @@ namespace TokLens
 
             // 项目页读取本机工作区全部历史；订阅按账户记实付，与设备和时间范围都无关。它们不跟随顶部筛选，
             // 所以不显示时间范围和导出（导出内容按时间筛选生成，放在这里会让人误以为导出的是本页数据）。
-            bool ownScope = (v == ViewProjects || v == ViewInsights);
+            // 会话视图只汇总本机最近的请求，同样不跟随设备和时间筛选。
+            bool ownScope = (v == ViewProjects || v == ViewInsights || v == ViewSessions);
             _deviceSelectorBtn.Visibility = ownScope ? Visibility.Collapsed : Visibility.Visible;
             _rangeContainer.Visibility = ownScope ? Visibility.Collapsed : Visibility.Visible;
             _exportMenuBtn.Visibility = ownScope ? Visibility.Collapsed : Visibility.Visible;
 
             string scope = "";
             if (v == ViewProjects) scope = "范围：本机工作区 · 全部历史";
+            else if (v == ViewSessions) scope = "范围：本机 · 最近的请求";
             _pageScopeText.Text = scope;
             _pageScopeText.Visibility = string.IsNullOrEmpty(scope) ? Visibility.Collapsed : Visibility.Visible;
         }
@@ -3268,16 +3177,6 @@ namespace TokLens
                 }));
 
             sp.Children.Add(MakePopoverActionRow(
-                UiIcons.Sparkles,
-                "Markdown 报告 (.md)",
-                "表格与趋势摘要，适合放进周报或 GitHub",
-                delegate()
-                {
-                    if (pop != null) pop.IsOpen = false;
-                    ExportMarkdownWithDialog();
-                }));
-
-            sp.Children.Add(MakePopoverActionRow(
                 UiIcons.Download,
                 "对账明细 (.csv)",
                 "按日期、设备、工具和模型逐行 (Ctrl+S)",
@@ -3285,16 +3184,6 @@ namespace TokLens
                 {
                     if (pop != null) pop.IsOpen = false;
                     ExportCsvWithDialog();
-                }));
-
-            sp.Children.Add(MakePopoverActionRow(
-                UiIcons.Shield,
-                "汇总快照 (.json)",
-                "只含聚合用量与费用，不含对话内容",
-                delegate()
-                {
-                    if (pop != null) pop.IsOpen = false;
-                    ExportJsonWithDialog();
                 }));
 
             pop = ModernControlsFactory.CreateModernPopover(target, sp);
@@ -3928,26 +3817,6 @@ namespace TokLens
             };
             rightBar.Children.Add(_livePauseBtn);
 
-            _toggleInspectorBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Layers, "单笔账单透视", "secondary");
-            _toggleInspectorBtn.Height = 30;
-            _toggleInspectorBtn.Margin = new Thickness(8, 0, 0, 0);
-            _toggleInspectorBtn.ToolTip = "展开或收起右侧单笔请求四维计费瀑布流与缓存省钱透视抽屉";
-            _toggleInspectorBtn.Click += delegate(object s, RoutedEventArgs e)
-            {
-                if (_requestInspector != null && _requestInspector.Visibility == Visibility.Visible)
-                {
-                    CloseRequestInspector();
-                }
-                else
-                {
-                    LiveRequestRowView sel = _liveGrid != null ? (_liveGrid.SelectedItem as LiveRequestRowView) : null;
-                    if (sel == null && _liveGrid != null && _liveGrid.Items.Count > 0)
-                        sel = _liveGrid.Items[0] as LiveRequestRowView;
-                    OpenRequestInspectorFor(sel);
-                }
-            };
-            rightBar.Children.Add(_toggleInspectorBtn);
-
             DockPanel.SetDock(rightBar, Dock.Right);
             toolbar.Children.Add(rightBar);
 
@@ -3982,72 +3851,22 @@ namespace TokLens
             Grid.SetRow(toolbar, 0);
             g.Children.Add(toolbar);
 
-            // 全高主从分栏区：左侧 DataGrid + 右侧可折叠 310px 单笔账单透视抽屉
-            Grid contentSplit = new Grid();
-            contentSplit.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            _requestInspectorGapCol = new ColumnDefinition { Width = new GridLength(0) };
-            contentSplit.ColumnDefinitions.Add(_requestInspectorGapCol);
-            contentSplit.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
             Border tableCard = ModernControlsFactory.CreateCard(new Thickness(0));
             Grid body = new Grid();
             _liveGrid = CreateLiveStreamDataGrid(false);
-            _liveGrid.SelectionChanged += delegate(object s, SelectionChangedEventArgs e)
-            {
-                LiveRequestRowView picked = _liveGrid.SelectedItem as LiveRequestRowView;
-                if (picked != null)
-                {
-                    OpenRequestInspectorFor(picked);
-                }
-            };
             body.Children.Add(_liveGrid);
 
             _liveEmptyOverlay = CreateEmptyStateOverlay(
                 UiIcons.Activity,
                 "暂无匹配的实时请求记录",
-                "当前仅展示本机带精确时间戳的单笔 API/工具交互记录；单击任意行可唤起右侧四维计费瀑布流透视",
+                "这里只列出本机带精确时间戳的单笔请求",
                 out _liveEmptyTitle);
             body.Children.Add(_liveEmptyOverlay);
 
             tableCard.Child = body;
-            Grid.SetColumn(tableCard, 0);
-            contentSplit.Children.Add(tableCard);
-
-            _requestInspector = new RequestInspectorPanel(
-                _homeDir,
-                delegate()
-                {
-                    CloseRequestInspector();
-                },
-                delegate(string modelId)
-                {
-                    if (_liveSearchInput != null)
-                        _liveSearchInput.Text = modelId ?? "";
-                });
-            _requestInspector.Visibility = Visibility.Collapsed;
-            Grid.SetColumn(_requestInspector, 2);
-            contentSplit.Children.Add(_requestInspector);
-
-            Grid.SetRow(contentSplit, 1);
-            g.Children.Add(contentSplit);
+            Grid.SetRow(tableCard, 1);
+            g.Children.Add(tableCard);
             return g;
-        }
-
-        private void OpenRequestInspectorFor(LiveRequestRowView row)
-        {
-            if (_requestInspector == null) return;
-            _requestInspector.Visibility = Visibility.Visible;
-            if (_requestInspectorGapCol != null)
-                _requestInspectorGapCol.Width = new GridLength(10);
-            _requestInspector.Inspect(row, _isCny, _usdToCny, _isDark);
-        }
-
-        private void CloseRequestInspector()
-        {
-            if (_requestInspector == null) return;
-            _requestInspector.Visibility = Visibility.Collapsed;
-            if (_requestInspectorGapCol != null)
-                _requestInspectorGapCol.Width = new GridLength(0);
         }
 
         private void UpdateLivePauseButtonVisual()
@@ -4512,7 +4331,7 @@ namespace TokLens
             }
             else
             {
-                // 完整明细的列比较多：窗口变窄或右侧 310px 透视抽屉展开时，按下面的顺序依次收起次要列，
+                // 完整明细的列比较多：窗口变窄时，按下面的顺序依次收起次要列，
                 // 时间、工具、模型、档位、总计与花费始终保留，不再出现表头和数字被截断的情况。
                 dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "时间", "TimeText", "TimestampMs", new DataGridLength(88), false, true, false));
                 dg.Columns.Add(ModernDataGridFactory.MakeBadgeColumn("AI 工具", "Tool", "Tool", new DataGridLength(124)));
@@ -4595,27 +4414,12 @@ namespace TokLens
             };
             cm.Items.Add(filterModelItem);
 
-            MenuItem inspectRowItem = new MenuItem { Header = "打开单笔账单瀑布流透视抽屉" };
-            inspectRowItem.Click += delegate(object s, RoutedEventArgs e)
-            {
-                LiveRequestRowView r = dg.SelectedItem as LiveRequestRowView;
-                if (r != null)
-                {
-                    SwitchActiveView(ViewLiveStream);
-                    OpenRequestInspectorFor(r);
-                }
-            };
-            cm.Items.Add(inspectRowItem);
-
             dg.ContextMenu = cm;
             if (compactOverviewMode)
             {
                 dg.MouseDoubleClick += delegate(object s, MouseButtonEventArgs e)
                 {
-                    LiveRequestRowView r = dg.SelectedItem as LiveRequestRowView;
                     SwitchActiveView(ViewLiveStream);
-                    if (r != null)
-                        OpenRequestInspectorFor(r);
                 };
             }
             return dg;
@@ -4880,15 +4684,45 @@ namespace TokLens
         // =================================================================================================
         // 3. 视图状态切换、多端聚合刷新引擎、平滑面积/柱状趋势图、导出与全局快捷键
         // =================================================================================================
-        private static bool IsUsageView(int view)
-        { return view==ViewLiveStream || view==ViewModels || view==ViewProjects || view==ViewBloat || view==ViewDailyExport; }
-
-        // 页面所属的侧栏分区；总览类页面不属于任何分区。
-        private static string NavSectionOf(int view)
+        // 侧栏点页面：回到这个页面上次停留的视图。
+        private void SwitchActivePage(int page)
         {
-            if (IsUsageView(view)) return NavSectionUsage;
-            if (view == ViewSettings || view == ViewDoctor) return NavSectionSettings;
-            return "";
+            if (page < 0 || page >= TotalPageCount) page = PageOverview;
+            SwitchActiveView(_pageLastView[page]);
+        }
+
+        private void UpdatePageTabs()
+        {
+            if (_pageTabContainers == null) return;
+            int page = PageOf(_activeView);
+            for (int p = 0; p < _pageTabContainers.Length; p++)
+            {
+                if (_pageTabContainers[p] == null) continue;
+                _pageTabContainers[p].Visibility = p == page ? Visibility.Visible : Visibility.Collapsed;
+                if (p == page)
+                    ModernControlsFactory.UpdateSegmentedGroup(_pageTabButtons[p], Array.IndexOf(PageViews[p], _activeView));
+            }
+            if (_pricingRulesBtn != null)
+                _pricingRulesBtn.Visibility = page == PageSettings ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        // 「设备」页只在有不止一台设备可看时出现：已经有其他设备的数据，或者配置了同步。
+        private bool DevicesPageAvailable
+        {
+            get
+            {
+                if (_knownDeviceCount > 1 || (_remoteNodes != null && _remoteNodes.Count > 0)) return true;
+                return _syncCfg != null && (!string.IsNullOrWhiteSpace(_syncCfg.GistId) || !string.IsNullOrWhiteSpace(_syncCfg.WebDavUrl));
+            }
+        }
+
+        private void ApplyDevicesPageAvailability()
+        {
+            bool available = DevicesPageAvailable;
+            if (_navRows != null && _navRows[PageDevices] != null)
+                _navRows[PageDevices].Visibility = available ? Visibility.Visible : Visibility.Collapsed;
+            if (!available && _activeView == ViewDevices)
+                SwitchActiveView(ViewOverview);
         }
 
         private void SwitchActiveView(int viewIdx)
@@ -4896,6 +4730,8 @@ namespace TokLens
             if (viewIdx < 0 || viewIdx >= TotalViewCount)
                 viewIdx = ViewOverview;
             if (viewIdx == ViewInsights && !SubscriptionsEnabled)
+                viewIdx = ViewOverview;
+            if (viewIdx == ViewDevices && !DevicesPageAvailable)
                 viewIdx = ViewOverview;
 
             _activeView = viewIdx;
@@ -4922,15 +4758,11 @@ namespace TokLens
                     _settingsView.RefreshDynamicStats();
             }
 
-            if (_viewTitleText != null && _activeView >= 0 && _activeView < ViewTitles.Length)
-                _viewTitleText.Text = ViewTitles[_activeView];
-
-            if (_viewGroupText != null)
-            {
-                string section = NavSectionOf(_activeView);
-                _viewGroupText.Text = section.Length > 0 ? (section + " /") : "";
-                _viewGroupText.Visibility = section.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
-            }
+            int activePage = PageOf(_activeView);
+            _pageLastView[activePage] = _activeView;
+            if (_viewTitleText != null)
+                _viewTitleText.Text = PageTitles[activePage];
+            UpdatePageTabs();
 
             ApplyPageToolbarScope();
             UpdateNavVisuals();
@@ -4955,8 +4787,9 @@ namespace TokLens
             if (_navRows == null) return;
 
             // 每个页面一行：当前页整行高亮、图标换强调色，展开与折叠状态一致。
-            for (int v = 0; v < _navRows.Length; v++)
-                ApplyNavRowState(_navRows[v], _navRowBars[v], _navRowLabels[v], _navRowIcons[v], v == _activeView);
+            int activePage = PageOf(_activeView);
+            for (int p = 0; p < _navRows.Length; p++)
+                ApplyNavRowState(_navRows[p], _navRowBars[p], _navRowLabels[p], _navRowIcons[p], p == activePage);
         }
 
         private static void ApplyNavRowState(Border row, Border bar, TextBlock label, Shapes.Path icon, bool active)
@@ -4982,11 +4815,11 @@ namespace TokLens
         }
 
         // 订阅记账与回本比例是可选功能（同步与偏好 → 扫描与偏好），默认关闭：
-        // 关闭时侧栏、命令面板和 Ctrl+5 都不出现该页，已登记的订阅记录保留。
+        // 关闭时侧栏和 Ctrl+5 都不出现该页，已登记的订阅记录保留。
         private void ApplySubscriptionFeature()
         {
-            if (_navRows != null && _navRows[ViewInsights] != null)
-                _navRows[ViewInsights].Visibility = SubscriptionsEnabled ? Visibility.Visible : Visibility.Collapsed;
+            if (_navRows != null && _navRows[PageSubscriptions] != null)
+                _navRows[PageSubscriptions].Visibility = SubscriptionsEnabled ? Visibility.Visible : Visibility.Collapsed;
             if (_activeView == ViewInsights)
             {
                 if (SubscriptionsEnabled) RefreshDashboardView();
@@ -5012,8 +4845,6 @@ namespace TokLens
                     _themeToggleBtn.ToolTip = _isDark ? "切换至浅色主题 (Paper Zinc)" : "切换至深色主题 (Obsidian Zinc)";
                 if (_miniHud != null)
                     _miniHud.SetTheme(_isDark);
-                if (_requestInspector != null)
-                    _requestInspector.SetTheme(_isDark);
             }
 
             ModernControlsFactory.UpdateSegmentedGroup(_currencyBtns, _isCny ? 0 : 1);
@@ -5047,8 +4878,6 @@ namespace TokLens
                 _themeToggleBtn.ToolTip = _isDark ? "切换至浅色主题 (Paper Zinc)" : "切换至深色主题 (Obsidian Zinc)";
             if (_miniHud != null)
                 _miniHud.SetTheme(_isDark);
-            if (_requestInspector != null)
-                _requestInspector.SetTheme(_isDark);
 
             ModernControlsFactory.UpdateSegmentedGroup(_currencyBtns, _isCny ? 0 : 1);
             UpdateRangeSegmentVisuals();
@@ -5458,6 +5287,9 @@ namespace TokLens
             // 更新侧边栏节点数徽章与顶栏设备选择胶囊
             if (_navDeviceCountText != null)
                 _navDeviceCountText.Text = machineViews.Count.ToString(CultureInfo.InvariantCulture);
+            _knownDeviceCount = machineViews.Count;
+            if (_navRows != null && _navRows[PageDevices] != null)
+                _navRows[PageDevices].Visibility = DevicesPageAvailable ? Visibility.Visible : Visibility.Collapsed;
 
             if (_deviceSelectorText != null && _deviceSelectorDot != null)
             {
@@ -5925,9 +5757,7 @@ namespace TokLens
             if (_dailyEmptyOverlay != null)
                 _dailyEmptyOverlay.Visibility = filteredDaily.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
 
-            // 12. 更新视图 0 快览流与视图 1 实时请求流（同时刷新右侧单笔透视抽屉币种）
-            if (_requestInspector != null)
-                _requestInspector.SetCurrency(_isCny, _usdToCny);
+            // 12. 更新视图 0 快览流与视图 1 实时请求流
             RefreshLiveRequestGrids(cutoffStr);
 
             // 13. 缓存专项分析视图所需数据集并按需同步当前活跃视图
@@ -7020,48 +6850,6 @@ namespace TokLens
             }
         }
 
-        private void ExportJsonWithDialog()
-        {
-            try
-            {
-                using (WinForms.SaveFileDialog sfd = new WinForms.SaveFileDialog())
-                {
-                    sfd.Title = "导出脱敏账单汇总快照 (.json)";
-                    sfd.Filter = "JSON 文件 (*.json)|*.json";
-                    sfd.FileName = string.Format(
-                        CultureInfo.InvariantCulture,
-                        "TokLens_Summary_{0}.json",
-                        DateTime.Now.ToString("yyyyMMdd_HHmm", CultureInfo.InvariantCulture));
-
-                    if (sfd.ShowDialog() == WinForms.DialogResult.OK && !string.IsNullOrWhiteSpace(sfd.FileName))
-                    {
-                        string outPath = sfd.FileName;
-                        WriteMergedSummaryJson(
-                            _scanResult,
-                            _latestExportBuckets,
-                            Math.Max(1, _latestMachineViews.Count),
-                            _usdToCny,
-                            _fxSource,
-                            outPath);
-
-                        if (_toastManager != null)
-                        {
-                            _toastManager.ShowWithAction(
-                                "JSON 脱敏汇总导出成功",
-                                Path.GetFileName(outPath),
-                                "success",
-                                "打开所在文件夹",
-                                delegate() { OpenInExplorerSelect(outPath); });
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                ShowToastSafe("导出 JSON 失败", ex.Message, "danger");
-            }
-        }
-
         internal static void WriteMergedSummaryJson(
             ScanResult localScan,
             List<RecordBucket> mergedRows,
@@ -7162,7 +6950,7 @@ namespace TokLens
             }
         }
 
-        // -------------------- 专项引擎同步、命令面板、桌面胶囊 HUD、时光机与多格式导出 --------------------
+        // -------------------- 专项视图刷新、桌面胶囊 HUD、时光机与导出 --------------------
         private void RefreshActiveSpecialistView(bool fromDataRefresh)
         {
             try
@@ -7191,9 +6979,9 @@ namespace TokLens
                     List<RecordBucket> heatRows = _latestFullHistoryMachineRows ?? machineRows;
                     _heatmapView.Render(heatRows, _isCny, _usdToCny, _isDark, _latestReferenceDate);
                 }
-                else if (_activeView == ViewBloat && _bloatView != null)
+                else if (_activeView == ViewSessions && _sessionView != null)
                 {
-                    _bloatView.RenderBloatAnalysis(activeRows, recentList, _isCny, _usdToCny, _isDark);
+                    _sessionView.Render(recentList, _isCny, _usdToCny);
                 }
                 else if (_activeView == ViewDoctor && _doctorView != null)
                 {
@@ -7209,57 +6997,6 @@ namespace TokLens
                 }
             }
             catch { }
-        }
-
-        private void OpenCommandPalette()
-        {
-            if (_commandPalette == null) return;
-            if (_commandPalette.IsOpen)
-            {
-                _commandPalette.Close();
-                return;
-            }
-
-            List<PaletteCommandItem> items = new List<PaletteCommandItem>(28);
-
-            // 1. 十一大旗舰视图跳转
-            items.Add(new PaletteCommandItem("nav-overview", "视图导航", "概览", "KPI、消耗构成与趋势图", "Ctrl+1", UiIcons.Overview, delegate() { SwitchActiveView(ViewOverview); }));
-            items.Add(new PaletteCommandItem("nav-live", "视图导航", "用量 / 请求明细", "逐笔查看请求用量、耗时与单笔账单", "Ctrl+2", UiIcons.Activity, delegate() { SwitchActiveView(ViewLiveStream); }));
-            items.Add(new PaletteCommandItem("nav-models", "视图导航", "用量 / 模型与工具", "按模型和工具汇总，查看单价与账单占比", "Ctrl+3", UiIcons.Models, delegate() { SwitchActiveView(ViewModels); }));
-            items.Add(new PaletteCommandItem("nav-projects", "视图导航", "用量 / 项目", "本机各代码仓库与工作区的用量归因", "Ctrl+4", UiIcons.Folder, delegate() { SwitchActiveView(ViewProjects); }));
-            if (SubscriptionsEnabled)
-                items.Add(new PaletteCommandItem("nav-insights", "视图导航", "订阅与费用", "订阅记录、到期续费与回本比例", "Ctrl+5", UiIcons.Sparkles, delegate() { SwitchActiveView(ViewInsights); }));
-            items.Add(new PaletteCommandItem("nav-bloat", "视图导航", "用量 / 会话分析", "长对话上下文膨胀与缓存命中异常的会话", "Ctrl+7", UiIcons.Layers, delegate() { SwitchActiveView(ViewBloat); }));
-            items.Add(new PaletteCommandItem("nav-devices", "视图导航", "设备", "各台电脑与 Linux / macOS 节点的状态与账单", "Ctrl+8", UiIcons.Devices, delegate() { SwitchActiveView(ViewDevices); }));
-            items.Add(new PaletteCommandItem("nav-daily", "视图导航", "用量 / 每日汇总", "按日汇总的用量与费用（导出在工具条右侧）", "Ctrl+9", UiIcons.Calendar, delegate() { SwitchActiveView(ViewDailyExport); }));
-            items.Add(new PaletteCommandItem("nav-doctor", "视图导航", "设置 / 环境检查", "检查本机 AI 工具日志、WSL2 与 GitHub CLI 状态", "Ctrl+0", UiIcons.Doctor, delegate() { SwitchActiveView(ViewDoctor); }));
-            items.Add(new PaletteCommandItem("nav-settings", "视图导航", "设置 / 同步与偏好", "Gist / WebDAV 同步、配对码、扫描与显示偏好", "Ctrl+,", UiIcons.Settings, delegate() { SwitchActiveView(ViewSettings); }));
-
-            // 2. 效率工具与工作台
-            items.Add(new PaletteCommandItem("tool-hud", "桌面工作台", "显示 / 隐藏桌面状态胶囊", "显示所选会话与上下文，单击展开详情，支持固定会话、拖动和位置锁定", "Ctrl+M", UiIcons.Capsule, delegate() { ToggleMiniHudWindow(); }));
-            items.Add(new PaletteCommandItem("app-update", "应用维护", "检查应用更新", "查看新版本说明，下载并重启安装", "", UiIcons.Refresh, OpenAppUpdateDialog));
-            items.Add(new PaletteCommandItem("tool-pricing", "桌面工作台", "设置 / 计价规则", "浏览模型单价，或配置私有中转的自定义费率", "", UiIcons.Models, delegate() { OpenPricingStudioDialog(null); }));
-            items.Add(new PaletteCommandItem("tool-token-guide", "帮助与排障", "为什么家里和单位自动读取的 gh 令牌不一样？", "深度图解 GitHub 设备独立 OAuth 令牌 (gho_...) 与同账号 Gist 汇聚原理", "F1", UiIcons.Key, delegate() { OpenShortcutAndGuideDialog(1); }));
-            items.Add(new PaletteCommandItem("tool-shortcuts", "帮助与排障", "打开全局键盘快捷键速查表", "双列键盘速查矩阵，支持全键盘流极速操控", "F1", UiIcons.Help, delegate() { OpenShortcutAndGuideDialog(0); }));
-            items.Add(new PaletteCommandItem("tool-scan", "数据与同步", "立即增量扫描本地日志并触发多端同步", "增量扫描本机日志，并刷新汇率", "F5", UiIcons.Refresh, delegate() { RunSilentScanAsync(_homeDir, true, true); StartExchangeRateSyncAsync(false); }));
-            items.Add(new PaletteCommandItem("tool-backup-now", "数据与同步", "立即创建本地时光机压缩快照 (.toklens.gz)", "将本机与缓存多节点高水位账本安全归档至 backups 目录", "", UiIcons.History, delegate() { CreateManualTimeMachineSnapshot(); }));
-            items.Add(new PaletteCommandItem("tool-theme", "界面偏好", _isDark ? "切换至浅色主题 (Paper Zinc)" : "切换至深色主题 (Obsidian Zinc)", "同时切换窗口标题栏与状态胶囊详情卡片", "", _isDark ? UiIcons.Sun : UiIcons.Moon, delegate() { ToggleThemeFromUi(); }));
-            items.Add(new PaletteCommandItem("tool-currency", "界面偏好", _isCny ? "切换为美元计价 ($ USD)" : "切换为人民币计价 (¥ CNY)", "全局 KPI、图表、模型表与单笔透视同步切换", "", UiIcons.Swap, delegate()
-            {
-                _isCny = !_isCny;
-                if (_syncCfg != null) { _syncCfg.PreferCny = _isCny; PersistConfig(_syncCfg); }
-                ModernControlsFactory.UpdateSegmentedGroup(_currencyBtns, _isCny ? 0 : 1);
-                RefreshDashboardView();
-                if (_settingsView != null) _settingsView.ReloadFromConfig();
-            }));
-
-            // 3. 七大导出与分享动作
-            items.Add(new PaletteCommandItem("exp-html", "导出", "导出网页看板 (.html)", "单文件离线网页，导出后自动打开", "Ctrl+E", UiIcons.ExternalLink, delegate() { ExportAndOpenHtmlReport(); }));
-            items.Add(new PaletteCommandItem("exp-md", "导出", "导出 Markdown 报告 (.md)", "表格与趋势摘要", "", UiIcons.Sparkles, delegate() { ExportMarkdownWithDialog(); }));
-            items.Add(new PaletteCommandItem("exp-csv", "导出", "导出对账明细 (.csv)", "Excel 可直接打开", "Ctrl+S", UiIcons.Download, delegate() { ExportCsvWithDialog(); }));
-            items.Add(new PaletteCommandItem("exp-json", "导出", "导出汇总快照 (.json)", "只含聚合用量与费用", "", UiIcons.Shield, delegate() { ExportJsonWithDialog(); }));
-
-            _commandPalette.Open(items);
         }
 
         private void RefreshMiniHud()
@@ -7325,20 +7062,6 @@ namespace TokLens
             else
             {
                 ToggleMiniHudWindow();
-            }
-        }
-
-        private void OpenShortcutAndGuideDialog(int initialTabIndex)
-        {
-            if (_skipAutoScan) return;
-            try
-            {
-                ShortcutAndGuideWindow dlg = new ShortcutAndGuideWindow(this, _isDark, initialTabIndex);
-                dlg.ShowDialog();
-            }
-            catch (Exception ex)
-            {
-                ShowToastSafe("打开帮助指南失败", ex.Message, "warning");
             }
         }
 
@@ -7638,41 +7361,6 @@ namespace TokLens
                 ok ? "success" : "warning");
         }
 
-        private void ExportMarkdownWithDialog()
-        {
-            try
-            {
-                using (WinForms.SaveFileDialog sfd = new WinForms.SaveFileDialog())
-                {
-                    sfd.Title = "导出 Markdown 报告 (.md)";
-                    sfd.Filter = "Markdown 文档 (*.md)|*.md";
-                    sfd.FileName = string.Format(
-                        CultureInfo.InvariantCulture,
-                        "TokLens_Report_{0}.md",
-                        DateTime.Now.ToString("yyyyMMdd_HHmm", CultureInfo.InvariantCulture));
-
-                    if (sfd.ShowDialog() == WinForms.DialogResult.OK && !string.IsNullOrWhiteSpace(sfd.FileName))
-                    {
-                        string outPath = sfd.FileName;
-                        ReportExporter.ExportMarkdownFile(outPath, _latestExportBuckets, _isCny, _usdToCny);
-                        if (_toastManager != null)
-                        {
-                            _toastManager.ShowWithAction(
-                                "Markdown 报告已导出",
-                                Path.GetFileName(outPath),
-                                "success",
-                                "打开所在文件夹",
-                                delegate() { OpenInExplorerSelect(outPath); });
-                        }
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                ShowToastSafe("导出 Markdown 报告失败", ex.Message, "danger");
-            }
-        }
-
         // -------------------- 全局键盘快捷键支持 --------------------
         private void OnMainWindowPreviewKeyDown(object sender, KeyEventArgs e)
         {
@@ -7680,33 +7368,6 @@ namespace TokLens
 
             ModifierKeys mods = Keyboard.Modifiers;
             bool ctrlOnly = (mods == ModifierKeys.Control);
-
-            if (ctrlOnly && e.Key == Key.K)
-            {
-                e.Handled = true;
-                OpenCommandPalette();
-                return;
-            }
-
-            if (_commandPalette != null && _commandPalette.IsOpen)
-                return;
-
-            if (e.Key == Key.F1)
-            {
-                e.Handled = true;
-                OpenShortcutAndGuideDialog(0);
-                return;
-            }
-
-            if (e.Key == Key.OemQuestion && (mods == ModifierKeys.Shift || mods == ModifierKeys.None))
-            {
-                if (!(Keyboard.FocusedElement is TextBox) && !(Keyboard.FocusedElement is PasswordBox))
-                {
-                    e.Handled = true;
-                    OpenShortcutAndGuideDialog(0);
-                    return;
-                }
-            }
 
             if (e.Key == Key.F5 || (ctrlOnly && e.Key == Key.R))
             {
@@ -7719,16 +7380,13 @@ namespace TokLens
 
             if (ctrlOnly)
             {
-                if (e.Key == Key.D1 || e.Key == Key.NumPad1) { e.Handled = true; SwitchActiveView(ViewOverview); return; }
-                if (e.Key == Key.D2 || e.Key == Key.NumPad2) { e.Handled = true; SwitchActiveView(ViewLiveStream); return; }
-                if (e.Key == Key.D3 || e.Key == Key.NumPad3) { e.Handled = true; SwitchActiveView(ViewModels); return; }
-                if (e.Key == Key.D4 || e.Key == Key.NumPad4) { e.Handled = true; SwitchActiveView(ViewProjects); return; }
-                if (e.Key == Key.D5 || e.Key == Key.NumPad5) { e.Handled = true; if (SubscriptionsEnabled) SwitchActiveView(ViewInsights); return; }
-                if (e.Key == Key.D7 || e.Key == Key.NumPad7) { e.Handled = true; SwitchActiveView(ViewBloat); return; }
-                if (e.Key == Key.D8 || e.Key == Key.NumPad8) { e.Handled = true; SwitchActiveView(ViewDevices); return; }
-                if (e.Key == Key.D9 || e.Key == Key.NumPad9) { e.Handled = true; SwitchActiveView(ViewDailyExport); return; }
+                if (e.Key == Key.D1 || e.Key == Key.NumPad1) { e.Handled = true; SwitchActivePage(PageOverview); return; }
+                if (e.Key == Key.D2 || e.Key == Key.NumPad2) { e.Handled = true; SwitchActivePage(PageRequests); return; }
+                if (e.Key == Key.D3 || e.Key == Key.NumPad3) { e.Handled = true; SwitchActivePage(PageUsage); return; }
+                if (e.Key == Key.D4 || e.Key == Key.NumPad4) { e.Handled = true; SwitchActivePage(PageDevices); return; }
+                if (e.Key == Key.D5 || e.Key == Key.NumPad5) { e.Handled = true; if (SubscriptionsEnabled) SwitchActivePage(PageSubscriptions); return; }
                 if (e.Key == Key.D0 || e.Key == Key.NumPad0) { e.Handled = true; SwitchActiveView(ViewDoctor); return; }
-                if (e.Key == Key.OemComma) { e.Handled = true; SwitchActiveView(ViewSettings); return; }
+                if (e.Key == Key.OemComma) { e.Handled = true; SwitchActivePage(PageSettings); return; }
 
                 if (e.Key == Key.M)
                 {
@@ -7794,12 +7452,6 @@ namespace TokLens
                     return;
                 }
 
-                if (_activeView == ViewLiveStream && _requestInspector != null && _requestInspector.Visibility == Visibility.Visible)
-                {
-                    CloseRequestInspector();
-                    e.Handled = true;
-                    return;
-                }
 
                 if (_selectedDate != null || _selectedTool != null)
                 {

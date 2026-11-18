@@ -24,8 +24,7 @@ internal static class UsagePresentationTests
         long unpriced=0;double total=0;foreach(UsageTierTotal group in groups){unpriced+=group.UnpricedRequests;total+=group.CostUsd;}
         Check(groups.Count==4&&unpriced==0&&Math.Abs(total-.06)<.00000001,"reference basis and actual/requested uncertainty stay separated in amount groups");
         Check(UsagePresentation.ExportMoney(official.CostUsd,official)!=null&&UsagePresentation.ExportMoney(0,unknown)!=null,"priced reference and explicit zero reference export as numbers");
-        string markdown=UsagePresentation.Markdown(references,false,7),csv=ReportExporter.BuildCsvReport(references,7);
-        Check(markdown.Contains(UsagePresentation.CostLabel(official))&&markdown.Contains(UsagePresentation.CostLabel(current)),"Markdown retains channel and historical-price limitations");
+        string csv=ReportExporter.BuildCsvReport(references,7);
         Check(csv.Contains("estimated_official_reference")&&csv.Contains("estimated_current_reference")&&csv.Contains("custom")&&csv.Contains("asof:2026-11-17"),"CSV keeps the observed provider distinct from reference provenance");
         NodeSnapshot source=new NodeSnapshot {MachineId="reference-test"};source.Records.AddRange(references);
         NodeSnapshot restored=SyncService.DeserializeSnapshot(SyncService.SerializeSnapshot(source),true);
@@ -61,8 +60,6 @@ internal static class UsagePresentationTests
             Check(coverage.SummaryText.Contains("Fast（已请求） 1")&&coverage.SummaryText.Contains("档位未知 3"),"known requested Fast and unresolved coverage are both visible");
             string csv=ReportExporter.BuildCsvReport(records,7);
             Check(csv.Contains("实际档位")&&csv.Contains("requested")&&csv.Contains("official-2026-11-17"),"CSV carries tier evidence and price revision");
-            string markdown=ReportExporter.BuildMarkdownReport(records,false,7);
-            Check(markdown.Contains("Fast（已请求）")&&markdown.Contains("历史金额")&&markdown.Contains("额外估值"),"Markdown exposes evidence and premium reference");
             string html=Path.Combine(root,"report.html");HtmlExporter.ExportHtmlReport(records,null,7,html);string page=File.ReadAllText(html);
             Check(page.Contains("estimated_requested_tier")&&page.Contains("official-2026-11-17")&&page.Contains("JSON.stringify([r[1], r[2], r[13]"),"HTML preserves tier grouping and provenance");
             Dictionary<string,object> json=new Dictionary<string,object>();
@@ -75,8 +72,6 @@ internal static class UsagePresentationTests
             Check(UsagePresentation.ExportMoney(0,unpriced)==null,"unpriced export is unknown, not zero");
             string missingCsv=ReportExporter.BuildCsvReport(new[]{unpriced},7);
             Check(missingCsv.Contains(",,,\"Fast")&&!missingCsv.Contains("0.000000"),"CSV leaves unpriced monetary cells empty and keeps tier evidence");
-            string missingMd=UsagePresentation.Markdown(new[]{unpriced},false,7);
-            Check(missingMd.Contains("| — |")&&!missingMd.Contains("$0.00"),"Markdown does not display missing price as zero cost");
             records.Add(unpriced);
             Type datasetType=typeof(CliRunner).GetNestedType("AggregatedDataset",BindingFlags.NonPublic);
             object dataset=Activator.CreateInstance(datasetType,true);
@@ -93,7 +88,6 @@ internal static class UsagePresentationTests
             datasetType.GetField("AllRecords").SetValue(dataset,new List<RecordBucket>{unpriced});
             aggregateMap=(Dictionary<string,object>)serializer.DeserializeObject((string)typeof(CliRunner).GetMethod("BuildAggregateJsonSnapshot",BindingFlags.NonPublic|BindingFlags.Static).Invoke(null,new[]{dataset}));
             Check(((Dictionary<string,object>)aggregateMap["summary"])["cost_usd"]==null,"all-unpriced CLI total is unknown, not zero");
-            Check(ReportExporter.BuildMarkdownReport(new[]{unpriced},false,7).Contains("已计价金额: 未计价"),"all-unpriced Markdown headline does not imply a free bill");
             datasetType.GetField("AllRecords").SetValue(dataset,new List<RecordBucket>{delivered,delivered.Clone()});
             aggregateMap=(Dictionary<string,object>)serializer.DeserializeObject((string)typeof(CliRunner).GetMethod("BuildAggregateJsonSnapshot",BindingFlags.NonPublic|BindingFlags.Static).Invoke(null,new[]{dataset}));
             Check(Math.Abs(Convert.ToDouble(((Dictionary<string,object>)((IList)aggregateMap["by_model"])[0])["service_tier_premium_usd"])-.02)<.0000001,"model comparison premiums aggregate every record");
@@ -104,17 +98,6 @@ internal static class UsagePresentationTests
             IList htmlRows=(IList)htmlData["rows"];
             Check(((IList)htmlRows[4])[8]==null&&Convert.ToString(((IList)htmlRows[1])[16])=="unknown","HTML data preserves unpriced null and requested-only actual unknown");
             Check(page.Contains("实际档位未核实")&&page.Contains("csvCell(r[18])")&&page.Contains("unpricedTurns"),"HTML display and its CSV export retain evidence and incomplete coverage");
-            RequestInspectorPanel inspector=new RequestInspectorPanel(root,null,null);
-            LiveRequestRowView request=new LiveRequestRowView {Date="2026-11-17",Tool="OpenAI Codex",Model="gpt-6.1-sol",Provider="openai",RequestedServiceTier="fast",ActualServiceTier="fast",CostBasis="reported",CostUsd=9,FreshInput=1000,CacheRead=500,CacheWrite=100,Output=200};
-            MethodInfo forensics=typeof(RequestInspectorPanel).GetMethod("BuildForensicsJson",BindingFlags.NonPublic|BindingFlags.Instance);
-            Dictionary<string,object> requestMap=(Dictionary<string,object>)serializer.DeserializeObject((string)forensics.Invoke(inspector,new object[]{request}));
-            Dictionary<string,object> requestCost=(Dictionary<string,object>)requestMap["cost"];
-            Check(Math.Abs(Convert.ToDouble(requestCost["cache_saved_usd"])-.0018)<.0000001,"inspector JSON compares like-for-like reference prices, not historical reported amount");
-            Check(requestCost["standard_equivalent_usd"]==null&&requestCost["service_tier_premium_usd"]==null,"inspector does not invent premium for reported charges");
-            request.Model="no-such-model";request.CostBasis="unpriced";request.CostUsd=0;
-            requestMap=(Dictionary<string,object>)serializer.DeserializeObject((string)forensics.Invoke(inspector,new object[]{request}));
-            requestCost=(Dictionary<string,object>)requestMap["cost"];
-            Check(requestCost["recorded_or_estimated_usd"]==null&&requestCost["recalculated_reference_usd"]==null&&requestCost["cache_saved_usd"]==null,"inspector JSON missing price remains null throughout");
             ReferenceEvidence(root,serializer);
             Console.WriteLine("PASS: "+checks+" presentation/export assertions");return 0;
         } catch(Exception e) {Console.Error.WriteLine(e);return 1;}

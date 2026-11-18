@@ -120,7 +120,8 @@ internal static class HudBehaviorTests
         finally { hud.Close(); }
         HudPreferences saved = new HudPreferences { Locked = true, Opacity = .65, Style = "ball", SessionKey = "tool\nsession", ScreenName = "fixture", X = -2500, Y = 30, AnchorX = .1, AnchorY = .2 };
         saved.Save(); HudPreferences loaded = HudPreferences.Load();
-        Check(loaded.Locked && loaded.Opacity == .65 && loaded.Style == "ball" && loaded.SessionKey == saved.SessionKey && loaded.X == -2500, "style, lock, opacity, fixed session and monitor coordinates survive restart");
+        Check(loaded.Locked && loaded.Opacity == .65 && loaded.SessionKey == saved.SessionKey && loaded.X == -2500, "lock, opacity, fixed session and monitor coordinates survive restart");
+        Check(loaded.Style == "capsule", "a preference saved with the removed ball style loads as the capsule");
         Check(HudPreferences.FilePath.StartsWith(SyncService.AppConfigDir, StringComparison.OrdinalIgnoreCase), "HUD preferences honor the isolated config directory");
     }
     private static void UnpricedAmounts()

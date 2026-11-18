@@ -1014,12 +1014,9 @@ namespace TokLens
         public const string Cloud         = "M 4.8,12.5 L 12,12.5 A 2.8,2.8 0 0 0 12.2,7 A 4.2,4.2 0 0 0 4.2,6.2 A 3.2,3.2 0 0 0 4.8,12.5 Z";
         public const string Sparkles      = "M 8,1.5 L 9.4,6.6 L 14.5,8 L 9.4,9.4 L 8,14.5 L 6.6,9.4 L 1.5,8 L 6.6,6.6 Z";
         public const string Swap          = "M 2.5,5 L 13.5,5 M 10.5,2.5 L 13.5,5 L 10.5,7.5 M 13.5,11 L 2.5,11 M 5.5,8.5 L 2.5,11 L 5.5,13.5";
-        public const string Layers        = "M 8,2 L 14,5.2 L 8,8.4 L 2,5.2 Z M 2,8.4 L 8,11.6 L 14,8.4 M 2,11.4 L 8,14.5 L 14,11.4";
         public const string Doctor        = "M 8,2 A 6,6 0 1 1 7.99,2 M 8,5 L 8,11 M 5,8 L 11,8";
-        public const string Help          = "M 8,2 A 6,6 0 1 1 7.99,2 M 6.3,6.3 A 1.7,1.7 0 1 1 8.8,7.9 C 8.2,8.3 8,8.7 8,9.4 M 8,11.8 L 8,12.0";
         public const string Capsule       = "M 4.5,4.5 L 11.5,4.5 A 3.5,3.5 0 0 1 11.5,11.5 L 4.5,11.5 A 3.5,3.5 0 0 1 4.5,4.5 Z M 5.5,8 L 7.5,8";
         public const string History       = "M 3.2,5.5 A 5.5,5.5 0 1 1 2.8,9.5 M 2.5,2.8 L 2.8,6 L 6,5.6 M 8,5.2 L 8,8.3 L 10.4,9.8";
-        public const string Chat          = "M 2.5,3 L 13.5,3 L 13.5,10.8 L 7.6,10.8 L 4.6,13.6 L 4.6,10.8 L 2.5,10.8 Z M 5.2,6 L 10.8,6 M 5.2,8.2 L 8.8,8.2";
         public const string Tag           = "M 2.4,8.6 L 8.6,2.4 L 13.6,2.4 L 13.6,7.4 L 7.4,13.6 Z M 10.7,5.2 L 10.8,5.3";
 
         public static Path CreateIcon(string pathData, double size, string strokeResourceKey)

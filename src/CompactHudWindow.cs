@@ -68,7 +68,7 @@ namespace TokLens
                 if (File.Exists(FilePath))
                 {
                     HudPreferences p = new JavaScriptSerializer().Deserialize<HudPreferences>(File.ReadAllText(FilePath));
-                    if (p != null) { p.Opacity = double.IsNaN(p.Opacity) || double.IsInfinity(p.Opacity) ? 1 : Math.Max(.5, Math.Min(1, p.Opacity)); p.SessionKey = p.SessionKey ?? ""; p.ScreenName = p.ScreenName ?? ""; if (p.Style != "ball") p.Style = "capsule"; return p; }
+                    if (p != null) { p.Opacity = double.IsNaN(p.Opacity) || double.IsInfinity(p.Opacity) ? 1 : Math.Max(.5, Math.Min(1, p.Opacity)); p.SessionKey = p.SessionKey ?? ""; p.ScreenName = p.ScreenName ?? ""; p.Style = "capsule"; return p; }
                 }
             }
             catch { }
@@ -90,7 +90,7 @@ namespace TokLens
         }
     }
 
-    /// <summary>A quiet, labelled status capsule. The optional ball is only a panel launcher.</summary>
+    /// <summary>A quiet, labelled status capsule.</summary>
     public sealed class MiniHudWindow : Window
     {
         [StructLayout(LayoutKind.Sequential)] private struct NativeRect { public int Left, Top, Right, Bottom; }
@@ -106,7 +106,7 @@ namespace TokLens
         private readonly Action _restore, _refresh;
         private readonly Border _surface, _cardShell;
         private readonly Grid _capsule;
-        private readonly TextBlock _title, _context, _status, _scope, _ballGlyph;
+        private readonly TextBlock _title, _context, _status, _scope;
         private readonly Ellipse _statusDot;
         private readonly Popup _cardPopup;
         private readonly TextBlock _cardModel, _cardScope, _cardContext, _cardTier, _cardToday, _cardHour, _cardHealth, _cardAlert, _cardTiming, _cardCoverage;
@@ -144,7 +144,6 @@ namespace TokLens
             statusLine.Children.Add(_statusDot); _status = Text("等待采集", 10, false); statusLine.Children.Add(_status); Grid.SetRow(statusLine, 1); _capsule.Children.Add(statusLine);
             _scope = Text("请求输入", 10, false); _scope.HorizontalAlignment = HorizontalAlignment.Right; _scope.VerticalAlignment = VerticalAlignment.Bottom;
             Grid.SetRow(_scope, 1); Grid.SetColumn(_scope, 1); _capsule.Children.Add(_scope);
-            _ballGlyph = Text("T", 16, true); _ballGlyph.HorizontalAlignment = HorizontalAlignment.Center; _ballGlyph.VerticalAlignment = VerticalAlignment.Center;
 
             _cardShell = new Border { Width = 348, Padding = new Thickness(16), CornerRadius = new CornerRadius(12), BorderThickness = new Thickness(1) };
             StackPanel panel = new StackPanel(); _cardShell.Child = panel;
@@ -341,12 +340,6 @@ namespace TokLens
         private void BuildMenu()
         {
             ContextMenu menu = new ContextMenu();
-            MenuItem style = new MenuItem { Header = "显示样式" };
-            MenuItem capsule = new MenuItem { Header = "状态胶囊", IsCheckable = true, IsChecked = _preferences.Style != "ball" };
-            MenuItem ball = new MenuItem { Header = "极简球（仅入口）", IsCheckable = true, IsChecked = _preferences.Style == "ball" };
-            capsule.Click += delegate { _preferences.Style = "capsule"; capsule.IsChecked = true; ball.IsChecked = false; ApplyStyle(); SavePreferences(); };
-            ball.Click += delegate { _preferences.Style = "ball"; capsule.IsChecked = false; ball.IsChecked = true; ApplyStyle(); SavePreferences(); };
-            style.Items.Add(capsule); style.Items.Add(ball); menu.Items.Add(style);
             MenuItem locked = new MenuItem { Header = "锁定位置", IsCheckable = true, IsChecked = _preferences.Locked };
             locked.Click += delegate { _preferences.Locked = locked.IsChecked; SavePreferences(); }; menu.Items.Add(locked);
             MenuItem opacity = new MenuItem { Header = "透明度" };
@@ -358,10 +351,9 @@ namespace TokLens
         }
         private void ApplyStyle()
         {
-            CloseCard(); bool ball = _preferences.Style == "ball";
-            _surface.Child = ball ? (UIElement)_ballGlyph : _capsule;
-            _surface.Width = ball ? 44 : double.NaN; _surface.Height = ball ? 44 : double.NaN;
-            _surface.Padding = ball ? new Thickness(0) : new Thickness(12, 8, 12, 8); _surface.CornerRadius = new CornerRadius(ball ? 22 : 14);
+            CloseCard();
+            _surface.Child = _capsule;
+            _surface.Padding = new Thickness(12, 8, 12, 8); _surface.CornerRadius = new CornerRadius(14);
             if (IsLoaded) Dispatcher.BeginInvoke(new Action(KeepOnScreen), DispatcherPriority.Loaded);
         }
         private void SavePreferences()
@@ -385,7 +377,7 @@ namespace TokLens
                 if (!double.IsNaN(_preferences.X) && !double.IsNaN(_preferences.Y)) selected = HudPlacement.BestScreen(new Rect(_preferences.X, _preferences.Y, 240, 54), areas);
                 else { selected = 0; for (int i = 0; i < screens.Length; i++) if (screens[i].Primary) selected = i; }
             }
-            double dpi = ScreenScale(areas[selected]); double w = (_preferences.Style == "ball" ? 44 : 250) * dpi, h = (_preferences.Style == "ball" ? 44 : 56) * dpi;
+            double dpi = ScreenScale(areas[selected]); double w = 250 * dpi, h = 56 * dpi;
             Rect target = HudPlacement.AtAnchor(areas[selected], w, h, _preferences.AnchorX, _preferences.AnchorY); MoveNative(target.Left, target.Top);
             Dispatcher.BeginInvoke(new Action(KeepOnScreen), DispatcherPriority.Loaded);
         }
