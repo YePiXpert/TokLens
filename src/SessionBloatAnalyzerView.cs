@@ -1648,32 +1648,41 @@ namespace TokLens
             _burstGrid = ModernDataGridFactory.CreateModernDataGrid();
             _burstGrid.Cursor = Cursors.Hand;
 
+            // 状态、起止、上下文爬坡、花费与可省金额始终保留；窗口变窄时依次收起膨胀倍数、缓存命中、轮次、工具，
+            // 不再把每一列都挤到显示不全。
             _burstGrid.Columns.Add(MakeSnowballStatusColumn());
             _burstGrid.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(
                 _burstGrid, "开始 · 时长", "StartAndDurationText", "StartTimestampMs",
-                new DataGridLength(206), false, true, false));
-            _burstGrid.Columns.Add(ModernDataGridFactory.MakeBadgeColumn(
+                new DataGridLength(184), false, true, false));
+            DataGridColumn toolCol = ModernDataGridFactory.MakeBadgeColumn(
                 "AI 工具", "ToolDisplayText", "Tool",
-                new DataGridLength(126)));
-            _burstGrid.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(
+                new DataGridLength(120));
+            _burstGrid.Columns.Add(toolCol);
+            DataGridColumn modelCol = ModernDataGridFactory.MakeTextOrMonoColumn(
                 _burstGrid, "主力模型", "PrimaryModel", "PrimaryModel",
-                new DataGridLength(1.15, DataGridLengthUnitType.Star), false, false, false));
-            _burstGrid.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(
+                new DataGridLength(1.15, DataGridLengthUnitType.Star), false, false, false);
+            modelCol.MinWidth = 108.0;
+            _burstGrid.Columns.Add(modelCol);
+            DataGridColumn turnsCol = ModernDataGridFactory.MakeTextOrMonoColumn(
                 _burstGrid, "轮次", "TurnsText", "Turns",
-                new DataGridLength(78), true, true, false));
+                new DataGridLength(70), true, true, false);
+            _burstGrid.Columns.Add(turnsCol);
             _burstGrid.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(
                 _burstGrid, "上下文 首轮→峰值", "ContextClimbText", "PeakContextTokens",
-                new DataGridLength(148), true, true, true));
-            _burstGrid.Columns.Add(ModernDataGridFactory.MakeShareBarColumn(
+                new DataGridLength(142), true, true, true));
+            DataGridColumn bloatCol = ModernDataGridFactory.MakeShareBarColumn(
                 "膨胀倍数", "BloatMultiplierText", "BloatBarRatio", "BloatMultiplier",
-                new DataGridLength(92)));
-            _burstGrid.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(
+                new DataGridLength(92));
+            _burstGrid.Columns.Add(bloatCol);
+            DataGridColumn hitCol = ModernDataGridFactory.MakeTextOrMonoColumn(
                 _burstGrid, "缓存命中", "AvgCacheHitText", "AvgCacheHitRate",
-                new DataGridLength(86), true, true, false));
+                new DataGridLength(80), true, true, false);
+            _burstGrid.Columns.Add(hitCol);
             _burstGrid.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(
                 _burstGrid, "累计花费", "FormattedCost", "CostUsd",
-                new DataGridLength(96), true, true, true));
+                new DataGridLength(92), true, true, true));
             _burstGrid.Columns.Add(MakeCompactSavingsColumn(_burstGrid));
+            ModernDataGridFactory.EnableResponsiveColumns(_burstGrid, bloatCol, hitCol, turnsCol, toolCol);
 
             _burstGrid.SelectionChanged += delegate(object s, SelectionChangedEventArgs e)
             {
@@ -1718,7 +1727,7 @@ namespace TokLens
             DataGridTemplateColumn col = new DataGridTemplateColumn();
             col.Header = "状态";
             col.SortMemberPath = "SnowballLevel";
-            col.Width = new DataGridLength(96);
+            col.Width = new DataGridLength(84);
 
             DataTemplate dt = new DataTemplate();
 
@@ -1781,7 +1790,7 @@ namespace TokLens
             DataGridTemplateColumn col = new DataGridTemplateColumn();
             col.Header = "压缩后可省";
             col.SortMemberPath = "EstimatedCompactSavingsUsd";
-            col.Width = new DataGridLength(122);
+            col.Width = new DataGridLength(110);
 
             if (dg != null && dg.ColumnHeaderStyle != null)
             {

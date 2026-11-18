@@ -45,25 +45,29 @@ internal static class ProductUiTests
         try
         {
             MainWindow main=new MainWindow(root,true);string cfgPath=SyncService.ConfigFilePath;string cfgBefore=File.Exists(cfgPath)?File.ReadAllText(cfgPath):null;main.RunHeadlessUiSelfTest();
-            Border[] nav=Field<Border[]>(main,"_navItemBorders");int visible=0;foreach(Border b in nav)if(b!=null&&b.Visibility==Visibility.Visible)visible++;
-            Check(visible==4,"four primary navigation destinations by default (subscriptions are optional)");Check(typeof(MainWindow).Assembly.GetType("TokLens.WhatIfSimulatorView")==null,"simulator code removed from build");
+            Border[] nav=Field<Border[]>(main,"_navRows");int visible=0;foreach(Border b in nav)if(b!=null&&b.Visibility==Visibility.Visible)visible++;
+            Check(nav.Length==10&&visible==9,"every page has its own sidebar row; only the optional subscriptions page is hidden by default");Check(typeof(MainWindow).Assembly.GetType("TokLens.WhatIfSimulatorView")==null,"simulator code removed from build");
+            Check(typeof(MainWindow).GetField("_navChildPanels",BindingFlags.NonPublic|BindingFlags.Instance)==null,"section captions are labels, not a second set of destinations");
             Check((File.Exists(cfgPath)?File.ReadAllText(cfgPath):null)==cfgBefore,"UI self-test never writes to the saved config");
             Check(typeof(SyncConfig).GetField("DailyBudgetUsd")==null,"daily budget feature removed from the config model");
             StackPanel cards=Field<StackPanel>(main,"_deviceCardsStack");Check(cards.Children.Count>1&&((Border)cards.Children[0]).Child!=null,"device cards render their content");
-            StackPanel[] navGroups=Field<StackPanel[]>(main,"_navChildPanels");Border[] navChildren=Field<Border[]>(main,"_navChildBorders");
-            Call(main,"SwitchActiveView",2);Check(navGroups[0].Children.Count==5&&(bool)navChildren[2].Tag,"model analysis is a highlighted usage sub-page in the sidebar");
+            Call(main,"SwitchActiveView",2);int highlighted=0;foreach(Border b in nav)if(b!=null&&(bool)b.Tag)highlighted++;
+            Check((bool)nav[2].Tag&&highlighted==1&&Field<TextBlock>(main,"_viewGroupText").Text=="用量 /","exactly one sidebar row is highlighted and the page title names its section");
             Check(Field<DockPanel>(main,"_pageToolbar").Visibility==Visibility.Visible&&Field<Border>(main,"_rangeContainer").Visibility==Visibility.Visible,"usage pages show the filter toolbar");
             Call(main,"SwitchActiveView",3);Check(Field<Border>(main,"_rangeContainer").Visibility==Visibility.Collapsed&&Field<TextBlock>(main,"_pageScopeText").Text.Contains("全部历史"),"project page states its own scope instead of a time filter it ignores");
-            Call(main,"SwitchActiveView",9);Check(navGroups[1].Children.Count==3&&Field<DockPanel>(main,"_pageToolbar").Visibility==Visibility.Collapsed,"pricing rules are in the settings group and settings has no data filters");
+            Call(main,"SwitchActiveView",9);Border pricingRow=Field<Border>(main,"_navPricingRow");
+            Check(pricingRow.Visibility==Visibility.Visible&&!(bool)pricingRow.Tag&&Field<DockPanel>(main,"_pageToolbar").Visibility==Visibility.Collapsed,"pricing rules sit in the settings section but never show as the current page, and settings has no data filters");
             Call(main,"SwitchActiveView",8);Check(Field<TextBlock>(Field<object>(main,"_doctorView"),"_bannerStatusText").Text=="未检查","environment check never reports healthy before it has run");
-            Call(main,"ApplyResponsiveSidebar",1020.0);bool narrowCollapsed=Field<bool>(main,"_sidebarCollapsed");
-            Call(main,"ApplyResponsiveSidebar",1320.0);Check(narrowCollapsed&&!Field<bool>(main,"_sidebarCollapsed"),"sidebar collapses to icons on narrow windows and restores when widened");
+            Call(main,"ApplyResponsiveSidebar",1167.0);Check(!Field<bool>(main,"_sidebarCollapsed"),"the default window size keeps the labelled sidebar");
+            Call(main,"ApplyResponsiveSidebar",940.0);bool narrowCollapsed=Field<bool>(main,"_sidebarCollapsed");int reachable=0;foreach(Border b in nav)if(b!=null&&b.Visibility==Visibility.Visible)reachable++;
+            Check(narrowCollapsed&&reachable==9&&Field<TextBlock[]>(main,"_navRowLabels")[2].Visibility==Visibility.Collapsed,"collapsed to icons, every page is still one click away");
+            Call(main,"ApplyResponsiveSidebar",1320.0);Check(!Field<bool>(main,"_sidebarCollapsed")&&Field<TextBlock[]>(main,"_navRowLabels")[2].Visibility==Visibility.Visible,"sidebar restores its labels when widened");
             Call(main,"SwitchActiveView",7);UIElement[] pages=Field<UIElement[]>(main,"_viewPages");FrameworkElement heat=(FrameworkElement)Field<object>(main,"_heatmapView");
             Check(heat!=null&&heat.Parent==pages[7]&&pages[7].Visibility==Visibility.Visible,"daily summary hosts the 365-day usage calendar");
             Call(main,"SwitchActiveView",0);Capture((FrameworkElement)main.Content,Path.Combine(output,"overview-shell-dark.png"),1320,860);
-            Border[] navTops=Field<Border[]>(main,"_navItemBorders");Check(navTops[2].Visibility==Visibility.Collapsed,"subscriptions page is hidden by default");
+            Check(nav[4].Visibility==Visibility.Collapsed,"subscriptions page is hidden by default");
             Call(main,"SwitchActiveView",4);Check(Field<int>(main,"_activeView")==0,"the subscriptions page cannot be opened while the feature is off");
-            Field<SyncConfig>(main,"_syncCfg").ShowSubscriptions=true;Call(main,"ApplySubscriptionFeature");Check(navTops[2].Visibility==Visibility.Visible,"turning the setting on shows the subscriptions page");
+            Field<SyncConfig>(main,"_syncCfg").ShowSubscriptions=true;Call(main,"ApplySubscriptionFeature");Check(nav[4].Visibility==Visibility.Visible,"turning the setting on shows the subscriptions page");
             Call(main,"SwitchActiveView",4);Check(Field<int>(main,"_activeView")==4&&Field<Button>(main,"_deviceSelectorBtn").Visibility==Visibility.Collapsed&&Field<Border>(main,"_rangeContainer").Visibility==Visibility.Collapsed,"subscription page shows no device or time filter");Capture((FrameworkElement)main.Content,Path.Combine(output,"subscriptions-full-light.png"),1320,860);
             MiniHudWindow hud=new MiniHudWindow(false,null,null);
             long now=(long)(DateTime.UtcNow-new DateTime(1970,1,1,0,0,0,DateTimeKind.Utc)).TotalMilliseconds;

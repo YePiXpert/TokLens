@@ -458,13 +458,15 @@ namespace TokLens
         // 左侧导航栏控件
         private StackPanel _brandTextPanel;
         private Shapes.Ellipse _sidebarPulseDot;
-        private Border[] _navItemBorders;      // 顶层 5 项
-        private Border[] _navActiveBars;
-        private TextBlock[] _navTitleLabels;
-        private Border[] _navChildBorders;     // 按视图索引的子页面行
-        private Border[] _navChildBars;
-        private StackPanel[] _navChildPanels;  // [用量, 设置]
-        private Border _navPricingChild;
+        private Border[] _navRows;             // 按视图索引：每个页面一行
+        private Border[] _navRowBars;
+        private TextBlock[] _navRowLabels;
+        private Shapes.Path[] _navRowIcons;
+        private readonly List<FrameworkElement> _navSectionCaptions = new List<FrameworkElement>(); // 展开时的分区标题
+        private readonly List<FrameworkElement> _navSectionRules = new List<FrameworkElement>();    // 折叠后代替标题的分隔线
+        private Border _navPricingRow;         // 计价规则：打开独立窗口，不是页面
+        private TextBlock _navPricingLabel;
+        private FrameworkElement _navPricingHint;
         private Shapes.Ellipse _navLiveNewDot;
         private Border _navDeviceCountBadge;
         private TextBlock _navDeviceCountText;
@@ -635,12 +637,23 @@ namespace TokLens
             _fxUpdatedAt = initFx.UpdatedAt;
             _fxIsLive = initFx.IsLive;
 
+            // 默认只占工作区的一部分（此前是 92% × 90%，在 1080p 笔记本上几乎铺满屏幕）；
+            // 用户调整过大小后记住上次的尺寸。
             Rect workArea = SystemParameters.WorkArea;
-            Width = Math.Min(1400.0, Math.Max(1060.0, workArea.Width * 0.92));
-            Height = Math.Min(900.0, Math.Max(700.0, workArea.Height * 0.90));
-            MinWidth = 1020.0;
-            MinHeight = 660.0;
+            Size initialSize = WindowPlacementStore.DefaultSize(workArea);
+            bool startMaximized = false;
+            if (!_skipAutoScan)
+            {
+                Size saved;
+                if (WindowPlacementStore.TryLoad(out saved, out startMaximized))
+                    initialSize = WindowPlacementStore.Clamp(saved, workArea);
+            }
+            MinWidth = WindowPlacementStore.MinWidth;
+            MinHeight = WindowPlacementStore.MinHeight;
+            Width = initialSize.Width;
+            Height = initialSize.Height;
             WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            if (startMaximized) WindowState = WindowState.Maximized;
             ResizeMode = ResizeMode.CanResize;
             FontFamily = DesignSystem.FontUi;
             UseLayoutRounding = true;
@@ -802,7 +815,18 @@ namespace TokLens
 
         private void OnMainWindowClosing(object sender, CancelEventArgs e)
         {
-            if (_skipAutoScan || _explicitExitRequested)
+            if (_skipAutoScan)
+                return;
+
+            // 收进托盘和真正退出都记住当前窗口大小；最大化时记的是还原后的大小
+            try
+            {
+                Rect bounds = WindowState == WindowState.Normal ? new Rect(Left, Top, ActualWidth, ActualHeight) : RestoreBounds;
+                if (!bounds.IsEmpty) WindowPlacementStore.Save(bounds.Size, WindowState == WindowState.Maximized);
+            }
+            catch { }
+
+            if (_explicitExitRequested)
                 return;
 
             if (_syncCfg != null && _syncCfg.MinimizeToTray && _trayIcon != null)
@@ -1804,13 +1828,20 @@ namespace TokLens
             return outerLayer;
         }
 
-        // 侧栏：5 个顶层入口；「用量」「设置」是分组，子页面直接挂在侧栏里（取代原先内容区顶部的第二行 tab）。
-        private static readonly int[] NavTopViews = new int[] { ViewOverview, ViewLiveStream, ViewInsights, ViewDevices, ViewSettings };
-        private static readonly string[] NavTopLabels = new string[] { "概览", "用量", "订阅与费用", "设备", "设置" };
-        private static readonly int[] NavUsageChildViews = new int[] { ViewLiveStream, ViewModels, ViewProjects, ViewBloat, ViewDailyExport };
-        private static readonly int[] NavSettingsChildViews = new int[] { ViewSettings, ViewDoctor };
-        private const int NavTopUsage = 1;
-        private const int NavTopSettings = 4;
+        // 侧栏：每个页面一行、各有图标，按分区排列。分区标题只是标签，不是入口——
+        // 不再有「点分组等于点它的第一个子页面」的重复入口，折叠成图标后每个页面仍可直达。
+        private static readonly int[] NavPrimaryViews = new int[] { ViewOverview, ViewDevices, ViewInsights };
+        private static readonly int[] NavUsageViews = new int[] { ViewLiveStream, ViewModels, ViewProjects, ViewBloat, ViewDailyExport };
+        private static readonly int[] NavSettingsViews = new int[] { ViewSettings, ViewDoctor };
+        private const string NavSectionUsage = "用量";
+        private const string NavSectionSettings = "设置";
+
+        // 与 ViewTitles 同序：每个页面在侧栏里的图标。
+        private static readonly string[] ViewIcons = new string[]
+        {
+            UiIcons.Overview, UiIcons.Activity, UiIcons.Models, UiIcons.Folder, UiIcons.Sparkles,
+            UiIcons.Chat, UiIcons.Devices, UiIcons.Calendar, UiIcons.Doctor, UiIcons.Settings
+        };
 
         private static readonly string[] ViewShortcuts = new string[]
         {
@@ -1899,109 +1930,40 @@ namespace TokLens
             Grid.SetRow(brandHeader, 0);
             g.Children.Add(brandHeader);
 
-            // Row 1: 导航（顶层 5 项，用量 / 设置下的子页面始终展开）
+            // Row 1: 导航（常用总览在上，其后是「用量」「设置」两个分区）
             ScrollViewer navScroll = new ScrollViewer();
             navScroll.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
             navScroll.HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled;
             navScroll.PanningMode = PanningMode.VerticalOnly;
 
             StackPanel navStack = new StackPanel();
-            navStack.Margin = new Thickness(8, 7, 8, 6);
+            navStack.Margin = new Thickness(8, 8, 8, 6);
 
-            string[] topIcons = new string[] { UiIcons.Overview, UiIcons.Activity, UiIcons.Sparkles, UiIcons.Devices, UiIcons.Settings };
+            _navRows = new Border[TotalViewCount];
+            _navRowBars = new Border[TotalViewCount];
+            _navRowLabels = new TextBlock[TotalViewCount];
+            _navRowIcons = new Shapes.Path[TotalViewCount];
+            _navSectionCaptions.Clear();
+            _navSectionRules.Clear();
 
-            _navItemBorders = new Border[NavTopViews.Length];
-            _navActiveBars = new Border[NavTopViews.Length];
-            _navTitleLabels = new TextBlock[NavTopViews.Length];
-            _navChildBorders = new Border[TotalViewCount];
-            _navChildBars = new Border[TotalViewCount];
-            _navChildPanels = new StackPanel[2];
+            AddNavPageRows(navStack, NavPrimaryViews);
+            AddNavSection(navStack, NavSectionUsage);
+            AddNavPageRows(navStack, NavUsageViews);
+            AddNavSection(navStack, NavSectionSettings);
+            AddNavPageRows(navStack, NavSettingsViews);
 
-            for (int i = 0; i < NavTopViews.Length; i++)
-            {
-                int targetView = NavTopViews[i];
-                string tip;
-                if (i == NavTopUsage) tip = "用量：请求明细、模型与工具、项目、会话分析、每日汇总";
-                else if (i == NavTopSettings) tip = "设置：同步与偏好、环境检查、计价规则 (Ctrl+,)";
-                else tip = NavTopLabels[i] + " (" + ViewShortcuts[targetView] + ")";
-
-                Border topBar;
-                TextBlock topLabel;
-                Grid topGrid;
-                Border topRow = BuildNavRow(topIcons[i], NavTopLabels[i], tip, false,
-                    delegate() { SwitchActiveView(targetView); }, out topBar, out topLabel, out topGrid);
-                _navItemBorders[i] = topRow;
-                _navActiveBars[i] = topBar;
-                _navTitleLabels[i] = topLabel;
-                navStack.Children.Add(topRow);
-
-                if (targetView == ViewDevices)
-                {
-                    _navDeviceCountBadge = new Border();
-                    _navDeviceCountBadge.CornerRadius = new CornerRadius(8);
-                    _navDeviceCountBadge.Padding = new Thickness(6, 1, 6, 1);
-                    _navDeviceCountBadge.Margin = new Thickness(4, 0, 8, 0);
-                    _navDeviceCountBadge.VerticalAlignment = VerticalAlignment.Center;
-                    _navDeviceCountBadge.SetResourceReference(Border.BackgroundProperty, "BgElevated");
-                    _navDeviceCountBadge.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
-                    _navDeviceCountBadge.BorderThickness = new Thickness(1);
-
-                    _navDeviceCountText = new TextBlock();
-                    _navDeviceCountText.Text = "1";
-                    _navDeviceCountText.FontFamily = DesignSystem.FontMono;
-                    _navDeviceCountText.FontSize = DesignSystem.TextCaption;
-                    _navDeviceCountText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-                    _navDeviceCountBadge.Child = _navDeviceCountText;
-
-                    Grid.SetColumn(_navDeviceCountBadge, 3);
-                    topGrid.Children.Add(_navDeviceCountBadge);
-                }
-
-                if (i != NavTopUsage && i != NavTopSettings)
-                    continue;
-
-                StackPanel children = new StackPanel { Margin = new Thickness(0, 0, 0, 4) };
-                int[] childViews = (i == NavTopUsage) ? NavUsageChildViews : NavSettingsChildViews;
-                for (int c = 0; c < childViews.Length; c++)
-                {
-                    int childView = childViews[c];
-                    Border childBar;
-                    TextBlock childLabel;
-                    Grid childGrid;
-                    Border childRow = BuildNavRow(null, ViewTitles[childView], ViewTitles[childView] + " (" + ViewShortcuts[childView] + ")", true,
-                        delegate() { SwitchActiveView(childView); }, out childBar, out childLabel, out childGrid);
-                    _navChildBorders[childView] = childRow;
-                    _navChildBars[childView] = childBar;
-                    children.Children.Add(childRow);
-
-                    if (childView == ViewLiveStream)
-                    {
-                        _navLiveNewDot = new Shapes.Ellipse();
-                        _navLiveNewDot.Width = 6;
-                        _navLiveNewDot.Height = 6;
-                        _navLiveNewDot.Margin = new Thickness(4, 0, 10, 0);
-                        _navLiveNewDot.VerticalAlignment = VerticalAlignment.Center;
-                        _navLiveNewDot.Visibility = Visibility.Collapsed;
-                        _navLiveNewDot.SetResourceReference(Shapes.Shape.FillProperty, "SemanticSuccess");
-                        Grid.SetColumn(_navLiveNewDot, 3);
-                        childGrid.Children.Add(_navLiveNewDot);
-                    }
-                }
-
-                if (i == NavTopSettings)
-                {
-                    // 计价规则是独立窗口，不是视图；放在设置分组里，和其他设置项在同一处找到。
-                    Border pricingBar;
-                    TextBlock pricingLabel;
-                    Grid pricingGrid;
-                    _navPricingChild = BuildNavRow(null, "计价规则", "模型单价与自定义费率（打开计价规则窗口）", true,
-                        delegate() { OpenPricingStudioDialog(null); }, out pricingBar, out pricingLabel, out pricingGrid);
-                    children.Children.Add(_navPricingChild);
-                }
-
-                _navChildPanels[i == NavTopUsage ? 0 : 1] = children;
-                navStack.Children.Add(children);
-            }
+            // 计价规则是独立窗口而不是页面：放在设置分区，用外链角标说明会另开窗口，且从不显示为选中。
+            Border pricingBar;
+            Shapes.Path pricingIcon;
+            Grid pricingGrid;
+            _navPricingRow = BuildNavRow(UiIcons.Tag, "计价规则", "计价规则：模型单价、档位价格与自定义费率（另开窗口）",
+                delegate() { OpenPricingStudioDialog(null); }, out pricingBar, out _navPricingLabel, out pricingIcon, out pricingGrid);
+            Shapes.Path pricingHint = UiIcons.CreateIcon(UiIcons.ExternalLink, 10.5, "FgMuted");
+            pricingHint.Margin = new Thickness(4, 0, 9, 0);
+            Grid.SetColumn(pricingHint, 3);
+            pricingGrid.Children.Add(pricingHint);
+            _navPricingHint = pricingHint;
+            navStack.Children.Add(_navPricingRow);
 
             navScroll.Content = navStack;
             Grid.SetRow(navScroll, 1);
@@ -2135,20 +2097,94 @@ namespace TokLens
             return _sidebarBorder;
         }
 
+        private void AddNavPageRows(StackPanel host, int[] views)
+        {
+            for (int i = 0; i < views.Length; i++)
+            {
+                int view = views[i];
+                Border bar;
+                TextBlock label;
+                Shapes.Path icon;
+                Grid grid;
+                Border row = BuildNavRow(ViewIcons[view], ViewTitles[view], ViewTitles[view] + " (" + ViewShortcuts[view] + ")",
+                    delegate() { SwitchActiveView(view); }, out bar, out label, out icon, out grid);
+                _navRows[view] = row;
+                _navRowBars[view] = bar;
+                _navRowLabels[view] = label;
+                _navRowIcons[view] = icon;
+                host.Children.Add(row);
+
+                if (view == ViewDevices)
+                {
+                    _navDeviceCountBadge = new Border();
+                    _navDeviceCountBadge.CornerRadius = new CornerRadius(8);
+                    _navDeviceCountBadge.Padding = new Thickness(6, 1, 6, 1);
+                    _navDeviceCountBadge.Margin = new Thickness(4, 0, 8, 0);
+                    _navDeviceCountBadge.VerticalAlignment = VerticalAlignment.Center;
+                    _navDeviceCountBadge.SetResourceReference(Border.BackgroundProperty, "BgElevated");
+                    _navDeviceCountBadge.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
+                    _navDeviceCountBadge.BorderThickness = new Thickness(1);
+
+                    _navDeviceCountText = new TextBlock();
+                    _navDeviceCountText.Text = "1";
+                    _navDeviceCountText.FontFamily = DesignSystem.FontMono;
+                    _navDeviceCountText.FontSize = DesignSystem.TextCaption;
+                    _navDeviceCountText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+                    _navDeviceCountBadge.Child = _navDeviceCountText;
+
+                    Grid.SetColumn(_navDeviceCountBadge, 3);
+                    grid.Children.Add(_navDeviceCountBadge);
+                }
+                else if (view == ViewLiveStream)
+                {
+                    _navLiveNewDot = new Shapes.Ellipse();
+                    _navLiveNewDot.Width = 6;
+                    _navLiveNewDot.Height = 6;
+                    _navLiveNewDot.Margin = new Thickness(4, 0, 10, 0);
+                    _navLiveNewDot.VerticalAlignment = VerticalAlignment.Center;
+                    _navLiveNewDot.Visibility = Visibility.Collapsed;
+                    _navLiveNewDot.SetResourceReference(Shapes.Shape.FillProperty, "SemanticSuccess");
+                    Grid.SetColumn(_navLiveNewDot, 3);
+                    grid.Children.Add(_navLiveNewDot);
+                }
+            }
+        }
+
+        // 分区标题：展开时是一行小字标签，折叠成图标后换成一条分隔线。
+        private void AddNavSection(StackPanel host, string caption)
+        {
+            TextBlock text = new TextBlock();
+            text.Text = caption;
+            text.FontSize = DesignSystem.TextCaption;
+            text.FontWeight = FontWeights.Medium;
+            text.Margin = new Thickness(12, 14, 0, 5);
+            text.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            _navSectionCaptions.Add(text);
+            host.Children.Add(text);
+
+            Border rule = new Border();
+            rule.Height = 1;
+            rule.Margin = new Thickness(9, 9, 9, 9);
+            rule.Visibility = Visibility.Collapsed;
+            rule.SetResourceReference(Border.BackgroundProperty, "BorderCard");
+            _navSectionRules.Add(rule);
+            host.Children.Add(rule);
+        }
+
         private Border BuildNavRow(
             string icon,
             string label,
             string tooltip,
-            bool isChild,
             Action onClick,
             out Border activeBar,
             out TextBlock labelText,
+            out Shapes.Path iconEl,
             out Grid rowGrid)
         {
             Border itemBd = new Border();
-            itemBd.Height = isChild ? 28.0 : 31.0;
+            itemBd.Height = 30.0;
             itemBd.CornerRadius = new CornerRadius(6);
-            itemBd.Margin = new Thickness(0, 0, 0, isChild ? 1.0 : 2.0);
+            itemBd.Margin = new Thickness(0, 0, 0, 2.0);
             itemBd.Background = Brushes.Transparent;
             itemBd.Cursor = Cursors.Hand;
             itemBd.ToolTip = tooltip;
@@ -2163,7 +2199,7 @@ namespace TokLens
 
             activeBar = new Border();
             activeBar.Width = 3;
-            activeBar.Height = isChild ? 13 : 15;
+            activeBar.Height = 14;
             activeBar.CornerRadius = new CornerRadius(1.5);
             activeBar.VerticalAlignment = VerticalAlignment.Center;
             activeBar.Visibility = Visibility.Hidden;
@@ -2171,19 +2207,17 @@ namespace TokLens
             Grid.SetColumn(activeBar, 0);
             rowGrid.Children.Add(activeBar);
 
-            if (!string.IsNullOrEmpty(icon))
-            {
-                Shapes.Path iconEl = UiIcons.CreateIcon(icon, 14.5, null);
-                iconEl.HorizontalAlignment = HorizontalAlignment.Center;
-                iconEl.VerticalAlignment = VerticalAlignment.Center;
-                Grid.SetColumn(iconEl, 1);
-                rowGrid.Children.Add(iconEl);
-            }
+            // 图标描边跟随行的前景色（选中时由 ApplyNavRowState 换成强调色）
+            iconEl = UiIcons.CreateIcon(icon, 14.5, null);
+            iconEl.HorizontalAlignment = HorizontalAlignment.Center;
+            iconEl.VerticalAlignment = VerticalAlignment.Center;
+            Grid.SetColumn(iconEl, 1);
+            rowGrid.Children.Add(iconEl);
 
             labelText = new TextBlock();
             labelText.Text = label;
-            labelText.FontSize = isChild ? DesignSystem.TextBody : DesignSystem.TextLabel;
-            labelText.FontWeight = isChild ? FontWeights.Normal : FontWeights.Medium;
+            labelText.FontSize = DesignSystem.TextLabel;
+            labelText.FontWeight = FontWeights.Normal;
             labelText.VerticalAlignment = VerticalAlignment.Center;
             labelText.TextTrimming = TextTrimming.CharacterEllipsis;
             Grid.SetColumn(labelText, 2);
@@ -2224,7 +2258,7 @@ namespace TokLens
         }
 
         // 窗口窄于此宽度时侧栏自动收成图标，加宽后自动恢复（用户手动收起的不自动展开）
-        private const double SidebarAutoCollapseWidth = 1100.0;
+        private const double SidebarAutoCollapseWidth = 1000.0;
         private bool _sidebarAutoCollapsed = false;
 
         private void ApplyResponsiveSidebar(double windowWidth)
@@ -2258,24 +2292,19 @@ namespace TokLens
             if (_themeToggleBtn != null) _themeToggleBtn.Visibility = expandedVis;
             if (_navDeviceCountBadge != null) _navDeviceCountBadge.Visibility = expandedVis;
 
-            // 折叠后只剩图标，子页面没有图标可显示，收起；当前所在分组改由顶层图标高亮。
-            if (_navChildPanels != null)
+            // 折叠后每个页面仍是一枚图标，可直接点到；只收起文字、角标，分区标题换成分隔线。
+            if (_navRowLabels != null)
             {
-                for (int i = 0; i < _navChildPanels.Length; i++)
+                for (int i = 0; i < _navRowLabels.Length; i++)
                 {
-                    if (_navChildPanels[i] != null)
-                        _navChildPanels[i].Visibility = expandedVis;
+                    if (_navRowLabels[i] != null)
+                        _navRowLabels[i].Visibility = expandedVis;
                 }
             }
-
-            if (_navTitleLabels != null)
-            {
-                for (int i = 0; i < _navTitleLabels.Length; i++)
-                {
-                    if (_navTitleLabels[i] != null)
-                        _navTitleLabels[i].Visibility = expandedVis;
-                }
-            }
+            if (_navPricingLabel != null) _navPricingLabel.Visibility = expandedVis;
+            if (_navPricingHint != null) _navPricingHint.Visibility = expandedVis;
+            foreach (FrameworkElement caption in _navSectionCaptions) caption.Visibility = expandedVis;
+            foreach (FrameworkElement rule in _navSectionRules) rule.Visibility = _sidebarCollapsed ? Visibility.Visible : Visibility.Collapsed;
 
             UpdateNavVisuals();
         }
@@ -3325,8 +3354,10 @@ namespace TokLens
             Grid g = new Grid();
             g.Margin = new Thickness(16, 12, 16, 14);
             g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(110.0) }); // Row 0: 4 KPI 卡片（主数字 28px）
-            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(234.0) }); // Row 1: Bento Ranking + Smooth Trend Chart
-            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // Row 2: Compact Live Stream Preview
+            // Row 1 / Row 2 按比例分剩余高度：窗口矮时排行与趋势图让出一些高度，下方请求快览不至于只剩两三行；
+            // 窗口高时趋势图封顶，多出来的高度全部给请求快览。
+            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1.0, GridUnitType.Star), MinHeight = 188.0, MaxHeight = 262.0 }); // Row 1: 排行 + 趋势图
+            g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1.0, GridUnitType.Star), MinHeight = 120.0 }); // Row 2: 最新请求快览
 
             // Row 0: 顶部 4 张 Bento KPI 卡片（大数字统一 24px SemiBold FgPrimary + 等宽数字，告别彩虹红绿灯）
             UniformGrid kpiGrid = new UniformGrid { Columns = 4 };
@@ -3352,7 +3383,7 @@ namespace TokLens
             DockPanel.SetDock(_kpiTodayPill, Dock.Right);
             c1Head.Children.Add(_kpiTodayPill);
 
-            TextBlock c1Lbl = new TextBlock { Text = "累计记录 / 估值", FontSize = DesignSystem.TextBody, FontWeight = FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center };
+            TextBlock c1Lbl = new TextBlock { Text = "累计记录 / 估值", FontSize = DesignSystem.TextBody, FontWeight = FontWeights.Medium, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
             c1Lbl.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             c1Head.Children.Add(c1Lbl);
             c1Sp.Children.Add(c1Head);
@@ -3803,7 +3834,8 @@ namespace TokLens
             g.RowDefinitions.Insert(0, new RowDefinition { Height = GridLength.Auto });
             _usageStatusPanel = new UsageStatusPanel(
                 delegate { RunSilentScanAsync(_homeDir, true, false); },
-                delegate { SwitchActiveView(ViewDoctor); });
+                delegate { SwitchActiveView(ViewDoctor); },
+                delegate { return _isDark; });
             Grid.SetRow(_usageStatusPanel, 0);
             g.Children.Add(_usageStatusPanel);
 
@@ -4099,7 +4131,7 @@ namespace TokLens
 
             TextBlock rateHint = new TextBlock
             {
-                Text = "点击「单价 ($/M)」可按百万输入单价排序",
+                Text = "点击表头排序 · 悬停档位查看证据与金额来源 · 窗口加宽显示更多列",
                 FontSize = DesignSystem.TextCaption,
                 Margin = new Thickness(0, 0, 10, 0),
                 VerticalAlignment = VerticalAlignment.Center
@@ -4466,33 +4498,44 @@ namespace TokLens
             if (compactOverviewMode)
             {
                 // 概览只做快览：明细列（缓存、耗时、速率）留给「请求明细」页
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "时间", "TimeText", "TimestampMs", new DataGridLength(92), false, true, false));
-                dg.Columns.Add(ModernDataGridFactory.MakeBadgeColumn("AI 工具", "Tool", "Tool", new DataGridLength(140)));
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "时间", "TimeText", "TimestampMs", new DataGridLength(88), false, true, false));
+                dg.Columns.Add(ModernDataGridFactory.MakeBadgeColumn("AI 工具", "Tool", "Tool", new DataGridLength(128)));
                 DataGridColumn modelCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "模型", "Model", "Model", new DataGridLength(1.45, DataGridLengthUnitType.Star), false, true, true);
-                modelCol.MinWidth = 140.0;
+                modelCol.MinWidth = 132.0;
                 dg.Columns.Add(modelCol);
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "服务档位", "ServiceTierLabel", "ServiceTierLabel", new DataGridLength(116), false, false, false));
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "输出", "OutputText", "Output", new DataGridLength(80), true, true, false));
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "总 Token", "TotalTokensText", "TotalTokens", new DataGridLength(96), true, true, true));
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "花费", "FormattedCost", "CostUsd", new DataGridLength(92), true, true, true));
+                dg.Columns.Add(ModernDataGridFactory.MakeTierColumn("服务档位", new DataGridLength(144)));
+                DataGridColumn quickOutputCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "输出", "OutputText", "Output", new DataGridLength(72), true, true, false);
+                dg.Columns.Add(quickOutputCol);
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "总 Token", "TotalTokensText", "TotalTokens", new DataGridLength(88), true, true, true));
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "金额", "FormattedCost", "CostUsd", new DataGridLength(88), true, true, true));
+                ModernDataGridFactory.EnableResponsiveColumns(dg, quickOutputCol);
             }
             else
             {
-                // 完整实时流需兼容右侧 310px 透视抽屉同时展开，精简列头并确保数字与花费列绝不截断
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "时间", "TimeText", "TimestampMs", new DataGridLength(92), false, true, false));
-                dg.Columns.Add(ModernDataGridFactory.MakeBadgeColumn("AI 工具", "Tool", "Tool", new DataGridLength(136)));
-                DataGridColumn modelCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "模型名称", "Model", "Model", new DataGridLength(1.3, DataGridLengthUnitType.Star), false, true, true);
-                modelCol.MinWidth = 112.0;
+                // 完整明细的列比较多：窗口变窄或右侧 310px 透视抽屉展开时，按下面的顺序依次收起次要列，
+                // 时间、工具、模型、档位、总计与花费始终保留，不再出现表头和数字被截断的情况。
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "时间", "TimeText", "TimestampMs", new DataGridLength(88), false, true, false));
+                dg.Columns.Add(ModernDataGridFactory.MakeBadgeColumn("AI 工具", "Tool", "Tool", new DataGridLength(124)));
+                DataGridColumn modelCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "模型", "Model", "Model", new DataGridLength(1.3, DataGridLengthUnitType.Star), false, true, true);
+                modelCol.MinWidth = 132.0;
                 dg.Columns.Add(modelCol);
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "服务档位", "ServiceTierLabel", "ServiceTierLabel", new DataGridLength(116), false, false, false));
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "新输入", "FreshInputText", "FreshInput", new DataGridLength(64), true, true, false));
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存读", "CacheReadText", "CacheRead", new DataGridLength(68), true, true, false));
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存写", "CacheWriteText", "CacheWrite", new DataGridLength(70), true, true, false));
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "输出", "OutputText", "Output", new DataGridLength(60), true, true, false));
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "总计", "TotalTokensText", "TotalTokens", new DataGridLength(68), true, true, true));
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "耗时", "DurationText", "DurationMs", new DataGridLength(54), true, true, false));
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "速率", "TpsText", "Tps", new DataGridLength(74), true, true, false));
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "花费", "FormattedCost", "CostUsd", new DataGridLength(76), true, true, true));
+                dg.Columns.Add(ModernDataGridFactory.MakeTierColumn("服务档位", new DataGridLength(144)));
+                DataGridColumn freshCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "新输入", "FreshInputText", "FreshInput", new DataGridLength(62), true, true, false);
+                DataGridColumn readCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存读", "CacheReadText", "CacheRead", new DataGridLength(70), true, true, false);
+                DataGridColumn writeCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存写", "CacheWriteText", "CacheWrite", new DataGridLength(70), true, true, false);
+                DataGridColumn outputCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "输出", "OutputText", "Output", new DataGridLength(62), true, true, false);
+                DataGridColumn durationCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "耗时", "DurationText", "DurationMs", new DataGridLength(58), true, true, false);
+                DataGridColumn tpsCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "速率", "TpsText", "Tps", new DataGridLength(76), true, true, false);
+                dg.Columns.Add(freshCol);
+                dg.Columns.Add(readCol);
+                dg.Columns.Add(writeCol);
+                dg.Columns.Add(outputCol);
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "总 Token", "TotalTokensText", "TotalTokens", new DataGridLength(74), true, true, true));
+                dg.Columns.Add(durationCol);
+                dg.Columns.Add(tpsCol);
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "金额", "FormattedCost", "CostUsd", new DataGridLength(80), true, true, true));
+                _liveDurationCol = durationCol; _liveTpsCol = tpsCol;
+                _liveColumns = ModernDataGridFactory.EnableResponsiveColumns(dg, writeCol, freshCol, durationCol, tpsCol, readCol, outputCol);
             }
 
             ContextMenu cm = new ContextMenu();
@@ -4582,19 +4625,33 @@ namespace TokLens
         {
             DataGrid dg = ModernDataGridFactory.CreateModernDataGrid();
 
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "模型名称", "Model", "Model", new DataGridLength(1.65, DataGridLengthUnitType.Star), false, true, true));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "服务档位", "ServiceTierLabel", "ServiceTierLabel", new DataGridLength(116), false, true, false));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "金额来源", "CostBasisLabel", "CostBasisLabel", new DataGridLength(150), false, true, false));
-            dg.Columns.Add(ModernDataGridFactory.MakeBadgeColumn("所属工具", "Tool", "Tool", new DataGridLength(138)));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "调用次数", "Turns", "Turns", new DataGridLength(80), true, true, false));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "纯新增输入", "FreshInputText", "FreshInput", new DataGridLength(96), true, true, false));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存读取", "CacheReadText", "CacheRead", new DataGridLength(96), true, true, false));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "输出 Token", "OutputText", "Output", new DataGridLength(92), true, true, false));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存命中", "CacheHitText", "CacheRead", new DataGridLength(82), true, true, false));
-            // 关键修复：单价 ($/M) 列的 SortMemberPath 严格绑定 InputPerM，彻底修正旧版错排为 CostUsd 的 Bug！
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "单价 ($/M)", "RateLabel", "InputPerM", new DataGridLength(108), true, true, false));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "记录 / 估值", "FormattedCost", "CostUsd", new DataGridLength(104), true, true, true));
-            dg.Columns.Add(ModernDataGridFactory.MakeShareBarColumn("账单占比", "ShareText", "BarRatio", "BarRatio", new DataGridLength(122)));
+            // 此前 12 列全部定宽、合计超过可用宽度，表头（「调用次」「输出 Toke」）和模型名都被截断。
+            // 现在表头用短名，模型名占剩余宽度；放不下时按顺序收起次要列。
+            // 同一模型会按档位与金额来源拆成多行，所以金额来源用短标签始终保留（完整说明在悬停提示里），
+            // 否则几行看起来一模一样。
+            DataGridColumn modelNameCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "模型", "Model", "Model", new DataGridLength(1.65, DataGridLengthUnitType.Star), false, true, true);
+            modelNameCol.MinWidth = 136.0;
+            dg.Columns.Add(modelNameCol);
+            dg.Columns.Add(ModernDataGridFactory.MakeTierColumn("服务档位", new DataGridLength(144)));
+            DataGridTextColumn basisCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "金额来源", "CostBasisShortLabel", "CostBasisLabel", new DataGridLength(86), false, false, false);
+            basisCol.ElementStyle.Setters.Add(new Setter(FrameworkElement.ToolTipProperty, new Binding("CostBasisLabel")));
+            dg.Columns.Add(basisCol);
+            dg.Columns.Add(ModernDataGridFactory.MakeBadgeColumn("工具", "Tool", "Tool", new DataGridLength(120)));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "请求", "Turns", "Turns", new DataGridLength(56), true, true, false));
+            DataGridColumn freshCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "新输入", "FreshInputText", "FreshInput", new DataGridLength(76), true, true, false);
+            DataGridColumn readCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存读", "CacheReadText", "CacheRead", new DataGridLength(78), true, true, false);
+            DataGridColumn outputCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "输出", "OutputText", "Output", new DataGridLength(72), true, true, false);
+            DataGridColumn hitCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "命中率", "CacheHitText", "CacheRead", new DataGridLength(70), true, true, false);
+            // 单价列按百万输入单价排序（SortMemberPath = InputPerM），不是按花费
+            DataGridColumn rateCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "单价 $/M", "RateLabel", "InputPerM", new DataGridLength(104), true, true, false);
+            dg.Columns.Add(freshCol);
+            dg.Columns.Add(readCol);
+            dg.Columns.Add(outputCol);
+            dg.Columns.Add(hitCol);
+            dg.Columns.Add(rateCol);
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "金额", "FormattedCost", "CostUsd", new DataGridLength(96), true, true, true));
+            dg.Columns.Add(ModernDataGridFactory.MakeShareBarColumn("占比", "ShareText", "BarRatio", "BarRatio", new DataGridLength(112)));
+            ModernDataGridFactory.EnableResponsiveColumns(dg, rateCol, freshCol, hitCol, readCol, outputCol);
 
             ContextMenu cm = new ContextMenu();
             cm.Resources = Resources;
@@ -4669,16 +4726,26 @@ namespace TokLens
         {
             DataGrid dg = ModernDataGridFactory.CreateModernDataGrid();
 
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "设备名称", "MachineName", "MachineName", new DataGridLength(1.25, DataGridLengthUnitType.Star), false, false, true));
-            dg.Columns.Add(ModernDataGridFactory.MakeBadgeColumn("节点类型", "TypeBadge", "TypeBadge", new DataGridLength(106)));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "在线状态", "StatusText", "IsOnline", new DataGridLength(96), false, false, false));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "操作系统", "OsInfo", "OsInfo", new DataGridLength(1.15, DataGridLengthUnitType.Star), false, false, false));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "活跃工具", "ToolsSummary", "ToolCount", new DataGridLength(1.3, DataGridLengthUnitType.Star), false, false, false));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "最后同步", "SyncedAt", "SyncedAt", new DataGridLength(136), false, true, false));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "调用数", "Turns", "Turns", new DataGridLength(74), true, true, false));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "总 Token", "TotalTokensText", "TotalTokens", new DataGridLength(94), true, true, false));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "等效花费", "FormattedMoney", "CostUsd", new DataGridLength(110), true, true, true));
-            dg.Columns.Add(ModernDataGridFactory.MakeShareBarColumn("集群占比", "ShareText", "BarRatio", "BarRatio", new DataGridLength(116)));
+            // 设备名、在线状态、用量与金额始终保留；窗口变窄时依次收起操作系统、最后同步、节点类型、活跃工具。
+            DataGridColumn nameCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "设备名称", "MachineName", "MachineName", new DataGridLength(1.35, DataGridLengthUnitType.Star), false, false, true);
+            nameCol.MinWidth = 138.0;
+            dg.Columns.Add(nameCol);
+            DataGridColumn typeCol = ModernDataGridFactory.MakeBadgeColumn("节点类型", "TypeBadge", "TypeBadge", new DataGridLength(104));
+            dg.Columns.Add(typeCol);
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "在线状态", "StatusText", "IsOnline", new DataGridLength(98), false, false, false));
+            DataGridColumn osCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "操作系统", "OsInfo", "OsInfo", new DataGridLength(1.15, DataGridLengthUnitType.Star), false, false, false);
+            osCol.MinWidth = 150.0;
+            dg.Columns.Add(osCol);
+            DataGridColumn toolsCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "活跃工具", "ToolsSummary", "ToolCount", new DataGridLength(1.2, DataGridLengthUnitType.Star), false, false, false);
+            toolsCol.MinWidth = 124.0;
+            dg.Columns.Add(toolsCol);
+            DataGridColumn syncedCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "最后同步", "SyncedAt", "SyncedAt", new DataGridLength(150), false, true, false);
+            dg.Columns.Add(syncedCol);
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "请求", "Turns", "Turns", new DataGridLength(66), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "总 Token", "TotalTokensText", "TotalTokens", new DataGridLength(92), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "金额", "FormattedMoney", "CostUsd", new DataGridLength(104), true, true, true));
+            dg.Columns.Add(ModernDataGridFactory.MakeShareBarColumn("占比", "ShareText", "BarRatio", "BarRatio", new DataGridLength(112)));
+            ModernDataGridFactory.EnableResponsiveColumns(dg, osCol, syncedCol, typeCol, toolsCol);
 
             dg.MouseDoubleClick += delegate(object s, MouseButtonEventArgs e)
             {
@@ -4742,15 +4809,20 @@ namespace TokLens
         {
             DataGrid dg = ModernDataGridFactory.CreateModernDataGrid();
 
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "日期", "Date", "Date", new DataGridLength(1.15, DataGridLengthUnitType.Star), false, true, true));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "调用次数", "Turns", "Turns", new DataGridLength(0.9, DataGridLengthUnitType.Star), true, true, false));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "纯新增输入", "FreshInputText", "FreshInput", new DataGridLength(1.05, DataGridLengthUnitType.Star), true, true, false));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存读取", "CacheReadText", "CacheRead", new DataGridLength(1.05, DataGridLengthUnitType.Star), true, true, false));
-            // 补齐 CacheWrite（缓存写入）列，消除大缓存写入与总 Token 对账差异！
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存写入", "CacheWriteText", "CacheWrite", new DataGridLength(1.0, DataGridLengthUnitType.Star), true, true, false));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "输出 Token", "OutputText", "Output", new DataGridLength(1.05, DataGridLengthUnitType.Star), true, true, false));
+            // 8 列按比例分宽：日期和金额有各自的下限，其余列用工厂的通用下限，窄窗口下也不出现横向滚动条。
+            // 四个 Token 分量（新输入 + 缓存读 + 缓存写 + 输出）相加等于总 Token，缓存写单列保留是为了对得上账。
+            DataGridColumn dateCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "日期", "Date", "Date", new DataGridLength(1.15, DataGridLengthUnitType.Star), false, true, true);
+            dateCol.MinWidth = 106.0;
+            dg.Columns.Add(dateCol);
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "请求", "Turns", "Turns", new DataGridLength(0.8, DataGridLengthUnitType.Star), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "新输入", "FreshInputText", "FreshInput", new DataGridLength(1.0, DataGridLengthUnitType.Star), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存读", "CacheReadText", "CacheRead", new DataGridLength(1.05, DataGridLengthUnitType.Star), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存写", "CacheWriteText", "CacheWrite", new DataGridLength(1.0, DataGridLengthUnitType.Star), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "输出", "OutputText", "Output", new DataGridLength(1.0, DataGridLengthUnitType.Star), true, true, false));
             dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "总 Token", "TotalTokensText", "TotalTokens", new DataGridLength(1.1, DataGridLengthUnitType.Star), true, true, true));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "等效花费", "FormattedCost", "CostUsd", new DataGridLength(1.15, DataGridLengthUnitType.Star), true, true, true));
+            DataGridColumn dailyCostCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "金额", "FormattedCost", "CostUsd", new DataGridLength(1.2, DataGridLengthUnitType.Star), true, true, true);
+            dailyCostCol.MinWidth = 104.0;
+            dg.Columns.Add(dailyCostCol);
 
             dg.MouseDoubleClick += delegate(object s, MouseButtonEventArgs e)
             {
@@ -4811,15 +4883,12 @@ namespace TokLens
         private static bool IsUsageView(int view)
         { return view==ViewLiveStream || view==ViewModels || view==ViewProjects || view==ViewBloat || view==ViewDailyExport; }
 
-        private static int NavTopIndexOf(int view)
+        // 页面所属的侧栏分区；总览类页面不属于任何分区。
+        private static string NavSectionOf(int view)
         {
-            if (IsUsageView(view)) return NavTopUsage;
-            if (view == ViewSettings || view == ViewDoctor) return NavTopSettings;
-            for (int i = 0; i < NavTopViews.Length; i++)
-            {
-                if (NavTopViews[i] == view) return i;
-            }
-            return 0;
+            if (IsUsageView(view)) return NavSectionUsage;
+            if (view == ViewSettings || view == ViewDoctor) return NavSectionSettings;
+            return "";
         }
 
         private void SwitchActiveView(int viewIdx)
@@ -4858,10 +4927,9 @@ namespace TokLens
 
             if (_viewGroupText != null)
             {
-                int top = NavTopIndexOf(_activeView);
-                bool grouped = (top == NavTopUsage || top == NavTopSettings);
-                _viewGroupText.Text = grouped ? (NavTopLabels[top] + " /") : "";
-                _viewGroupText.Visibility = grouped ? Visibility.Visible : Visibility.Collapsed;
+                string section = NavSectionOf(_activeView);
+                _viewGroupText.Text = section.Length > 0 ? (section + " /") : "";
+                _viewGroupText.Visibility = section.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
             }
 
             ApplyPageToolbarScope();
@@ -4884,41 +4952,28 @@ namespace TokLens
                     : Visibility.Collapsed;
             }
 
-            if (_navItemBorders == null) return;
+            if (_navRows == null) return;
 
-            // 展开时高亮落在子页面上，分组标题只加深文字；折叠后子页面不可见，改由分组图标高亮。
-            int top = NavTopIndexOf(_activeView);
-            for (int i = 0; i < _navItemBorders.Length; i++)
-            {
-                bool isGroup = (i == NavTopUsage || i == NavTopSettings);
-                bool inThis = (i == top);
-                bool highlight = inThis && (!isGroup || _sidebarCollapsed);
-                ApplyNavRowState(_navItemBorders[i], _navActiveBars[i], highlight, inThis);
-            }
-
-            if (_navChildBorders != null)
-            {
-                for (int v = 0; v < _navChildBorders.Length; v++)
-                {
-                    if (_navChildBorders[v] == null) continue;
-                    bool active = (v == _activeView);
-                    ApplyNavRowState(_navChildBorders[v], _navChildBars[v], active, active);
-                }
-            }
-            ApplyNavRowState(_navPricingChild, null, false, false);
+            // 每个页面一行：当前页整行高亮、图标换强调色，展开与折叠状态一致。
+            for (int v = 0; v < _navRows.Length; v++)
+                ApplyNavRowState(_navRows[v], _navRowBars[v], _navRowLabels[v], _navRowIcons[v], v == _activeView);
         }
 
-        private static void ApplyNavRowState(Border row, Border bar, bool highlight, bool emphasize)
+        private static void ApplyNavRowState(Border row, Border bar, TextBlock label, Shapes.Path icon, bool active)
         {
             if (row == null) return;
-            row.Tag = highlight;
-            if (highlight)
+            row.Tag = active;
+            if (active)
                 row.SetResourceReference(Border.BackgroundProperty, "BgSelected");
             else
                 row.Background = Brushes.Transparent;
-            row.SetResourceReference(TextElement.ForegroundProperty, emphasize ? "FgPrimary" : "FgSecondary");
+            row.SetResourceReference(TextElement.ForegroundProperty, active ? "FgPrimary" : "FgSecondary");
+            if (label != null)
+                label.FontWeight = active ? FontWeights.SemiBold : FontWeights.Normal;
+            if (icon != null)
+                icon.SetResourceReference(Shapes.Shape.StrokeProperty, active ? "AccentText" : "FgSecondary");
             if (bar != null)
-                bar.Visibility = highlight ? Visibility.Visible : Visibility.Hidden;
+                bar.Visibility = active ? Visibility.Visible : Visibility.Hidden;
         }
 
         private bool SubscriptionsEnabled
@@ -4930,9 +4985,8 @@ namespace TokLens
         // 关闭时侧栏、命令面板和 Ctrl+5 都不出现该页，已登记的订阅记录保留。
         private void ApplySubscriptionFeature()
         {
-            int idx = Array.IndexOf(NavTopViews, ViewInsights);
-            if (_navItemBorders != null && idx >= 0 && idx < _navItemBorders.Length && _navItemBorders[idx] != null)
-                _navItemBorders[idx].Visibility = SubscriptionsEnabled ? Visibility.Visible : Visibility.Collapsed;
+            if (_navRows != null && _navRows[ViewInsights] != null)
+                _navRows[ViewInsights].Visibility = SubscriptionsEnabled ? Visibility.Visible : Visibility.Collapsed;
             if (_activeView == ViewInsights)
             {
                 if (SubscriptionsEnabled) RefreshDashboardView();
@@ -5946,14 +6000,16 @@ namespace TokLens
             RedrawChart();
         }
 
-        private static void SetTimingColumnsVisible(DataGrid dg, bool visible)
+        // 完整明细表的次要列由它统一决定显隐（宽度不够，或没有计时数据），见 CreateLiveStreamDataGrid
+        private ResponsiveColumns _liveColumns;
+        private DataGridColumn _liveDurationCol, _liveTpsCol;
+
+        private void SetTimingColumnsVisible(bool visible)
         {
-            if (dg == null) return;
-            foreach (DataGridColumn c in dg.Columns)
-            {
-                if (c.SortMemberPath == "DurationMs" || c.SortMemberPath == "Tps")
-                    c.Visibility = visible ? Visibility.Visible : Visibility.Collapsed;
-            }
+            if (_liveColumns == null) return;
+            _liveColumns.SetAvailable(_liveDurationCol, visible);
+            _liveColumns.SetAvailable(_liveTpsCol, visible);
+            _liveColumns.Apply();
         }
 
         private void RefreshLiveRequestGrids(string cutoffDateStr)
@@ -6086,7 +6142,7 @@ namespace TokLens
                 {
                     if (lr.DurationMs > 0) { anyTiming = true; break; }
                 }
-                SetTimingColumnsVisible(_liveGrid, anyTiming);
+                SetTimingColumnsVisible(anyTiming);
 
                 ModernDataGridFactory.UpdateItemsPreservingState(
                     _liveGrid,

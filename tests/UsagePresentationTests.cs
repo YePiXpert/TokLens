@@ -56,10 +56,9 @@ internal static class UsagePresentationTests
             Check(UsagePresentation.CostLabel(historical).Contains("来源未记录"),"legacy money has no invented provenance");
             UsageStatusPanel coverage=new UsageStatusPanel(null,null);
             coverage.Render(new ScanResult(),new[]{historical},false,7,"");
-            System.Windows.Controls.TextBlock coverageTitle=(System.Windows.Controls.TextBlock)typeof(UsageStatusPanel).GetField("_header",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(coverage);
-            Check(coverageTitle.Text.Contains("Fast 暂不可判定"),"no tier evidence cannot be presented as zero Fast requests");
+            Check(coverage.SummaryText.Contains("档位未知 3")&&!coverage.SummaryText.Contains("Fast"),"no tier evidence cannot be presented as zero Fast requests");
             coverage.Render(new ScanResult(),new[]{requested,historical},false,7,"");
-            Check(coverageTitle.Text.Contains("已识别 Fast / Ultrafast 1 次")&&coverageTitle.Text.Contains("档位未知 3 次"),"known requested Fast and unresolved coverage are both visible");
+            Check(coverage.SummaryText.Contains("Fast（已请求） 1")&&coverage.SummaryText.Contains("档位未知 3"),"known requested Fast and unresolved coverage are both visible");
             string csv=ReportExporter.BuildCsvReport(records,7);
             Check(csv.Contains("实际档位")&&csv.Contains("requested")&&csv.Contains("official-2026-11-17"),"CSV carries tier evidence and price revision");
             string markdown=ReportExporter.BuildMarkdownReport(records,false,7);

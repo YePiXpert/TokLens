@@ -26,6 +26,19 @@ namespace TokLens
         public string ContextLimitEvidence { get; set; }
         public string ServiceTierLabel { get { return UsagePresentation.TierLabel(this); } }
         public string CostBasisLabel { get { return UsagePresentation.CostLabel(this); } }
+        // Presentation only (badge colour and tooltip in tables); never part of stored metadata.
+        // "standard" | "fast" | "ultrafast" | "flex" | "unknown"; "-requested" is appended while
+        // only a request or session setting, not a response, supports the tier.
+        [ScriptIgnore] public string ServiceTierKind
+        {
+            get
+            {
+                string tier=UsageServiceTier.Effective(this);
+                return tier=="unknown"||UsageServiceTier.Normalize(ActualServiceTier)!="unknown"?tier:tier+"-requested";
+            }
+        }
+        [ScriptIgnore] public string ServiceTierHint { get { return UsagePresentation.TierHint(this); } }
+        [ScriptIgnore] public string CostBasisShortLabel { get { return UsagePresentation.CostShortLabel(this); } }
         public UsageRecordMetadata()
         {
             Provider="unknown"; SessionId=""; Workspace=""; RequestedServiceTier="unknown";
@@ -96,6 +109,19 @@ namespace TokLens
             long limit;
             if(long.TryParse(S(data,"model_context_window")??S(data,"context_window")??S(data,"token_context_window"),out limit)&&limit>0)
             {target.ActualContextLimit=limit;target.ContextLimitEvidence=source+":context_window";}
+        }
+        // Anthropic reports the delivered mode inside the response's usage block, not on
+        // the message or the request. `speed=fast` is the premium mode. `service_tier`
+        // is a separate axis: `priority` there means committed capacity, so it is never
+        // run through the OpenAI alias that turns `priority` into Fast.
+        public static void ReadAnthropicUsage(UsageRecordMetadata target,Dictionary<string,object> usage)
+        {
+            if(target==null||usage==null)return;
+            string speed=(S(usage,"speed")??"").Trim().ToLowerInvariant();
+            string tier=(S(usage,"service_tier")??"").Trim().ToLowerInvariant();
+            if(speed=="fast"){target.ActualServiceTier="fast";target.TierEvidence="response:usage.speed";}
+            else if(tier=="standard"&&(speed.Length==0||speed=="standard"))
+            {target.ActualServiceTier="standard";target.TierEvidence="response:usage.service_tier";}
         }
         public static string DimensionKey(UsageRecordMetadata value)
         {return Normalize(value.RequestedServiceTier)+"||"+Normalize(value.ActualServiceTier)+"||"+(value.CostBasis??"legacy_unknown")+"||"+(value.PricingVersion??"")+"||"+(value.Provider??"unknown");}
