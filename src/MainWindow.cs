@@ -335,9 +335,11 @@ namespace TokLens
         private const int ViewInsights = 4;
         private const int ViewDevices = 5;
         private const int ViewDailyExport = 6;
-        private const int ViewDoctor = 7;
-        private const int ViewSettings = 8;
-        private const int TotalViewCount = 9;
+        private const int ViewGeneral = 7;
+        private const int ViewCloudSync = 8;
+        private const int ViewPricing = 9;
+        private const int ViewDoctor = 10;
+        private const int TotalViewCount = 11;
 
         private const double SidebarExpandedWidth = 200.0;
         private const double SidebarCollapsedWidth = 58.0;
@@ -356,8 +358,10 @@ namespace TokLens
             "订阅与费用",
             "设备",
             "每日汇总",
-            "环境检查",
-            "同步与偏好"
+            "常规",
+            "云同步",
+            "模型价格",
+            "环境检查"
         };
 
         // 核心运行状态与配置
@@ -478,8 +482,7 @@ namespace TokLens
         private StackPanel _pageTabsHost;           // 标题旁的视图切换条：每个多视图页面一组
         private Border[] _pageTabContainers;
         private Button[][] _pageTabButtons;
-        private Button _pricingRulesBtn;             // 「设置」页切换条旁的计价规则入口（另开窗口）
-        private readonly int[] _pageLastView = new int[] { ViewOverview, ViewLiveStream, ViewModels, ViewDevices, ViewInsights, ViewSettings };
+        private readonly int[] _pageLastView = new int[] { ViewOverview, ViewLiveStream, ViewModels, ViewDevices, ViewInsights, ViewGeneral };
         private int _knownDeviceCount = 1;
         private TextBlock _viewSubContextText;
         private Border _inlineAlertBadge;
@@ -499,17 +502,16 @@ namespace TokLens
         private Button _exportMenuBtn;
         private TextBlock _pageScopeText;
 
-        // 设置页「更多」菜单里的开机自启项
-        private MenuItem _autoStartMenuItem;
-
         // 各视图的根节点
         private Grid _workspaceHostGrid;
         private UIElement[] _viewPages;
         private ProjectAttributionView _projectView;
         private SubscriptionCostsView _subscriptionView;
         private UsageHeatmapView _heatmapView;
-        private DiagnosticsDoctorView _doctorView;
+        private GeneralSettingsView _generalView;
         private SyncSettingsView _settingsView;
+        private PricingView _pricingView;
+        private DiagnosticsDoctorView _doctorView;
         private bool _doctorLoadedOnce = false;
 
         // 视图 0（概览看板）控件
@@ -930,7 +932,7 @@ namespace TokLens
                         _syncCfg.MinimizeToTray = !_syncCfg.MinimizeToTray;
                         _trayMinimizeToggleItem.Checked = _syncCfg.MinimizeToTray;
                         PersistConfig(_syncCfg);
-                        if (_settingsView != null) _settingsView.ReloadFromConfig();
+                        if (_generalView != null) _generalView.Reload();
                         ShowToastSafe(
                             _syncCfg.MinimizeToTray ? "已开启关闭最小化至托盘" : "已关闭最小化至托盘",
                             _syncCfg.MinimizeToTray ? "点击右上角关闭按钮时将后台常驻系统托盘" : "点击右上角关闭按钮将直接退出程序",
@@ -1697,6 +1699,8 @@ namespace TokLens
 
             _syncCfg.ShowSubscriptions = subscriptionsBefore;
             ApplySubscriptionFeature();
+            for (int p = 0; p < PageViews.Length; p++)
+                _pageLastView[p] = PageViews[p][0];
         }
 
         // =================================================================================================
@@ -1754,9 +1758,11 @@ namespace TokLens
             _viewPages[ViewInsights] = _subscriptionView;
             _viewPages[ViewDevices] = BuildDevicesView();
             _viewPages[ViewDailyExport] = BuildDailyExportView();
+            _viewPages[ViewGeneral] = BuildGeneralSettingsView();
+            _viewPages[ViewCloudSync] = BuildCloudSyncSettingsView();
+            _viewPages[ViewPricing] = BuildPricingSettingsView();
             _doctorView = new DiagnosticsDoctorView(_homeDir, ShowToastSafe);
             _viewPages[ViewDoctor] = _doctorView;
-            _viewPages[ViewSettings] = BuildSettingsView();
 
             for (int i = 0; i < _viewPages.Length; i++)
             {
@@ -1807,7 +1813,7 @@ namespace TokLens
             new int[] { ViewModels, ViewProjects, ViewDailyExport },
             new int[] { ViewDevices },
             new int[] { ViewInsights },
-            new int[] { ViewSettings, ViewDoctor }
+            new int[] { ViewGeneral, ViewCloudSync, ViewPricing, ViewDoctor }
         };
 
         private static int PageOf(int view)
@@ -1964,7 +1970,7 @@ namespace TokLens
             _sidebarPriceText.FontSize = DesignSystem.TextCaption;
             _sidebarPriceText.VerticalAlignment = VerticalAlignment.Center;
             ModernControlsFactory.EnableTabularNumbers(_sidebarPriceText, false);
-            MakeSidebarStatusLink(_sidebarPriceText, delegate() { OpenPricingStudioDialog(null); });
+            MakeSidebarStatusLink(_sidebarPriceText, delegate() { OpenPricingPage(null); });
             dataRow.Children.Add(_sidebarPriceText);
 
             TextBlock dotSep = new TextBlock { Text = " · ", FontSize = DesignSystem.TextCaption, VerticalAlignment = VerticalAlignment.Center };
@@ -2276,7 +2282,7 @@ namespace TokLens
             _syncStatusBtn.Content = syncSp;
             _syncStatusBtn.Click += delegate(object s, RoutedEventArgs e)
             {
-                SwitchActiveView(ViewSettings);
+                SwitchActiveView(ViewCloudSync);
             };
             WindowChrome.SetIsHitTestVisibleInChrome(_syncStatusBtn, true);
             rightGroup.Children.Add(_syncStatusBtn);
@@ -2323,14 +2329,6 @@ namespace TokLens
                 _pageTabsHost.Children.Add(seg);
             }
 
-            // 计价规则是独立窗口而不是视图：只在「设置」页的切换条旁给一个入口。
-            _pricingRulesBtn = ModernControlsFactory.CreateIconTextButton(UiIcons.Tag, "计价规则", "ghost");
-            _pricingRulesBtn.Height = 28;
-            _pricingRulesBtn.Margin = new Thickness(8, 0, 0, 0);
-            _pricingRulesBtn.ToolTip = "模型单价、档位价格与自定义费率（另开窗口）";
-            _pricingRulesBtn.Visibility = Visibility.Collapsed;
-            _pricingRulesBtn.Click += delegate(object s, RoutedEventArgs e) { OpenPricingStudioDialog(null); };
-            _pageTabsHost.Children.Add(_pricingRulesBtn);
             DockPanel.SetDock(_pageTabsHost, Dock.Left);
             leftTitleDock.Children.Add(_pageTabsHost);
 
@@ -2563,7 +2561,7 @@ namespace TokLens
         {
             if (_pageToolbar == null) return;
             int v = _activeView;
-            bool settingsGroup = (v == ViewSettings || v == ViewDoctor);
+            bool settingsGroup = (v == ViewGeneral || v == ViewCloudSync || v == ViewPricing || v == ViewDoctor);
             _pageToolbar.Visibility = settingsGroup ? Visibility.Collapsed : Visibility.Visible;
             if (settingsGroup) return;
 
@@ -2922,9 +2920,7 @@ namespace TokLens
             addDevBtn.Click += delegate(object s, RoutedEventArgs e)
             {
                 if (pop != null) pop.IsOpen = false;
-                SwitchActiveView(ViewSettings);
-                if (_settingsView != null)
-                    _settingsView.ScrollToSection(1);
+                SwitchActiveView(ViewCloudSync);
             };
             rootSp.Children.Add(addDevBtn);
 
@@ -4101,11 +4097,56 @@ namespace TokLens
             return g;
         }
 
-        // -------------------- 视图 5：同步与设置（直接内嵌 SyncSettingsView） --------------------
-        private UIElement BuildSettingsView()
+        // -------------------- 设置：常规 / 云同步 / 模型价格 --------------------
+        private UIElement BuildGeneralSettingsView()
+        {
+            GeneralSettingsCallbacks cb = new GeneralSettingsCallbacks();
+            cb.OnHomeDirectoryChanged = delegate(string newHomeDir)
+            {
+                if (!string.IsNullOrWhiteSpace(newHomeDir) && Directory.Exists(newHomeDir))
+                {
+                    _homeDir = newHomeDir.Trim();
+                    _lastTopRequestTs = 0L;
+                    _doctorLoadedOnce = false;
+                    if (_projectView != null) _projectView.SetHomeDirectory(_homeDir);
+                    if (_doctorView != null) _doctorView.SetHomeDirectory(_homeDir);
+                    if (_pricingView != null) _pricingView.Refresh(_homeDir, _latestUniqueModelNames, null);
+                    RebuildDirectoryWatchers(_homeDir);
+                    RunSilentScanAsync(_homeDir, true, false);
+                    ShowToastSafe("已切换扫描主目录", _homeDir, "info");
+                }
+            };
+            cb.OnFeaturesChanged = delegate()
+            {
+                ApplySubscriptionFeature();
+            };
+            cb.OnCreateBackup = delegate()
+            {
+                CreateManualTimeMachineSnapshot();
+            };
+            cb.OnOpenBackupPopover = delegate(UIElement anchor)
+            {
+                OpenTimeMachineBackupPopover(anchor);
+            };
+            cb.OnCheckUpdate = delegate()
+            {
+                OpenAppUpdateDialog();
+            };
+            cb.ShowToast = delegate(string title, string detail, string variant)
+            {
+                ShowToastSafe(title, detail, variant);
+            };
+
+            _generalView = new GeneralSettingsView(
+                _syncCfg,
+                delegate() { return _homeDir; },
+                cb);
+            return _generalView;
+        }
+
+        private UIElement BuildCloudSyncSettingsView()
         {
             SyncSettingsCallbacks callbacks = new SyncSettingsCallbacks();
-
             callbacks.OnSynced = delegate(SyncOutcome outcome)
             {
                 if (_scanResult != null)
@@ -4146,61 +4187,39 @@ namespace TokLens
                 UpdateCloudStatusUi();
                 RefreshDashboardView();
             };
-
-            callbacks.OnThemeOrCurrencyChanged = delegate()
-            {
-                ApplyPreferencesFromConfig();
-                RefreshDashboardView();
-            };
-
-            callbacks.OnFeaturesChanged = delegate()
-            {
-                ApplySubscriptionFeature();
-            };
-
-            callbacks.OnHomeDirectoryChanged = delegate(string newHomeDir)
-            {
-                if (!string.IsNullOrWhiteSpace(newHomeDir) && Directory.Exists(newHomeDir))
-                {
-                    _homeDir = newHomeDir.Trim();
-                    _lastTopRequestTs = 0L;
-                    _doctorLoadedOnce = false;
-                    if (_projectView != null)
-                        _projectView.SetHomeDirectory(_homeDir);
-                    RebuildDirectoryWatchers(_homeDir);
-                    RunSilentScanAsync(_homeDir, true, false);
-                    ShowToastSafe("已切换扫描主目录", _homeDir, "info");
-                }
-            };
-
-            callbacks.OnForceRefreshPricing = delegate()
-            {
-                StartCloudPricingSyncAsync(true);
-            };
-
-            callbacks.OnForceRefreshFx = delegate()
-            {
-                StartExchangeRateSyncAsync(true);
-            };
-
             callbacks.ShowToast = delegate(string title, string detail, string variant)
             {
                 ShowToastSafe(title, detail, variant);
             };
 
             _settingsView = new SyncSettingsView(
-                this,
                 _syncCfg,
                 delegate() { return _scanResult; },
-                delegate() { return _homeDir; },
                 callbacks);
-            _settingsView.AddHeaderAction(BuildSettingsMoreButton());
-            Button updateButton = ModernControlsFactory.CreateButton("检查应用更新", "secondary");
-            updateButton.ToolTip = "当前 " + AppConstants.VersionTag + " · 查看新版本、下载并重启安装";
-            updateButton.Click += delegate { OpenAppUpdateDialog(); };
-            _settingsView.AddHeaderAction(updateButton);
-
             return _settingsView;
+        }
+
+        private UIElement BuildPricingSettingsView()
+        {
+            _pricingView = new PricingView(
+                _homeDir,
+                _isDark,
+                _latestUniqueModelNames,
+                delegate()
+                {
+                    try
+                    {
+                        _remoteNodes = LoadAndRecalculateRemoteNodes(_syncCfg.MachineId, _homeDir, _syncCfg);
+                    }
+                    catch { }
+
+                    UpdatePriceUiState(false);
+                    RefreshDashboardView();
+                    if (!_skipAutoScan)
+                        RunSilentScanAsync(_homeDir, true, false);
+                },
+                ShowToastSafe);
+            return _pricingView;
         }
 
         // -------------------- 现代表格与通用辅助构建器 --------------------
@@ -4509,7 +4528,7 @@ namespace TokLens
             openStudioItem.Click += delegate(object s, RoutedEventArgs e)
             {
                 ModelRowView r = dg.SelectedItem as ModelRowView;
-                OpenPricingStudioDialog(r != null ? r.Model : null);
+                OpenPricingPage(r != null ? r.Model : null);
             };
             cm.Items.Add(openStudioItem);
 
@@ -4693,8 +4712,6 @@ namespace TokLens
                 if (p == page)
                     ModernControlsFactory.UpdateSegmentedGroup(_pageTabButtons[p], Array.IndexOf(PageViews[p], _activeView));
             }
-            if (_pricingRulesBtn != null)
-                _pricingRulesBtn.Visibility = page == PageSettings ? Visibility.Visible : Visibility.Collapsed;
         }
 
         // 「设备」页只在有不止一台设备可看时出现：已经有其他设备的数据，或者配置了同步。
@@ -4742,11 +4759,17 @@ namespace TokLens
                 if (_navLiveNewDot != null)
                     _navLiveNewDot.Visibility = Visibility.Collapsed;
             }
-            else if (_activeView == ViewSettings)
+            else if (_activeView == ViewGeneral)
             {
-                UpdateAutoStartButtonLabel();
-                if (_settingsView != null)
-                    _settingsView.RefreshDynamicStats();
+                if (_generalView != null) _generalView.Reload();
+            }
+            else if (_activeView == ViewCloudSync)
+            {
+                if (_settingsView != null) _settingsView.RefreshDynamicStats();
+            }
+            else if (_activeView == ViewPricing)
+            {
+                if (_pricingView != null) _pricingView.Refresh(_homeDir, _latestUniqueModelNames, null);
             }
 
             int activePage = PageOf(_activeView);
@@ -4805,7 +4828,7 @@ namespace TokLens
             get { return _syncCfg != null && _syncCfg.ShowSubscriptions; }
         }
 
-        // 订阅记账与回本比例是可选功能（同步与偏好 → 扫描与偏好），默认关闭：
+        // 订阅记账与回本比例是可选功能（设置 → 常规），默认关闭：
         // 关闭时侧栏和 Ctrl+5 都不出现该页，已登记的订阅记录保留。
         private void ApplySubscriptionFeature()
         {
@@ -4879,8 +4902,8 @@ namespace TokLens
             UpdateCloudStatusUi();
 
             RefreshDashboardView();
-            if (_settingsView != null)
-                _settingsView.ReloadFromConfig();
+            if (_settingsView != null) _settingsView.ReloadFromConfig();
+            if (_pricingView != null) _pricingView.SetTheme(_isDark);
         }
 
         private void UpdateFxUiState(bool isLive, bool isSyncing)
@@ -4919,7 +4942,7 @@ namespace TokLens
             string tInfo = string.IsNullOrEmpty(_priceSyncTime) ? "" : (" · " + _priceSyncTime);
             _sidebarPriceText.ToolTip = string.Format(
                 CultureInfo.InvariantCulture,
-                "模型价格库 {0:N0} 个模型（{1}{2}）· 点击打开计价规则",
+                "模型价格库 {0:N0} 个模型（{1}{2}）· 点击进入模型价格",
                 cnt,
                 _priceSyncSource,
                 tInfo);
@@ -4999,7 +5022,7 @@ namespace TokLens
             {
                 sub = "按实际付款记录，回本比例为估算";
             }
-            else if (_activeView != ViewSettings && _activeView != ViewDoctor && _activeView != ViewProjects)
+            else if (_activeView != ViewGeneral && _activeView != ViewCloudSync && _activeView != ViewPricing && _activeView != ViewDoctor && _activeView != ViewProjects)
             {
                 List<string> tags = new List<string>();
                 if (_selectedDate != null)
@@ -6456,9 +6479,7 @@ namespace TokLens
             addCard.Child = addSp;
             addCard.MouseLeftButtonUp += delegate(object s, MouseButtonEventArgs e)
             {
-                SwitchActiveView(ViewSettings);
-                if (_settingsView != null)
-                    _settingsView.ScrollToSection(1);
+                SwitchActiveView(ViewCloudSync);
             };
             _deviceCardsStack.Children.Add(addCard);
         }
@@ -7049,47 +7070,11 @@ namespace TokLens
             }
         }
 
-        private void OpenPricingStudioDialog(string initialModelId)
+        private void OpenPricingPage(string initialModelId)
         {
-            if (_skipAutoScan) return;
-            try
-            {
-                List<string> models = new List<string>();
-                if (!string.IsNullOrWhiteSpace(initialModelId))
-                    models.Add(initialModelId.Trim());
-                if (_latestUniqueModelNames != null)
-                {
-                    for (int i = 0; i < _latestUniqueModelNames.Count; i++)
-                        models.Add(_latestUniqueModelNames[i]);
-                }
-
-                PricingStudioWindow dlg = new PricingStudioWindow(
-                    this,
-                    _homeDir,
-                    _isDark,
-                    models,
-                    delegate()
-                    {
-                        try
-                        {
-                            PricingEngine pe = new PricingEngine(_homeDir);
-                            // Reprice local requests in the scanner; a daily bucket loses per-request
-                            // context lengths and must not overwrite logged charges or Fast evidence.
-                            _remoteNodes = LoadAndRecalculateRemoteNodes(_syncCfg.MachineId, _homeDir, _syncCfg);
-                        }
-                        catch { }
-
-                        UpdatePriceUiState(false);
-                        RefreshDashboardView();
-                        RunSilentScanAsync(_homeDir, true, false);
-                        ShowToastSafe("自定义模型单价已保存", "正在按单笔请求重新估值，保留日志金额和服务档位证据", "success");
-                    });
-                dlg.ShowDialog();
-            }
-            catch (Exception ex)
-            {
-                ShowToastSafe("打开模型单价工作台失败", ex.Message, "danger");
-            }
+            SwitchActiveView(ViewPricing);
+            if (_pricingView != null)
+                _pricingView.Refresh(_homeDir, _latestUniqueModelNames, initialModelId);
         }
 
         private void CreateManualTimeMachineSnapshot()
@@ -7269,8 +7254,8 @@ namespace TokLens
                         _localNode = SyncService.BuildLocalSnapshot(_scanResult, _syncCfg);
                         Program.ApplyNodeAliasToSnapshot(_localNode, _syncCfg);
                     }
-                    if (_settingsView != null)
-                        _settingsView.ReloadFromConfig();
+                    if (_generalView != null) _generalView.Reload();
+                    if (_settingsView != null) _settingsView.ReloadFromConfig();
                     RefreshDashboardView();
                     ShowToastSafe("时光机高水位无损合并完成", summary, "success");
                 }
@@ -7283,66 +7268,6 @@ namespace TokLens
             {
                 ShowToastSafe("恢复备份异常", ex.Message, "danger");
             }
-        }
-
-        private void UpdateAutoStartButtonLabel()
-        {
-            if (_autoStartMenuItem == null) return;
-            bool enabled = WindowsShellIntegration.IsAutoStartEnabled();
-            _autoStartMenuItem.Header = enabled ? "关闭开机自启" : "开启开机自启";
-        }
-
-        // 设置页右上角「更多」：不常用的本机动作收在这里，页面头部只留保存类按钮。
-        private Button BuildSettingsMoreButton()
-        {
-            Button moreBtn = ModernControlsFactory.CreateButton("更多", "secondary");
-            moreBtn.ToolTip = "时光机备份、开机自启";
-
-            ContextMenu menu = new ContextMenu();
-            MenuItem autoUpdateItem = new MenuItem { Header = "每天检查应用更新（仅提示）", IsCheckable = true, IsChecked = AppUpdatePreferences.Load().Enabled };
-            autoUpdateItem.Click += delegate
-            {
-                AppUpdatePreferences preferences = AppUpdatePreferences.Load();
-                preferences.Enabled = autoUpdateItem.IsChecked;
-                try { preferences.Save(); }
-                catch (Exception ex) { autoUpdateItem.IsChecked = !autoUpdateItem.IsChecked; ShowToastSafe("无法保存更新偏好", ex.Message, "warning"); }
-            };
-            menu.Items.Add(autoUpdateItem);
-            menu.Items.Add(new Separator());
-            MenuItem backupItem = new MenuItem { Header = "时光机备份…" };
-            backupItem.Click += delegate(object s, RoutedEventArgs e)
-            {
-                OpenTimeMachineBackupPopover(moreBtn);
-            };
-            menu.Items.Add(backupItem);
-
-            _autoStartMenuItem = new MenuItem { Header = "开启开机自启" };
-            _autoStartMenuItem.Click += delegate(object s, RoutedEventArgs e)
-            {
-                ToggleAutoStartFromUi();
-            };
-            menu.Items.Add(_autoStartMenuItem);
-
-            moreBtn.ContextMenu = menu;
-            moreBtn.Click += delegate(object s, RoutedEventArgs e)
-            {
-                UpdateAutoStartButtonLabel();
-                ModernControlsFactory.OpenMenuUnder(menu, moreBtn);
-            };
-            UpdateAutoStartButtonLabel();
-            return moreBtn;
-        }
-
-        private void ToggleAutoStartFromUi()
-        {
-            bool cur = WindowsShellIntegration.IsAutoStartEnabled();
-            string msg;
-            bool ok = WindowsShellIntegration.SetAutoStartEnabled(!cur, out msg);
-            UpdateAutoStartButtonLabel();
-            ShowToastSafe(
-                ok ? (!cur ? "已开启登录静默自启" : "已关闭开机自启") : "开机自启设置失败",
-                msg,
-                ok ? "success" : "warning");
         }
 
         // -------------------- 全局键盘快捷键支持 --------------------
@@ -7391,6 +7316,14 @@ namespace TokLens
                     {
                         _dailySearchInput.Focus();
                         _dailySearchInput.SelectAll();
+                    }
+                    else if (_activeView == ViewPricing && _pricingView != null)
+                    {
+                        _pricingView.FocusSearch();
+                    }
+                    else if (_activeView == ViewDoctor && _doctorView != null)
+                    {
+                        _doctorView.FocusSearch();
                     }
                     else
                     {

@@ -2207,50 +2207,26 @@ namespace TokLens
 
     /// <summary>
     /// 环境体检与数据源诊断中心视图（对标 Raycast Diagnostics / OrbStack System Info / brew doctor）。
-    /// 支持深浅双主题动态资源无缝切换、分类胶囊过滤、关键词实时检索、一键复制脱敏报告与资源管理器定位。
+    /// <summary>
+    /// 「设置 → 环境检查」页：一行紧凑摘要 + 默认聚焦已安装与异常探针的精简诊断表。
     /// </summary>
     public sealed class DiagnosticsDoctorView : Border
     {
-        private readonly string _homeDir;
+        private string _homeDir;
         private readonly Action<string, string, string> _toastCallback;
 
         private bool _isDark;
         private int _isRefreshingFlag;
-        private int _activeCategoryIndex;
+        private int _activeCategoryIndex; // 0 = 已安装与异常(默认), 1 = 全部
         private string _searchKeyword;
         private SystemHealthReport _currentReport;
         private List<DataSourceProbeItem> _filteredItems;
 
-        // 顶部健康度总览横幅控件
-        private Border _bannerBorder;
-        private Border _bannerIconBox;
-        private WpfPath _bannerIconPath;
-        private TextBlock _bannerHeadlineText;
-        private TextBlock _bannerSubText;
-        private Border _bannerElapsedPill;
-        private TextBlock _bannerElapsedText;
+        // 顶部单行摘要与动作
         private Border _bannerStatusBadge;
         private Ellipse _bannerStatusDot;
         private TextBlock _bannerStatusText;
-
-        // 4 张核心系统探针卡片控件
-        private TextBlock _cardSourcesMainText;
-        private TextBlock _cardSourcesSubText;
-        private TextBlock _cardWslMainText;
-        private TextBlock _cardWslSubText;
-        private TextBlock _cardLedgerMainText;
-        private TextBlock _cardLedgerSubText;
-        private Button _openConfigDirBtn;
-        private TextBlock _cardGhMainText;
-        private TextBlock _cardGhSubText;
-        private Border _cardGhBorder;
-
-        // 中部筛选与动作栏控件
-        private Button[] _categorySegButtons;
-        private TextBox _searchInputBox;
-        private TextBlock _searchWatermarkText;
-        private Button _searchClearBtn;
-        private TextBlock _matchCountText;
+        private TextBlock _summaryFactText;
         private Button _refreshBtn;
         private TextBlock _refreshBtnText;
         private Button _copySummaryBtn;
@@ -2258,30 +2234,23 @@ namespace TokLens
         private TextBlock _copyBtnText;
         private DispatcherTimer _copyResetTimer;
 
-        // 底部探针矩阵表与空状态层
+        // 筛选栏
+        private Button[] _categorySegButtons;
+        private TextBox _searchInputBox;
+        private TextBlock _searchWatermarkText;
+        private Button _searchClearBtn;
+        private TextBlock _matchCountText;
+
+        // 底部探针表
         private DataGrid _probeDataGrid;
         private Border _emptyFilterOverlay;
         private TextBlock _emptyFilterHintText;
 
-        public SystemHealthReport CurrentReport
-        {
-            get { return _currentReport; }
-        }
+        public SystemHealthReport CurrentReport { get { return _currentReport; } }
+        public int FilteredItemCount { get { return _filteredItems != null ? _filteredItems.Count : 0; } }
 
-        public int FilteredItemCount
-        {
-            get { return _filteredItems != null ? _filteredItems.Count : 0; }
-        }
-
-        public DiagnosticsDoctorView()
-            : this(null, null)
-        {
-        }
-
-        public DiagnosticsDoctorView(string homeDir)
-            : this(homeDir, null)
-        {
-        }
+        public DiagnosticsDoctorView() : this(null, null) { }
+        public DiagnosticsDoctorView(string homeDir) : this(homeDir, null) { }
 
         public DiagnosticsDoctorView(string homeDir, Action<string, string, string> toastCallback)
         {
@@ -2300,48 +2269,48 @@ namespace TokLens
             Background = Brushes.Transparent;
             Padding = new Thickness(16, 12, 16, 12);
 
-            _copyResetTimer = new DispatcherTimer();
-            _copyResetTimer.Interval = TimeSpan.FromMilliseconds(1800);
+            _copyResetTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(1800) };
             _copyResetTimer.Tick += OnCopyResetTimerTick;
 
             Child = BuildRootLayout();
         }
 
-        /// <summary>
-        /// 异步后台执行环境体检并在完成后自动切回 UI 线程渲染报告。
-        /// </summary>
+        public void SetHomeDirectory(string homeDir)
+        {
+            if (!string.IsNullOrWhiteSpace(homeDir))
+                _homeDir = homeDir.Trim();
+        }
+
+        public void FocusSearch()
+        {
+            if (_searchInputBox != null)
+            {
+                _searchInputBox.Focus();
+                _searchInputBox.SelectAll();
+            }
+        }
+
         public void RefreshDoctor(bool isDark)
         {
             _isDark = isDark;
-
             if (Interlocked.CompareExchange(ref _isRefreshingFlag, 1, 0) != 0)
                 return;
 
             SetRefreshingVisualState(true);
-
             string targetHome = _homeDir;
             bool capturedDark = isDark;
 
             ThreadPool.QueueUserWorkItem(delegate(object state)
             {
                 SystemHealthReport freshReport = null;
-                try
-                {
-                    freshReport = TelemetryDoctorScanner.RunDiagnostics(targetHome);
-                }
-                catch
-                {
-                    freshReport = new SystemHealthReport();
-                }
+                try { freshReport = TelemetryDoctorScanner.RunDiagnostics(targetHome); }
+                catch { freshReport = new SystemHealthReport(); }
 
                 try
                 {
                     Dispatcher.BeginInvoke(DispatcherPriority.Normal, new Action(delegate()
                     {
-                        try
-                        {
-                            RenderReport(freshReport, capturedDark);
-                        }
+                        try { RenderReport(freshReport, capturedDark); }
                         finally
                         {
                             Interlocked.Exchange(ref _isRefreshingFlag, 0);
@@ -2356,23 +2325,17 @@ namespace TokLens
             });
         }
 
-        /// <summary>
-        /// 同步渲染给定的系统体检报告（同时作为 --self-test-ui 无头自检直接验证入口）。
-        /// </summary>
         public void RenderReport(SystemHealthReport report, bool isDark)
         {
             _isDark = isDark;
             _currentReport = report ?? new SystemHealthReport();
-
-            UpdateHealthBanner(_currentReport);
-            UpdateProbeSummaryCards(_currentReport);
+            UpdateSummaryStrip(_currentReport);
             ApplyFilterAndRefreshGrid();
         }
 
         public void SetCategoryFilter(int categoryIndex)
         {
-            if (categoryIndex < 0 || categoryIndex > 4)
-                categoryIndex = 0;
+            if (categoryIndex < 0 || categoryIndex > 1) categoryIndex = 0;
             _activeCategoryIndex = categoryIndex;
             ModernControlsFactory.UpdateSegmentedGroup(_categorySegButtons, _activeCategoryIndex);
             ApplyFilterAndRefreshGrid();
@@ -2388,291 +2351,131 @@ namespace TokLens
             ApplyFilterAndRefreshGrid();
         }
 
-        // ==================== UI 构建 ====================
-
         private UIElement BuildRootLayout()
         {
             Grid root = new Grid();
-            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Row 0: 顶部健康度总览横幅
-            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Row 1: 4 张系统探针卡片
-            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Row 2: 中部筛选与动作工具栏
-            root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // Row 3: 底部探针矩阵表
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Row 0: 单行摘要与动作
+            root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto }); // Row 1: 筛选条
+            root.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) }); // Row 2: 探针表
 
-            UIElement banner = BuildHealthBanner();
-            Grid.SetRow(banner, 0);
-            root.Children.Add(banner);
-
-            UIElement cards = BuildFourSummaryCards();
-            Grid.SetRow(cards, 1);
-            root.Children.Add(cards);
+            UIElement strip = BuildSummaryStrip();
+            Grid.SetRow(strip, 0);
+            root.Children.Add(strip);
 
             UIElement filterBar = BuildFilterToolbar();
-            Grid.SetRow(filterBar, 2);
+            Grid.SetRow(filterBar, 1);
             root.Children.Add(filterBar);
 
             UIElement matrixCard = BuildProbeMatrixCard();
-            Grid.SetRow(matrixCard, 3);
+            Grid.SetRow(matrixCard, 2);
             root.Children.Add(matrixCard);
 
             return root;
         }
 
-        private UIElement BuildHealthBanner()
+        private UIElement BuildSummaryStrip()
         {
-            _bannerBorder = ModernControlsFactory.CreateCard(new Thickness(14, 10, 14, 10));
-            _bannerBorder.Margin = new Thickness(0, 0, 0, 10);
+            Border card = ModernControlsFactory.CreateCard(new Thickness(14, 9, 14, 9));
+            card.Margin = new Thickness(0, 0, 0, 10);
 
-            Grid g = new Grid();
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            DockPanel dock = new DockPanel();
 
-            // 左侧状态盾牌/警示图标框
-            _bannerIconBox = new Border();
-            _bannerIconBox.Width = 34;
-            _bannerIconBox.Height = 34;
-            _bannerIconBox.CornerRadius = new CornerRadius(8);
-            _bannerIconBox.BorderThickness = new Thickness(1);
-            _bannerIconBox.Margin = new Thickness(0, 0, 12, 0);
-            _bannerIconBox.VerticalAlignment = VerticalAlignment.Center;
-            _bannerIconBox.SetResourceReference(Border.BackgroundProperty, "SemanticSuccessBg");
-            _bannerIconBox.SetResourceReference(Border.BorderBrushProperty, "SemanticSuccessBorder");
+            // 右侧动作按钮组
+            StackPanel actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(12, 0, 0, 0) };
+            DockPanel.SetDock(actions, Dock.Right);
 
-            _bannerIconPath = UiIcons.CreateIcon(UiIcons.Shield, 16, "SemanticSuccess");
-            _bannerIconBox.Child = _bannerIconPath;
-            Grid.SetColumn(_bannerIconBox, 0);
-            g.Children.Add(_bannerIconBox);
+            Button openDirBtn = ModernControlsFactory.CreateButton("数据目录", "ghost");
+            openDirBtn.Height = 28;
+            openDirBtn.Margin = new Thickness(0, 0, 6, 0);
+            openDirBtn.ToolTip = "打开配置与本地账本目录 (" + SyncService.AppConfigDir + ")";
+            openDirBtn.Click += delegate(object s, RoutedEventArgs e) { OpenPathInExplorer(SyncService.AppConfigDir); };
+            actions.Children.Add(openDirBtn);
 
-            // 中间主副标题
-            StackPanel titleStack = new StackPanel();
-            titleStack.VerticalAlignment = VerticalAlignment.Center;
+            _copySummaryBtn = ModernControlsFactory.CreateButton("", "secondary");
+            _copySummaryBtn.Height = 28;
+            _copySummaryBtn.Margin = new Thickness(0, 0, 6, 0);
+            StackPanel copyContent = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            _copyBtnIcon = UiIcons.CreateIcon(UiIcons.Copy, 12, null);
+            _copyBtnIcon.Margin = new Thickness(0, 0, 5, 0);
+            copyContent.Children.Add(_copyBtnIcon);
+            _copyBtnText = new TextBlock { Text = "复制摘要", VerticalAlignment = VerticalAlignment.Center };
+            copyContent.Children.Add(_copyBtnText);
+            _copySummaryBtn.Content = copyContent;
+            _copySummaryBtn.ToolTip = "复制脱敏诊断摘要（隐藏用户名与令牌）";
+            _copySummaryBtn.Click += OnCopySummaryClicked;
+            actions.Children.Add(_copySummaryBtn);
 
-            _bannerHeadlineText = new TextBlock();
-            _bannerHeadlineText.Text = "环境检查";
-            _bannerHeadlineText.FontFamily = DesignSystem.FontUi;
-            _bannerHeadlineText.FontSize = DesignSystem.TextLabel;
-            _bannerHeadlineText.FontWeight = FontWeights.SemiBold;
-            _bannerHeadlineText.TextTrimming = TextTrimming.CharacterEllipsis;
-            _bannerHeadlineText.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
-            titleStack.Children.Add(_bannerHeadlineText);
+            _refreshBtn = ModernControlsFactory.CreateButton("", "primary");
+            _refreshBtn.Height = 28;
+            StackPanel refContent = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+            WpfPath refIcon = UiIcons.CreateIcon(UiIcons.Refresh, 12, null);
+            refIcon.Margin = new Thickness(0, 0, 5, 0);
+            refContent.Children.Add(refIcon);
+            _refreshBtnText = new TextBlock { Text = "重新检查", VerticalAlignment = VerticalAlignment.Center };
+            refContent.Children.Add(_refreshBtnText);
+            _refreshBtn.Content = refContent;
+            _refreshBtn.Click += delegate(object s, RoutedEventArgs e) { RefreshDoctor(_isDark); };
+            actions.Children.Add(_refreshBtn);
 
-            _bannerSubText = new TextBlock();
-            _bannerSubText.Text = "尚未检查。会检查本机 AI 工具日志目录、WSL2、本地账本与 GitHub CLI 环境变量。";
-            _bannerSubText.FontFamily = DesignSystem.FontUi;
-            _bannerSubText.FontSize = DesignSystem.TextCaption;
-            _bannerSubText.Margin = new Thickness(0, 2, 0, 0);
-            _bannerSubText.TextTrimming = TextTrimming.CharacterEllipsis;
-            _bannerSubText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-            titleStack.Children.Add(_bannerSubText);
+            dock.Children.Add(actions);
 
-            Grid.SetColumn(titleStack, 1);
-            g.Children.Add(titleStack);
-
-            // 右侧耗时胶囊 + 健康状态徽章
-            StackPanel rightBadges = new StackPanel();
-            rightBadges.Orientation = Orientation.Horizontal;
-            rightBadges.VerticalAlignment = VerticalAlignment.Center;
-            rightBadges.Margin = new Thickness(12, 0, 0, 0);
-
-            _bannerElapsedPill = new Border();
-            _bannerElapsedPill.Height = 20;
-            _bannerElapsedPill.CornerRadius = new CornerRadius(4);
-            _bannerElapsedPill.Padding = new Thickness(7, 0, 7, 0);
-            _bannerElapsedPill.Margin = new Thickness(0, 0, 8, 0);
-            _bannerElapsedPill.BorderThickness = new Thickness(1);
-            _bannerElapsedPill.VerticalAlignment = VerticalAlignment.Center;
-            _bannerElapsedPill.SetResourceReference(Border.BackgroundProperty, "BgSurface");
-            _bannerElapsedPill.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
-
-            _bannerElapsedText = new TextBlock();
-            _bannerElapsedText.Text = "耗时 — ms";
-            _bannerElapsedText.FontSize = DesignSystem.TextCaption;
-            _bannerElapsedText.VerticalAlignment = VerticalAlignment.Center;
-            ModernControlsFactory.EnableTabularNumbers(_bannerElapsedText, true);
-            _bannerElapsedText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-            _bannerElapsedPill.Child = _bannerElapsedText;
-            rightBadges.Children.Add(_bannerElapsedPill);
-
+            // 左侧状态徽章 + 一行关键事实
+            DockPanel left = new DockPanel { VerticalAlignment = VerticalAlignment.Center };
             _bannerStatusBadge = ModernControlsFactory.CreateStatusBadge("未检查", "neutral", out _bannerStatusText, out _bannerStatusDot);
-            rightBadges.Children.Add(_bannerStatusBadge);
+            _bannerStatusBadge.Margin = new Thickness(0, 0, 10, 0);
+            _bannerStatusBadge.VerticalAlignment = VerticalAlignment.Center;
+            DockPanel.SetDock(_bannerStatusBadge, Dock.Left);
+            left.Children.Add(_bannerStatusBadge);
 
-            Grid.SetColumn(rightBadges, 2);
-            g.Children.Add(rightBadges);
-
-            _bannerBorder.Child = g;
-            return _bannerBorder;
-        }
-
-        private UIElement BuildFourSummaryCards()
-        {
-            UniformGrid ug = new UniformGrid();
-            ug.Columns = 4;
-            ug.Rows = 1;
-            ug.Margin = new Thickness(0, 0, 0, 10);
-
-            // 卡片 1：已激活 AI 数据源
-            Border card1 = CreateMetricCardShell(
-                UiIcons.Activity,
-                "AccentText",
-                "已激活 AI 数据源",
-                null,
-                out _cardSourcesMainText,
-                out _cardSourcesSubText);
-            card1.Margin = new Thickness(0, 0, 5, 0);
-            _cardSourcesMainText.Text = "0 / 24 个工具活跃";
-            _cardSourcesSubText.Text = "累计日志体积：0 B";
-            ug.Children.Add(card1);
-
-            // 卡片 2：WSL2 跨子系统穿透
-            Border card2 = CreateMetricCardShell(
-                UiIcons.Terminal,
-                "SemanticSuccess",
-                "WSL2 跨子系统穿透",
-                null,
-                out _cardWslMainText,
-                out _cardWslSubText);
-            card2.Margin = new Thickness(5, 0, 5, 0);
-            _cardWslMainText.Text = "未启用 WSL2";
-            _cardWslSubText.Text = "注册表 Lxss 未检测到发行版";
-            ug.Children.Add(card2);
-
-            // 卡片 3：本地 SQLite 账本引擎（带「打开配置目录」快捷按钮）
-            _openConfigDirBtn = ModernControlsFactory.CreateButton("打开配置目录", "secondary");
-            _openConfigDirBtn.Height = 22;
-            _openConfigDirBtn.FontSize = DesignSystem.TextCaption;
-            _openConfigDirBtn.Padding = new Thickness(7, 0, 7, 0);
-            _openConfigDirBtn.ToolTip = "在资源管理器中打开 TokLens 本地账本与配置目录 (%APPDATA%\\TokLens)";
-            _openConfigDirBtn.Click += delegate(object s, RoutedEventArgs e)
+            _summaryFactText = new TextBlock
             {
-                OpenPathInExplorer(SyncService.AppConfigDir);
+                Text = "尚未运行检查 · 点击右侧「重新检查」扫描本机 AI 工具日志、WSL2 与 GitHub CLI 状态",
+                FontFamily = DesignSystem.FontUi,
+                FontSize = DesignSystem.TextBody,
+                VerticalAlignment = VerticalAlignment.Center,
+                TextTrimming = TextTrimming.CharacterEllipsis
             };
+            _summaryFactText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            left.Children.Add(_summaryFactText);
 
-            Border card3 = CreateMetricCardShell(
-                UiIcons.Models,
-                "AccentText",
-                "本地账本",
-                _openConfigDirBtn,
-                out _cardLedgerMainText,
-                out _cardLedgerSubText);
-            card3.Margin = new Thickness(5, 0, 5, 0);
-            _cardLedgerMainText.Text = "toklens.db · 0 B";
-            _cardLedgerSubText.Text = "自定义单价覆盖：0 条";
-            ug.Children.Add(card3);
-
-            // 卡片 4：GitHub CLI 与环境变量体检
-            _cardGhBorder = CreateMetricCardShell(
-                UiIcons.Key,
-                "SemanticSuccess",
-                "GitHub CLI 与环境变量",
-                null,
-                out _cardGhMainText,
-                out _cardGhSubText);
-            _cardGhBorder.Margin = new Thickness(5, 0, 0, 0);
-            _cardGhMainText.Text = "待检测凭据环境";
-            _cardGhSubText.Text = "自动排查 GH_TOKEN 覆盖与多设备差异";
-            ug.Children.Add(_cardGhBorder);
-
-            return ug;
-        }
-
-        private static Border CreateMetricCardShell(
-            string iconData,
-            string iconColorKey,
-            string title,
-            UIElement topRightAction,
-            out TextBlock mainValueOut,
-            out TextBlock subHintOut)
-        {
-            Border card = ModernControlsFactory.CreateCard(new Thickness(13, 10, 13, 10));
-
-            StackPanel sp = new StackPanel();
-
-            Grid headerRow = new Grid();
-            headerRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            headerRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            headerRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-            WpfPath icon = UiIcons.CreateIcon(iconData, 13, iconColorKey);
-            icon.Margin = new Thickness(0, 0, 6, 0);
-            Grid.SetColumn(icon, 0);
-            headerRow.Children.Add(icon);
-
-            TextBlock titleTb = new TextBlock();
-            titleTb.Text = title;
-            titleTb.FontFamily = DesignSystem.FontUi;
-            titleTb.FontSize = DesignSystem.TextCaption;
-            titleTb.FontWeight = FontWeights.Medium;
-            titleTb.VerticalAlignment = VerticalAlignment.Center;
-            titleTb.TextTrimming = TextTrimming.CharacterEllipsis;
-            titleTb.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-            Grid.SetColumn(titleTb, 1);
-            headerRow.Children.Add(titleTb);
-
-            if (topRightAction != null)
-            {
-                Grid.SetColumn(topRightAction, 2);
-                headerRow.Children.Add(topRightAction);
-            }
-
-            sp.Children.Add(headerRow);
-
-            mainValueOut = new TextBlock();
-            mainValueOut.FontSize = DesignSystem.TextTitle;
-            mainValueOut.FontWeight = FontWeights.Bold;
-            mainValueOut.Margin = new Thickness(0, 7, 0, 3);
-            mainValueOut.TextTrimming = TextTrimming.CharacterEllipsis;
-            ModernControlsFactory.EnableTabularNumbers(mainValueOut, false);
-            mainValueOut.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
-            sp.Children.Add(mainValueOut);
-
-            subHintOut = new TextBlock();
-            subHintOut.FontFamily = DesignSystem.FontUi;
-            subHintOut.FontSize = DesignSystem.TextCaption;
-            subHintOut.TextTrimming = TextTrimming.CharacterEllipsis;
-            subHintOut.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-            sp.Children.Add(subHintOut);
-
-            card.Child = sp;
+            dock.Children.Add(left);
+            card.Child = dock;
             return card;
         }
 
         private UIElement BuildFilterToolbar()
         {
-            Grid bar = new Grid();
-            bar.Margin = new Thickness(0, 0, 0, 10);
-            bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            bar.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            bar.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            DockPanel bar = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
 
-            // 1. 分类筛选胶囊组（全部 / 仅已激活 / 原生 CLI / IDE 与插件 / WSL2）
-            string[] segLabels = new string[] { "全部", "仅已激活", "原生 CLI", "IDE 与插件", "WSL2" };
+            _matchCountText = new TextBlock
+            {
+                Text = "",
+                FontFamily = DesignSystem.FontUi,
+                FontSize = DesignSystem.TextCaption,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            _matchCountText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            DockPanel.SetDock(_matchCountText, Dock.Right);
+            bar.Children.Add(_matchCountText);
+
+            StackPanel left = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
+
+            string[] segLabels = new string[] { "已安装与异常", "全部" };
             _categorySegButtons = new Button[segLabels.Length];
             Border segBox = ModernControlsFactory.CreateSegmentedContainer();
             StackPanel segSp = (StackPanel)segBox.Child;
-
             for (int i = 0; i < segLabels.Length; i++)
             {
-                int capturedIdx = i;
-                Button segBtn = ModernControlsFactory.CreateSegmentedItem(segLabels[i]);
-                segBtn.Click += delegate(object s, RoutedEventArgs e)
-                {
-                    SetCategoryFilter(capturedIdx);
-                };
-                _categorySegButtons[i] = segBtn;
-                segSp.Children.Add(segBtn);
+                int idx = i;
+                Button btn = ModernControlsFactory.CreateSegmentedItem(segLabels[i]);
+                btn.Click += delegate(object s, RoutedEventArgs e) { SetCategoryFilter(idx); };
+                _categorySegButtons[i] = btn;
+                segSp.Children.Add(btn);
             }
             ModernControlsFactory.UpdateSegmentedGroup(_categorySegButtons, 0);
-            Grid.SetColumn(segBox, 0);
-            bar.Children.Add(segBox);
+            left.Children.Add(segBox);
 
-            // 2. 关键词实时搜索框（带图标、水印与一键清空按钮）
-            Grid searchWrap = new Grid();
-            searchWrap.Width = 230;
-            searchWrap.Height = 28;
-            searchWrap.Margin = new Thickness(10, 0, 0, 0);
-            searchWrap.VerticalAlignment = VerticalAlignment.Center;
-
+            Grid searchWrap = new Grid { Width = 230, Height = 28, Margin = new Thickness(10, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center };
             _searchInputBox = ModernControlsFactory.CreateTextInput("", 28);
             _searchInputBox.Padding = new Thickness(26, 0, 24, 0);
             _searchInputBox.TextChanged += delegate(object s, TextChangedEventArgs e)
@@ -2689,76 +2492,29 @@ namespace TokLens
             searchIcon.IsHitTestVisible = false;
             searchWrap.Children.Add(searchIcon);
 
-            _searchWatermarkText = new TextBlock();
-            _searchWatermarkText.Text = "搜索工具名、路径、排障说明...";
-            _searchWatermarkText.FontFamily = DesignSystem.FontUi;
-            _searchWatermarkText.FontSize = DesignSystem.TextCaption;
-            _searchWatermarkText.Margin = new Thickness(28, 0, 24, 0);
-            _searchWatermarkText.VerticalAlignment = VerticalAlignment.Center;
-            _searchWatermarkText.IsHitTestVisible = false;
+            _searchWatermarkText = new TextBlock
+            {
+                Text = "搜索工具或说明... (Ctrl+F)",
+                FontFamily = DesignSystem.FontUi,
+                FontSize = DesignSystem.TextCaption,
+                Margin = new Thickness(28, 0, 24, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                IsHitTestVisible = false
+            };
             _searchWatermarkText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             searchWrap.Children.Add(_searchWatermarkText);
 
-            _searchClearBtn = ModernControlsFactory.CreateIconGhostButton("M 3.5,3.5 L 12.5,12.5 M 12.5,3.5 L 3.5,12.5", "清空搜索词");
+            _searchClearBtn = ModernControlsFactory.CreateIconGhostButton("M 3.5,3.5 L 12.5,12.5 M 12.5,3.5 L 3.5,12.5", "清空搜索");
             _searchClearBtn.Width = 22;
             _searchClearBtn.Height = 22;
             _searchClearBtn.HorizontalAlignment = HorizontalAlignment.Right;
             _searchClearBtn.Margin = new Thickness(0, 0, 3, 0);
             _searchClearBtn.Visibility = Visibility.Collapsed;
-            _searchClearBtn.Click += delegate(object s, RoutedEventArgs e)
-            {
-                SetSearchKeyword("");
-            };
+            _searchClearBtn.Click += delegate(object s, RoutedEventArgs e) { SetSearchKeyword(""); };
             searchWrap.Children.Add(_searchClearBtn);
 
-            Grid.SetColumn(searchWrap, 1);
-            bar.Children.Add(searchWrap);
-
-            // 3. 右侧匹配条数 +「重新体检」+「复制诊断摘要」按钮
-            StackPanel actionStack = new StackPanel();
-            actionStack.Orientation = Orientation.Horizontal;
-            actionStack.VerticalAlignment = VerticalAlignment.Center;
-
-            _matchCountText = new TextBlock();
-            _matchCountText.Text = "共 0 项探针";
-            _matchCountText.FontFamily = DesignSystem.FontUi;
-            _matchCountText.FontSize = DesignSystem.TextCaption;
-            _matchCountText.Margin = new Thickness(0, 0, 12, 0);
-            _matchCountText.VerticalAlignment = VerticalAlignment.Center;
-            _matchCountText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-            actionStack.Children.Add(_matchCountText);
-
-            _refreshBtn = ModernControlsFactory.CreateButton("", "primary");
-            StackPanel refContent = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            WpfPath refIcon = UiIcons.CreateIcon(UiIcons.Refresh, 13, null);
-            refIcon.Margin = new Thickness(0, 0, 6, 0);
-            refContent.Children.Add(refIcon);
-            _refreshBtnText = new TextBlock { Text = "重新检查", VerticalAlignment = VerticalAlignment.Center };
-            refContent.Children.Add(_refreshBtnText);
-            _refreshBtn.Content = refContent;
-            _refreshBtn.Margin = new Thickness(0, 0, 8, 0);
-            _refreshBtn.ToolTip = "重新探测所有 AI 数据源目录、WSL2 子系统与环境变量状态";
-            _refreshBtn.Click += delegate(object s, RoutedEventArgs e)
-            {
-                RefreshDoctor(_isDark);
-            };
-            actionStack.Children.Add(_refreshBtn);
-
-            _copySummaryBtn = ModernControlsFactory.CreateButton("", "secondary");
-            StackPanel copyContent = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            _copyBtnIcon = UiIcons.CreateIcon(UiIcons.Copy, 13, null);
-            _copyBtnIcon.Margin = new Thickness(0, 0, 6, 0);
-            copyContent.Children.Add(_copyBtnIcon);
-            _copyBtnText = new TextBlock { Text = "复制诊断摘要", VerticalAlignment = VerticalAlignment.Center };
-            copyContent.Children.Add(_copyBtnText);
-            _copySummaryBtn.Content = copyContent;
-            _copySummaryBtn.ToolTip = "复制检查结果（已隐藏用户名与令牌）";
-            _copySummaryBtn.Click += OnCopySummaryClicked;
-            actionStack.Children.Add(_copySummaryBtn);
-
-            Grid.SetColumn(actionStack, 3);
-            bar.Children.Add(actionStack);
-
+            left.Children.Add(searchWrap);
+            bar.Children.Add(left);
             return bar;
         }
 
@@ -2768,95 +2524,34 @@ namespace TokLens
             shell.ClipToBounds = true;
 
             Grid host = new Grid();
-
             _probeDataGrid = ModernDataGridFactory.CreateModernDataGrid();
-            _probeDataGrid.RowHeight = 36;
+            _probeDataGrid.RowHeight = 35;
             _probeDataGrid.MouseDoubleClick += OnDataGridMouseDoubleClick;
 
-            // 列 1：状态圆点徽章（动态主题感知 DataTrigger）
             _probeDataGrid.Columns.Add(CreateStatusPillColumn());
-
-            // 列 2：数据源名称（悬浮显示完整路径与排障详情）
             _probeDataGrid.Columns.Add(CreateProbeNameColumn());
-
-            // 列 3：分类胶囊
-            DataGridColumn categoryCol = ModernDataGridFactory.MakeBadgeColumn(
-                "分类",
-                "Category",
-                "Category",
-                new DataGridLength(124));
-            _probeDataGrid.Columns.Add(categoryCol);
-
-            // 列 4：文件数
-            _probeDataGrid.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(
-                _probeDataGrid,
-                "文件数",
-                "FileCountText",
-                "FileCount",
-                new DataGridLength(70),
-                true,
-                true,
-                false));
-
-            // 列 5：占用体积
-            DataGridColumn sizeCol = ModernDataGridFactory.MakeTextOrMonoColumn(
-                _probeDataGrid,
-                "占用体积",
-                "TotalSizeText",
-                "TotalBytes",
-                new DataGridLength(88),
-                true,
-                true,
-                false);
-            _probeDataGrid.Columns.Add(sizeCol);
-
-            // 列 6：最近更新
-            DataGridColumn updatedCol = ModernDataGridFactory.MakeTextOrMonoColumn(
-                _probeDataGrid,
-                "最近更新",
-                "LastModifiedText",
-                "LastModifiedTicks",
-                new DataGridLength(112),
-                true,
-                true,
-                false);
+            _probeDataGrid.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(_probeDataGrid, "文件数", "FileCountText", "FileCount", new DataGridLength(68), true, true, false));
+            DataGridColumn updatedCol = ModernDataGridFactory.MakeTextOrMonoColumn(_probeDataGrid, "最近更新", "LastModifiedText", "LastModifiedTicks", new DataGridLength(110), true, true, false);
             _probeDataGrid.Columns.Add(updatedCol);
-
-            // 列 7：诊断说明（自适应剩余空间 + 悬浮完整详情 ToolTip）
-            // 排障提示是这张表的重点：窗口变窄时先收起体积、分类、更新时间，不去挤它。
             DataGridColumn hintCol = CreateDiagnosticHintColumn();
-            hintCol.MinWidth = 190.0;
+            hintCol.MinWidth = 200.0;
             _probeDataGrid.Columns.Add(hintCol);
-            ModernDataGridFactory.EnableResponsiveColumns(_probeDataGrid, sizeCol, categoryCol, updatedCol);
-
-            // 列 8：快捷打开目录按钮
+            ModernDataGridFactory.EnableResponsiveColumns(_probeDataGrid, updatedCol);
             _probeDataGrid.Columns.Add(CreateOpenFolderActionColumn());
 
             host.Children.Add(_probeDataGrid);
 
-            // 空筛选结果覆盖提示
-            _emptyFilterOverlay = new Border();
-            _emptyFilterOverlay.Background = Brushes.Transparent;
-            _emptyFilterOverlay.IsHitTestVisible = false;
-            _emptyFilterOverlay.Visibility = Visibility.Collapsed;
-
-            StackPanel emptySp = new StackPanel();
-            emptySp.HorizontalAlignment = HorizontalAlignment.Center;
-            emptySp.VerticalAlignment = VerticalAlignment.Center;
-
-            WpfPath emptyIcon = UiIcons.CreateIcon(UiIcons.Search, 24, "FgMuted");
-            emptyIcon.Margin = new Thickness(0, 0, 0, 8);
-            emptySp.Children.Add(emptyIcon);
-
-            _emptyFilterHintText = new TextBlock();
-            _emptyFilterHintText.Text = "当前筛选条件下没有匹配的数据源探针";
-            _emptyFilterHintText.FontFamily = DesignSystem.FontUi;
-            _emptyFilterHintText.FontSize = DesignSystem.TextLabel;
-            _emptyFilterHintText.HorizontalAlignment = HorizontalAlignment.Center;
+            _emptyFilterOverlay = new Border { Background = Brushes.Transparent, IsHitTestVisible = false, Visibility = Visibility.Collapsed };
+            _emptyFilterHintText = new TextBlock
+            {
+                Text = "当前筛选下暂无条目，可切换到「全部」查看支持的工具列表",
+                FontFamily = DesignSystem.FontUi,
+                FontSize = DesignSystem.TextBody,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
             _emptyFilterHintText.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-            emptySp.Children.Add(_emptyFilterHintText);
-
-            _emptyFilterOverlay.Child = emptySp;
+            _emptyFilterOverlay.Child = _emptyFilterHintText;
             host.Children.Add(_emptyFilterOverlay);
 
             shell.Child = host;
@@ -2865,18 +2560,15 @@ namespace TokLens
 
         private static DataGridTemplateColumn CreateStatusPillColumn()
         {
-            DataGridTemplateColumn col = new DataGridTemplateColumn();
-            col.Header = "状态";
-            col.SortMemberPath = "StatusRank";
-            col.Width = new DataGridLength(148);
-
+            DataGridTemplateColumn col = new DataGridTemplateColumn { Header = "状态", SortMemberPath = "StatusRank", Width = new DataGridLength(142) };
             DataTemplate dt = new DataTemplate();
+
             FrameworkElementFactory pill = new FrameworkElementFactory(typeof(Border), "StatusPill");
             pill.SetValue(Border.CornerRadiusProperty, new CornerRadius(4));
             pill.SetValue(Border.PaddingProperty, new Thickness(7, 2, 7, 2));
             pill.SetValue(Border.BorderThicknessProperty, new Thickness(1));
-            pill.SetValue(Border.HorizontalAlignmentProperty, HorizontalAlignment.Left);
-            pill.SetValue(Border.VerticalAlignmentProperty, VerticalAlignment.Center);
+            pill.SetValue(FrameworkElement.HorizontalAlignmentProperty, HorizontalAlignment.Left);
+            pill.SetValue(FrameworkElement.VerticalAlignmentProperty, VerticalAlignment.Center);
             pill.SetValue(Border.BackgroundProperty, new DynamicResourceExtension("BgSurface"));
             pill.SetValue(Border.BorderBrushProperty, new DynamicResourceExtension("BorderCard"));
 
@@ -2905,30 +2597,21 @@ namespace TokLens
             pill.AppendChild(sp);
             dt.VisualTree = pill;
 
-            // Active -> 翡翠绿
-            DataTrigger activeTrig = new DataTrigger();
-            activeTrig.Binding = new Binding("Status");
-            activeTrig.Value = DataSourceProbeItem.StatusActive;
+            DataTrigger activeTrig = new DataTrigger { Binding = new Binding("Status"), Value = DataSourceProbeItem.StatusActive };
             activeTrig.Setters.Add(new Setter(Border.BackgroundProperty, new DynamicResourceExtension("SemanticSuccessBg"), "StatusPill"));
             activeTrig.Setters.Add(new Setter(Border.BorderBrushProperty, new DynamicResourceExtension("SemanticSuccessBorder"), "StatusPill"));
             activeTrig.Setters.Add(new Setter(Shape.FillProperty, new DynamicResourceExtension("SemanticSuccess"), "StatusDot"));
             activeTrig.Setters.Add(new Setter(TextBlock.ForegroundProperty, new DynamicResourceExtension("SemanticSuccess"), "StatusTxt"));
             dt.Triggers.Add(activeTrig);
 
-            // Warning -> 琥珀黄
-            DataTrigger warnTrig = new DataTrigger();
-            warnTrig.Binding = new Binding("Status");
-            warnTrig.Value = DataSourceProbeItem.StatusWarning;
+            DataTrigger warnTrig = new DataTrigger { Binding = new Binding("Status"), Value = DataSourceProbeItem.StatusWarning };
             warnTrig.Setters.Add(new Setter(Border.BackgroundProperty, new DynamicResourceExtension("SemanticWarningBg"), "StatusPill"));
             warnTrig.Setters.Add(new Setter(Border.BorderBrushProperty, new DynamicResourceExtension("SemanticWarningBorder"), "StatusPill"));
             warnTrig.Setters.Add(new Setter(Shape.FillProperty, new DynamicResourceExtension("SemanticWarning"), "StatusDot"));
             warnTrig.Setters.Add(new Setter(TextBlock.ForegroundProperty, new DynamicResourceExtension("SemanticWarning"), "StatusTxt"));
             dt.Triggers.Add(warnTrig);
 
-            // InstalledEmpty -> 柔和靛蓝
-            DataTrigger emptyTrig = new DataTrigger();
-            emptyTrig.Binding = new Binding("Status");
-            emptyTrig.Value = DataSourceProbeItem.StatusInstalledEmpty;
+            DataTrigger emptyTrig = new DataTrigger { Binding = new Binding("Status"), Value = DataSourceProbeItem.StatusInstalledEmpty };
             emptyTrig.Setters.Add(new Setter(Border.BackgroundProperty, new DynamicResourceExtension("AccentSubtleBg"), "StatusPill"));
             emptyTrig.Setters.Add(new Setter(Border.BorderBrushProperty, new DynamicResourceExtension("AccentSubtleBorder"), "StatusPill"));
             emptyTrig.Setters.Add(new Setter(Shape.FillProperty, new DynamicResourceExtension("AccentText"), "StatusDot"));
@@ -2941,11 +2624,7 @@ namespace TokLens
 
         private static DataGridTemplateColumn CreateProbeNameColumn()
         {
-            DataGridTemplateColumn col = new DataGridTemplateColumn();
-            col.Header = "数据源名称";
-            col.SortMemberPath = "Name";
-            col.Width = new DataGridLength(176);
-
+            DataGridTemplateColumn col = new DataGridTemplateColumn { Header = "工具 / 来源", SortMemberPath = "Name", Width = new DataGridLength(172) };
             DataTemplate dt = new DataTemplate();
             FrameworkElementFactory txt = new FrameworkElementFactory(typeof(TextBlock));
             txt.SetBinding(TextBlock.TextProperty, new Binding("Name"));
@@ -2956,7 +2635,6 @@ namespace TokLens
             txt.SetValue(TextBlock.VerticalAlignmentProperty, VerticalAlignment.Center);
             txt.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis);
             txt.SetValue(TextBlock.ForegroundProperty, new DynamicResourceExtension("FgPrimary"));
-
             dt.VisualTree = txt;
             col.CellTemplate = dt;
             return col;
@@ -2964,11 +2642,12 @@ namespace TokLens
 
         private static DataGridTemplateColumn CreateDiagnosticHintColumn()
         {
-            DataGridTemplateColumn col = new DataGridTemplateColumn();
-            col.Header = "诊断说明（双击行打开路径）";
-            col.SortMemberPath = "DiagnosticHint";
-            col.Width = new DataGridLength(1, DataGridLengthUnitType.Star);
-
+            DataGridTemplateColumn col = new DataGridTemplateColumn
+            {
+                Header = "诊断说明（双击打开目录）",
+                SortMemberPath = "DiagnosticHint",
+                Width = new DataGridLength(1, DataGridLengthUnitType.Star)
+            };
             DataTemplate dt = new DataTemplate();
             FrameworkElementFactory txt = new FrameworkElementFactory(typeof(TextBlock), "HintTxt");
             txt.SetBinding(TextBlock.TextProperty, new Binding("DiagnosticHint"));
@@ -2979,15 +2658,11 @@ namespace TokLens
             txt.SetValue(TextBlock.TextTrimmingProperty, TextTrimming.CharacterEllipsis);
             txt.SetValue(TextBlock.ForegroundProperty, new DynamicResourceExtension("FgSecondary"));
 
-            DataTrigger warnTrig = new DataTrigger();
-            warnTrig.Binding = new Binding("Status");
-            warnTrig.Value = DataSourceProbeItem.StatusWarning;
+            DataTrigger warnTrig = new DataTrigger { Binding = new Binding("Status"), Value = DataSourceProbeItem.StatusWarning };
             warnTrig.Setters.Add(new Setter(TextBlock.ForegroundProperty, new DynamicResourceExtension("SemanticWarning"), "HintTxt"));
             warnTrig.Setters.Add(new Setter(TextBlock.FontWeightProperty, FontWeights.Medium, "HintTxt"));
 
-            DataTrigger notInstTrig = new DataTrigger();
-            notInstTrig.Binding = new Binding("Status");
-            notInstTrig.Value = DataSourceProbeItem.StatusNotInstalled;
+            DataTrigger notInstTrig = new DataTrigger { Binding = new Binding("Status"), Value = DataSourceProbeItem.StatusNotInstalled };
             notInstTrig.Setters.Add(new Setter(TextBlock.ForegroundProperty, new DynamicResourceExtension("FgMuted"), "HintTxt"));
 
             dt.VisualTree = txt;
@@ -2999,12 +2674,8 @@ namespace TokLens
 
         private DataGridTemplateColumn CreateOpenFolderActionColumn()
         {
-            DataGridTemplateColumn col = new DataGridTemplateColumn();
-            col.Header = "操作";
-            col.CanUserSort = false;
-            col.Width = new DataGridLength(86);
-
-            ControlTemplate rowBtnTpl = new ControlTemplate(typeof(Button));
+            DataGridTemplateColumn col = new DataGridTemplateColumn { Header = "操作", CanUserSort = false, Width = new DataGridLength(82) };
+            ControlTemplate tpl = new ControlTemplate(typeof(Button));
             FrameworkElementFactory bd = new FrameworkElementFactory(typeof(Border), "RowActBd");
             bd.SetValue(Border.CornerRadiusProperty, new CornerRadius(5));
             bd.SetValue(Border.PaddingProperty, new Thickness(7, 2, 7, 2));
@@ -3015,25 +2686,24 @@ namespace TokLens
             cp.SetValue(ContentPresenter.HorizontalAlignmentProperty, HorizontalAlignment.Center);
             cp.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
             bd.AppendChild(cp);
-            rowBtnTpl.VisualTree = bd;
+            tpl.VisualTree = bd;
 
             Trigger hv = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
             hv.Setters.Add(new Setter(Border.BackgroundProperty, new DynamicResourceExtension("BgHoverStrong"), "RowActBd"));
             hv.Setters.Add(new Setter(Border.BorderBrushProperty, new DynamicResourceExtension("BorderStrong"), "RowActBd"));
             hv.Setters.Add(new Setter(Control.ForegroundProperty, new DynamicResourceExtension("AccentText")));
-            rowBtnTpl.Triggers.Add(hv);
+            tpl.Triggers.Add(hv);
 
             Trigger dis = new Trigger { Property = UIElement.IsEnabledProperty, Value = false };
-            dis.Setters.Add(new Setter(UIElement.OpacityProperty, 0.38, "RowActBd"));
-            rowBtnTpl.Triggers.Add(dis);
+            dis.Setters.Add(new Setter(UIElement.OpacityProperty, 0.35, "RowActBd"));
+            tpl.Triggers.Add(dis);
 
             DataTemplate dt = new DataTemplate();
             FrameworkElementFactory btn = new FrameworkElementFactory(typeof(Button));
             btn.SetValue(ContentControl.ContentProperty, "打开目录");
-            btn.SetValue(Control.TemplateProperty, rowBtnTpl);
+            btn.SetValue(Control.TemplateProperty, tpl);
             btn.SetValue(Control.FontFamilyProperty, DesignSystem.FontUi);
             btn.SetValue(Control.FontSizeProperty, 11.0);
-            btn.SetValue(Control.FontWeightProperty, FontWeights.Medium);
             btn.SetValue(Control.ForegroundProperty, new DynamicResourceExtension("FgSecondary"));
             btn.SetValue(FrameworkElement.CursorProperty, Cursors.Hand);
             btn.SetValue(Control.FocusVisualStyleProperty, null);
@@ -3048,189 +2718,50 @@ namespace TokLens
             return col;
         }
 
-        // ==================== 数据渲染与交互逻辑 ====================
-
-        private void UpdateHealthBanner(SystemHealthReport r)
+        private void UpdateSummaryStrip(SystemHealthReport r)
         {
             if (r == null) return;
-
-            // 空报告（尚未跑过体检，或体检过程抛错）不能显示成「健康就绪」，否则用户会把没检查当成检查通过。
-            // 真实体检至少会探测一个数据源，所以 TotalSourceCount == 0 即视为未运行。
             if (r.TotalSourceCount == 0)
             {
-                _bannerElapsedText.Text = "未运行";
-                _bannerIconBox.SetResourceReference(Border.BackgroundProperty, "BgSurface");
-                _bannerIconBox.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
-                _bannerIconPath.Data = Geometry.Parse(UiIcons.Doctor);
-                _bannerIconPath.SetResourceReference(Shape.StrokeProperty, "FgMuted");
-
-                _bannerStatusBadge.SetResourceReference(Border.BackgroundProperty, "BgSurface");
-                _bannerStatusBadge.SetResourceReference(Border.BorderBrushProperty, "BorderCard");
-                _bannerStatusDot.SetResourceReference(Shape.FillProperty, "FgMuted");
-                _bannerStatusText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-                _bannerStatusText.Text = _isRefreshingFlag != 0 ? "检查中" : "未检查";
-
-                _bannerHeadlineText.Text = "尚未完成环境检查";
-                _bannerSubText.Text = "点击「重新检查」扫描本机 AI 工具日志、WSL2 与 GitHub CLI 状态";
+                ApplyStatusBadge("BgSurface", "BorderCard", "FgMuted", "FgSecondary", _isRefreshingFlag != 0 ? "检查中" : "未检查");
+                _summaryFactText.Text = "尚未运行检查 · 点击「重新检查」扫描本机 AI 工具日志、WSL2 与 GitHub CLI 状态";
+                _summaryFactText.ToolTip = null;
                 return;
             }
 
-            _bannerElapsedText.Text = string.Format(CultureInfo.InvariantCulture, "耗时 {0} ms", r.ScanElapsedMs);
+            List<string> parts = new List<string>();
+            parts.Add(string.Format(CultureInfo.InvariantCulture, "活跃 {0}/{1} 工具 ({2})", r.ActiveSourceCount, r.TotalSourceCount, r.TotalLogSizeText));
+            if (r.WslDistroNames != null && r.WslDistroNames.Count > 0)
+                parts.Add(string.Format(CultureInfo.InvariantCulture, "WSL2 {0} 个 ({1})", r.WslDistroNames.Count, r.ScanLocalWslEnabled ? "已开" : "未开"));
+            if (!string.IsNullOrEmpty(r.GhEnvOverrideWarning))
+                parts.Add("检测到 GH_TOKEN 环境变量覆盖");
+            else if (r.GhCliFound && !string.IsNullOrEmpty(r.GhActiveAccount))
+                parts.Add("gh @" + r.GhActiveAccount);
+            parts.Add(string.Format(CultureInfo.InvariantCulture, "耗时 {0} ms", r.ScanElapsedMs));
 
             if (r.WarningCount > 0)
             {
-                _bannerIconBox.SetResourceReference(Border.BackgroundProperty, "SemanticWarningBg");
-                _bannerIconBox.SetResourceReference(Border.BorderBrushProperty, "SemanticWarningBorder");
-                _bannerIconPath.Data = Geometry.Parse(UiIcons.Alert);
-                _bannerIconPath.SetResourceReference(Shape.StrokeProperty, "SemanticWarning");
-
-                _bannerStatusBadge.SetResourceReference(Border.BackgroundProperty, "SemanticWarningBg");
-                _bannerStatusBadge.SetResourceReference(Border.BorderBrushProperty, "SemanticWarningBorder");
-                _bannerStatusDot.SetResourceReference(Shape.FillProperty, "SemanticWarning");
-                _bannerStatusText.SetResourceReference(TextBlock.ForegroundProperty, "SemanticWarning");
-                _bannerStatusText.Text = string.Format(CultureInfo.InvariantCulture, "{0} 项需关注", r.WarningCount);
-
-                _bannerHeadlineText.Text = string.Format(
-                    CultureInfo.InvariantCulture,
-                    "检查完成 · {0} 项需要处理",
-                    r.WarningCount);
-
-                if (!string.IsNullOrEmpty(r.GhEnvOverrideWarning))
-                {
-                    _bannerSubText.Text = r.GhEnvOverrideWarning;
-                }
-                else
-                {
-                    _bannerSubText.Text = string.Format(
-                        CultureInfo.InvariantCulture,
-                        "已激活 {0}/{1} 个 AI 工具源（日志总计 {2}）· 请查看下方标黄条目完成排障优化",
-                        r.ActiveSourceCount,
-                        r.TotalSourceCount,
-                        r.TotalLogSizeText);
-                }
+                ApplyStatusBadge("SemanticWarningBg", "SemanticWarningBorder", "SemanticWarning", "SemanticWarning",
+                    string.Format(CultureInfo.InvariantCulture, "{0} 项需关注", r.WarningCount));
             }
             else
             {
-                _bannerIconBox.SetResourceReference(Border.BackgroundProperty, "SemanticSuccessBg");
-                _bannerIconBox.SetResourceReference(Border.BorderBrushProperty, "SemanticSuccessBorder");
-                _bannerIconPath.Data = Geometry.Parse(UiIcons.Shield);
-                _bannerIconPath.SetResourceReference(Shape.StrokeProperty, "SemanticSuccess");
-
-                _bannerStatusBadge.SetResourceReference(Border.BackgroundProperty, "SemanticSuccessBg");
-                _bannerStatusBadge.SetResourceReference(Border.BorderBrushProperty, "SemanticSuccessBorder");
-                _bannerStatusDot.SetResourceReference(Shape.FillProperty, "SemanticSuccess");
-                _bannerStatusText.SetResourceReference(TextBlock.ForegroundProperty, "SemanticSuccess");
-                _bannerStatusText.Text = "正常";
-
-                _bannerHeadlineText.Text = string.Format(
-                    CultureInfo.InvariantCulture,
-                    "环境正常 · {0} 个数据源在监听",
-                    r.ActiveSourceCount);
-
-                _bannerSubText.Text = string.Format(
-                    CultureInfo.InvariantCulture,
-                    "最近检查：{0} · 日志读取权限正常，本地账本可用，未发现环境变量冲突",
-                    r.GeneratedAt);
+                ApplyStatusBadge("SemanticSuccessBg", "SemanticSuccessBorder", "SemanticSuccess", "SemanticSuccess", "正常");
             }
+
+            _summaryFactText.Text = string.Join(" · ", parts.ToArray());
+            _summaryFactText.ToolTip = string.IsNullOrEmpty(r.GhEnvOverrideWarning)
+                ? ("最近检查：" + r.GeneratedAt + " · 账本 " + r.LedgerDbSizeText)
+                : r.GhEnvOverrideWarning;
         }
 
-        private void UpdateProbeSummaryCards(SystemHealthReport r)
+        private void ApplyStatusBadge(string bgKey, string bdKey, string dotKey, string fgKey, string text)
         {
-            if (r == null) return;
-
-            // 1. 已激活 AI 数据源卡片
-            _cardSourcesMainText.Text = string.Format(
-                CultureInfo.InvariantCulture,
-                "{0} / {1} 个工具活跃",
-                r.ActiveSourceCount,
-                r.TotalSourceCount);
-            _cardSourcesSubText.Text = string.Format(
-                CultureInfo.InvariantCulture,
-                "累计日志体积：{0}",
-                r.TotalLogSizeText);
-
-            // 2. WSL2 跨子系统穿透卡片
-            int distroCount = r.WslDistroNames != null ? r.WslDistroNames.Count : 0;
-            if (distroCount <= 0)
-            {
-                _cardWslMainText.Text = "未启用 WSL2";
-                _cardWslSubText.Text = "注册表 Lxss 未检测到 Linux 发行版";
-            }
-            else
-            {
-                string joined = string.Join(", ", r.WslDistroNames.ToArray());
-                _cardWslMainText.Text = string.Format(
-                    CultureInfo.InvariantCulture,
-                    "{0} 个发行版 ({1})",
-                    distroCount,
-                    joined);
-                int mounted = r.WslMountedDistros != null ? r.WslMountedDistros.Count : 0;
-                string switchNote = r.ScanLocalWslEnabled ? "跨子系统扫描已开启" : "扫描开关未开启";
-                _cardWslSubText.Text = string.Format(
-                    CultureInfo.InvariantCulture,
-                    "已挂载 {0}/{1} 个 · {2}",
-                    mounted,
-                    distroCount,
-                    switchNote);
-                _cardWslMainText.ToolTip = "已探测发行版：" + joined;
-            }
-
-            // 3. 本地 SQLite 账本引擎卡片
-            string dbFileName = !string.IsNullOrWhiteSpace(r.LedgerDbPath)
-                ? IoPath.GetFileName(r.LedgerDbPath)
-                : "toklens.db";
-            _cardLedgerMainText.Text = string.Format(
-                CultureInfo.InvariantCulture,
-                "{0} · {1}",
-                dbFileName,
-                r.LedgerDbSizeText);
-            _cardLedgerSubText.Text = string.Format(
-                CultureInfo.InvariantCulture,
-                "自定义单价覆盖：{0} 条 · 游标 {1} 项",
-                r.CustomOverrideCount,
-                r.TrackedCursorCount);
-            _cardLedgerMainText.ToolTip = r.LedgerDbPath;
-
-            // 4. GitHub CLI 与环境变量体检卡片
-            if (!string.IsNullOrEmpty(r.GhEnvOverrideWarning))
-            {
-                _cardGhMainText.Text = "检测到环境变量覆盖";
-                _cardGhMainText.SetResourceReference(TextBlock.ForegroundProperty, "SemanticWarning");
-                _cardGhSubText.Text = "GH_TOKEN / GITHUB_TOKEN 会覆盖 keyring";
-                _cardGhBorder.ToolTip = r.GhEnvOverrideWarning;
-            }
-            else
-            {
-                _cardGhMainText.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
-                if (r.GhCliFound && r.GhAccounts != null && r.GhAccounts.Count > 0)
-                {
-                    if (r.GhAccounts.Count > 1)
-                    {
-                        _cardGhMainText.Text = string.Format(
-                            CultureInfo.InvariantCulture,
-                            "gh 已登录 ({0} 个账号)",
-                            r.GhAccounts.Count);
-                    }
-                    else
-                    {
-                        _cardGhMainText.Text = "gh 已就绪 (@" + r.GhActiveAccount + ")";
-                    }
-                    _cardGhSubText.Text = "无环境变量劫持 · 设备令牌 gho_ 同号互通";
-                    _cardGhBorder.ToolTip = "已登录账号：" + string.Join(", ", r.GhAccounts.ToArray()) + "\n提示：不同电脑签发的 gho_ 令牌不同属正常现象，同一账号下自动互通同一 Gist。";
-                }
-                else if (r.GhCliFound)
-                {
-                    _cardGhMainText.Text = "gh 已安装 (未登录)";
-                    _cardGhSubText.Text = "无 GH_TOKEN 环境变量干扰";
-                    _cardGhBorder.ToolTip = r.GhCliExecutablePath;
-                }
-                else
-                {
-                    _cardGhMainText.Text = "未安装 gh CLI";
-                    _cardGhSubText.Text = "无环境变量冲突 · 支持 PAT / 配对码同步";
-                    _cardGhBorder.ToolTip = "本机未安装 GitHub CLI，不影响本地统计与手动 PAT 同步。";
-                }
-            }
+            _bannerStatusBadge.SetResourceReference(Border.BackgroundProperty, bgKey);
+            _bannerStatusBadge.SetResourceReference(Border.BorderBrushProperty, bdKey);
+            _bannerStatusDot.SetResourceReference(Shape.FillProperty, dotKey);
+            _bannerStatusText.SetResourceReference(TextBlock.ForegroundProperty, fgKey);
+            _bannerStatusText.Text = text;
         }
 
         private void ApplyFilterAndRefreshGrid()
@@ -3240,21 +2771,17 @@ namespace TokLens
                 : new List<DataSourceProbeItem>();
 
             List<DataSourceProbeItem> result = new List<DataSourceProbeItem>(sourceList.Count);
-
             for (int i = 0; i < sourceList.Count; i++)
             {
                 DataSourceProbeItem item = sourceList[i];
                 if (item == null) continue;
-
-                if (!MatchesCategoryFilter(item, _activeCategoryIndex))
+                if (_activeCategoryIndex == 0 && string.Equals(item.Status, DataSourceProbeItem.StatusNotInstalled, StringComparison.Ordinal))
                     continue;
                 if (!MatchesSearchKeyword(item, _searchKeyword))
                     continue;
-
                 result.Add(item);
             }
 
-            // 默认按状态优先级（Warning -> Active -> InstalledEmpty -> NotInstalled）及占用体积降序排列
             result.Sort(delegate(DataSourceProbeItem a, DataSourceProbeItem b)
             {
                 int cmpRank = a.StatusRank.CompareTo(b.StatusRank);
@@ -3265,20 +2792,10 @@ namespace TokLens
             });
 
             _filteredItems = result;
-
             if (_matchCountText != null)
-            {
-                _matchCountText.Text = string.Format(
-                    CultureInfo.InvariantCulture,
-                    "显示 {0} / {1} 项",
-                    result.Count,
-                    sourceList.Count);
-            }
-
+                _matchCountText.Text = string.Format(CultureInfo.InvariantCulture, "显示 {0} / {1} 项", result.Count, sourceList.Count);
             if (_emptyFilterOverlay != null)
-            {
                 _emptyFilterOverlay.Visibility = result.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
-            }
 
             ModernDataGridFactory.UpdateItemsPreservingState(
                 _probeDataGrid,
@@ -3291,31 +2808,10 @@ namespace TokLens
                 true);
         }
 
-        private static bool MatchesCategoryFilter(DataSourceProbeItem item, int categoryIndex)
-        {
-            if (categoryIndex == 0)
-                return true;
-            if (categoryIndex == 1)
-            {
-                return string.Equals(item.Status, DataSourceProbeItem.StatusActive, StringComparison.Ordinal) ||
-                       string.Equals(item.Status, DataSourceProbeItem.StatusWarning, StringComparison.Ordinal);
-            }
-            if (categoryIndex == 2)
-                return string.Equals(item.Category, DataSourceProbeItem.CategoryNativeCli, StringComparison.Ordinal);
-            if (categoryIndex == 3)
-                return string.Equals(item.Category, DataSourceProbeItem.CategoryIdeDb, StringComparison.Ordinal);
-            if (categoryIndex == 4)
-                return string.Equals(item.Category, DataSourceProbeItem.CategoryWsl, StringComparison.Ordinal);
-            return true;
-        }
-
         private static bool MatchesSearchKeyword(DataSourceProbeItem item, string kw)
         {
-            if (string.IsNullOrWhiteSpace(kw))
-                return true;
-
+            if (string.IsNullOrWhiteSpace(kw)) return true;
             return ContainsIgnoreCase(item.Name, kw) ||
-                   ContainsIgnoreCase(item.Category, kw) ||
                    ContainsIgnoreCase(item.StatusLabel, kw) ||
                    ContainsIgnoreCase(item.TargetPath, kw) ||
                    ContainsIgnoreCase(item.DiagnosticHint, kw);
@@ -3323,28 +2819,22 @@ namespace TokLens
 
         private static bool ContainsIgnoreCase(string text, string pattern)
         {
-            if (string.IsNullOrEmpty(text) || string.IsNullOrEmpty(pattern))
-                return false;
-            return text.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0;
+            return !string.IsNullOrEmpty(text) && !string.IsNullOrEmpty(pattern) &&
+                   text.IndexOf(pattern, StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         private void UpdateSearchBoxAdornments()
         {
             bool hasText = _searchInputBox != null && !string.IsNullOrEmpty(_searchInputBox.Text);
-            if (_searchWatermarkText != null)
-                _searchWatermarkText.Visibility = hasText ? Visibility.Collapsed : Visibility.Visible;
-            if (_searchClearBtn != null)
-                _searchClearBtn.Visibility = hasText ? Visibility.Visible : Visibility.Collapsed;
+            if (_searchWatermarkText != null) _searchWatermarkText.Visibility = hasText ? Visibility.Collapsed : Visibility.Visible;
+            if (_searchClearBtn != null) _searchClearBtn.Visibility = hasText ? Visibility.Visible : Visibility.Collapsed;
         }
 
         private void SetRefreshingVisualState(bool refreshing)
         {
-            if (_refreshBtn != null)
-                _refreshBtn.IsEnabled = !refreshing;
-            if (_refreshBtnText != null)
-                _refreshBtnText.Text = refreshing ? "检查中…" : "重新检查";
-            if (refreshing && _bannerStatusText != null &&
-                (_currentReport == null || _currentReport.TotalSourceCount == 0))
+            if (_refreshBtn != null) _refreshBtn.IsEnabled = !refreshing;
+            if (_refreshBtnText != null) _refreshBtnText.Text = refreshing ? "检查中…" : "重新检查";
+            if (refreshing && _bannerStatusText != null && (_currentReport == null || _currentReport.TotalSourceCount == 0))
                 _bannerStatusText.Text = "检查中";
         }
 
@@ -3352,36 +2842,21 @@ namespace TokLens
         {
             SystemHealthReport report = _currentReport ?? TelemetryDoctorScanner.RunDiagnostics(_homeDir);
             string summary = TelemetryDoctorScanner.BuildSanitizedDiagnosticSummary(report);
-
             bool copied = false;
-            try
-            {
-                Clipboard.SetDataObject(summary, true);
-                copied = true;
-            }
+            try { Clipboard.SetDataObject(summary, true); copied = true; }
             catch
             {
-                try
-                {
-                    Clipboard.SetText(summary);
-                    copied = true;
-                }
-                catch { }
+                try { Clipboard.SetText(summary); copied = true; } catch { }
             }
-
             if (copied)
             {
-                if (_copyBtnIcon != null)
-                    _copyBtnIcon.Data = Geometry.Parse(UiIcons.Check);
-                if (_copyBtnText != null)
-                    _copyBtnText.Text = "已复制脱敏摘要";
+                if (_copyBtnIcon != null) _copyBtnIcon.Data = Geometry.Parse(UiIcons.Check);
+                if (_copyBtnText != null) _copyBtnText.Text = "已复制";
                 _copyResetTimer.Stop();
                 _copyResetTimer.Start();
-
                 if (_toastCallback != null)
                 {
-                    try { _toastCallback("已复制诊断摘要", "已自动隐藏用户名与敏感令牌信息，可直接粘贴排障", "success"); }
-                    catch { }
+                    try { _toastCallback("已复制诊断摘要", "已隐藏用户名与敏感令牌", "success"); } catch { }
                 }
             }
         }
@@ -3389,28 +2864,22 @@ namespace TokLens
         private void OnCopyResetTimerTick(object sender, EventArgs e)
         {
             _copyResetTimer.Stop();
-            if (_copyBtnIcon != null)
-                _copyBtnIcon.Data = Geometry.Parse(UiIcons.Copy);
-            if (_copyBtnText != null)
-                _copyBtnText.Text = "复制诊断摘要";
+            if (_copyBtnIcon != null) _copyBtnIcon.Data = Geometry.Parse(UiIcons.Copy);
+            if (_copyBtnText != null) _copyBtnText.Text = "复制摘要";
         }
 
         private void OnRowOpenFolderClick(object sender, RoutedEventArgs e)
         {
             e.Handled = true;
             FrameworkElement fe = sender as FrameworkElement;
-            if (fe == null) return;
-            DataSourceProbeItem item = fe.DataContext as DataSourceProbeItem;
-            if (item == null) return;
-            OpenPathInExplorer(item.TargetPath);
+            DataSourceProbeItem item = fe != null ? fe.DataContext as DataSourceProbeItem : null;
+            if (item != null) OpenPathInExplorer(item.TargetPath);
         }
 
         private void OnDataGridMouseDoubleClick(object sender, MouseButtonEventArgs e)
         {
-            if (_probeDataGrid == null) return;
-            DataSourceProbeItem item = _probeDataGrid.SelectedItem as DataSourceProbeItem;
-            if (item == null) return;
-            OpenPathInExplorer(item.TargetPath);
+            DataSourceProbeItem item = _probeDataGrid != null ? _probeDataGrid.SelectedItem as DataSourceProbeItem : null;
+            if (item != null) OpenPathInExplorer(item.TargetPath);
         }
 
         private void OpenPathInExplorer(string targetPath)
@@ -3420,26 +2889,15 @@ namespace TokLens
             {
                 if (_toastCallback != null)
                 {
-                    try { _toastCallback("目录尚未创建", "该数据源在本机尚未安装或尚未生成本地目录", "warning"); }
-                    catch { }
+                    try { _toastCallback("目录尚未创建", "该数据源尚未在本机生成目录", "warning"); } catch { }
                 }
                 return;
             }
-
             try
             {
-                long sz;
-                long mt;
-                bool isFile = TokenScanner.TryGetFileStatInternal(resolved, out sz, out mt) &&
-                              File.Exists(TokenScanner.ToLongPath(resolved));
-
-                ProcessStartInfo psi = new ProcessStartInfo();
-                psi.FileName = "explorer.exe";
-                psi.Arguments = isFile
-                    ? ("/select,\"" + resolved.Replace("\"", "") + "\"")
-                    : ("\"" + resolved.Replace("\"", "") + "\"");
-                psi.UseShellExecute = true;
-                Process.Start(psi);
+                long sz, mt;
+                bool isFile = TokenScanner.TryGetFileStatInternal(resolved, out sz, out mt) && File.Exists(TokenScanner.ToLongPath(resolved));
+                Process.Start(new ProcessStartInfo("explorer.exe", isFile ? ("/select,\"" + resolved.Replace("\"", "") + "\"") : ("\"" + resolved.Replace("\"", "") + "\"")) { UseShellExecute = true });
             }
             catch { }
         }
