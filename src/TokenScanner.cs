@@ -2447,6 +2447,33 @@ namespace TokLens
             @"<USER_SETTINGS_CHANGE>[\s\S]*?`Model Selection`\s+from\s+`?([^\r\n`]+?)`?\s+to\s+`?([^\r\n`]+?)`?(?:\.(?:\s|$)|[\r\n<]|$)",
             RegexOptions.Compiled);
 
+        private sealed class AgyDbStepInfo
+        {
+            public string Model;
+            public int DurationMs;
+            public long ContextLimit;
+        }
+
+        private static long ReadProtoDurationMs(byte[] msg)
+        {
+            if (msg == null) return -1L;
+            long sec = 0L, nanos = 0L;
+            UsageProto.Number(msg, 1, out sec);
+            UsageProto.Number(msg, 2, out nanos);
+            if (sec < 0L || sec > 86400L || nanos < 0L || nanos >= 1000000000L) return -1L;
+            return sec * 1000L + (nanos + 500000L) / 1000000L;
+        }
+
+        private static long ReadProtoTimestampMs(byte[] msg)
+        {
+            if (msg == null) return 0L;
+            long sec = 0L, nanos = 0L;
+            if (!UsageProto.Number(msg, 1, out sec) || sec < 946684800L || sec > 2534023007L) return 0L;
+            UsageProto.Number(msg, 2, out nanos);
+            if (nanos < 0L || nanos >= 1000000000L) return 0L;
+            return sec * 1000L + (nanos + 500000L) / 1000000L;
+        }
+
         private static string GetAntigravityDbSignature(string convDbPath)
         {
             if (string.IsNullOrEmpty(convDbPath)) return "";
@@ -2454,41 +2481,110 @@ namespace TokLens
             bool hasDb = TryGetFileStat(convDbPath, out dbSz, out dbMt);
             bool hasWal = TryGetFileStat(convDbPath + "-wal", out walSz, out walMt);
             if (!hasDb && !hasWal) return "";
-            return string.Format(CultureInfo.InvariantCulture, "{0}.{1}.{2}.{3}", dbSz, dbMt & 0xFFFFFFFFL, walSz, walMt & 0xFFFFFFFFL);
+            return string.Format(CultureInfo.InvariantCulture, "v2.{0}.{1}.{2}.{3}", dbSz, dbMt & 0xFFFFFFFFL, walSz, walMt & 0xFFFFFFFFL);
+        }
+
+        private static bool TryLoadAntigravityDbStepInfo(string convDbPath, out Dictionary<string, AgyDbStepInfo> stepInfo, out string latestDbModel)
+        {
+            stepInfo = new Dictionary<string, AgyDbStepInfo>(StringComparer.Ordinal);
+            latestDbModel = "";
+            if (string.IsNullOrEmpty(convDbPath)) return false;
+            Dictionary<string, AgyDbStepInfo> result = stepInfo;
+            try
+            {
+                using (WinSqlite db = WinSqlite.OpenReadOnly(convDbPath))
+                {
+                    if (db == null) return false;
+                    Dictionary<long, AgyDbStepInfo> generations = new Dictionary<long, AgyDbStepInfo>();
+                    if (!db.Query("SELECT idx, data FROM gen_metadata", delegate(WinSqlite.SqliteRow r)
+                    {
+                        byte[] response = UsageProto.Message(r.GetBlob(1), 1);
+                        if (response == null) return;
+                        string backend = UsageProto.Text(response, 19);
+                        string model = !string.IsNullOrWhiteSpace(backend) ? UsageAccounting.AntigravityModel(backend, UsageProto.Text(response, 21)) : "";
+
+                        // gen_metadata response field 11 (首字/思考等待) + field 12 (流式输出) 为单次请求实测总耗时
+                        long ttftMs = ReadProtoDurationMs(UsageProto.Message(response, 11));
+                        long streamMs = ReadProtoDurationMs(UsageProto.Message(response, 12));
+                        int durMs = 0;
+                        if (ttftMs >= 0L || streamMs >= 0L)
+                        {
+                            long totalMs = (ttftMs >= 0L ? ttftMs : 0L) + (streamMs >= 0L ? streamMs : 0L);
+                            if (totalMs > 0L && totalMs <= int.MaxValue)
+                                durMs = (int)totalMs;
+                        }
+
+                        // response field 9 -> field 10 -> field 4 记录该次会话实际生效的上下文窗口上限
+                        long ctxLimit = 0L;
+                        byte[] ctxBox = UsageProto.Message(UsageProto.Message(response, 9), 10);
+                        long rawCtx;
+                        if (UsageProto.Number(ctxBox, 4, out rawCtx) && rawCtx >= 1024L && rawCtx <= 100000000L)
+                            ctxLimit = rawCtx;
+
+                        if (!string.IsNullOrEmpty(model) || durMs > 0 || ctxLimit > 0L)
+                        {
+                            AgyDbStepInfo ginfo = new AgyDbStepInfo();
+                            ginfo.Model = model;
+                            ginfo.DurationMs = durMs;
+                            ginfo.ContextLimit = ctxLimit;
+                            generations[r.GetInt64(0)] = ginfo;
+                        }
+                    })) return false;
+                    if (!db.Query("SELECT idx, metadata FROM steps WHERE step_type IN (15, 23) ORDER BY idx", delegate(WinSqlite.SqliteRow r)
+                    {
+                        byte[] meta = r.GetBlob(1);
+                        AgyDbStepInfo resolved = null;
+                        byte[] reference = UsageProto.Message(meta, 20);
+                        if (reference != null)
+                        {
+                            long generation;
+                            // Scalar zero is omitted by protobuf.
+                            UsageProto.Number(reference, 3, out generation);
+                            AgyDbStepInfo ginfo;
+                            if (generations.TryGetValue(generation, out ginfo) && ginfo != null)
+                            {
+                                resolved = new AgyDbStepInfo();
+                                resolved.Model = ginfo.Model;
+                                resolved.DurationMs = ginfo.DurationMs;
+                                resolved.ContextLimit = ginfo.ContextLimit;
+                            }
+                        }
+
+                        // 若 gen_metadata 缺少耗时字段，则回退读取 steps.metadata 的 created_at(1) -> completed_at(7)
+                        if (resolved == null || resolved.DurationMs <= 0)
+                        {
+                            long startMs = ReadProtoTimestampMs(UsageProto.Message(meta, 1));
+                            long endMs = ReadProtoTimestampMs(UsageProto.Message(meta, 7));
+                            long deltaMs = endMs - startMs;
+                            if (startMs > 0L && endMs > startMs && deltaMs > 0L && deltaMs <= 86400000L)
+                            {
+                                if (resolved == null) resolved = new AgyDbStepInfo();
+                                resolved.DurationMs = (int)deltaMs;
+                            }
+                        }
+
+                        if (resolved != null && (!string.IsNullOrEmpty(resolved.Model) || resolved.DurationMs > 0 || resolved.ContextLimit > 0L))
+                            result[r.GetInt64(0).ToString(CultureInfo.InvariantCulture)] = resolved;
+                    })) return false;
+                    return result.Count > 0;
+                }
+            }
+            catch { return false; }
         }
 
         private static bool TryLoadAntigravityDbStepModels(string convDbPath, out Dictionary<string, string> stepModels, out string latestDbModel)
         {
             stepModels = new Dictionary<string, string>(StringComparer.Ordinal);
             latestDbModel = "";
-            if (string.IsNullOrEmpty(convDbPath)) return false;
-            Dictionary<string, string> result = stepModels;
-            try
+            Dictionary<string, AgyDbStepInfo> stepInfo;
+            if (!TryLoadAntigravityDbStepInfo(convDbPath, out stepInfo, out latestDbModel))
+                return false;
+            foreach (KeyValuePair<string, AgyDbStepInfo> kv in stepInfo)
             {
-                using (WinSqlite db = WinSqlite.OpenReadOnly(convDbPath))
-                {
-                    if (db == null) return false;
-                    Dictionary<long, string> generations = new Dictionary<long, string>();
-                    if (!db.Query("SELECT idx, data FROM gen_metadata", delegate(WinSqlite.SqliteRow r)
-                    {
-                        byte[] response = UsageProto.Message(r.GetBlob(1), 1);
-                        string backend = UsageProto.Text(response, 19);
-                        if (!string.IsNullOrWhiteSpace(backend)) generations[r.GetInt64(0)] = UsageAccounting.AntigravityModel(backend, UsageProto.Text(response, 21));
-                    })) return false;
-                    if (!db.Query("SELECT idx, metadata FROM steps WHERE step_type IN (15, 23) ORDER BY idx", delegate(WinSqlite.SqliteRow r)
-                    {
-                        byte[] reference = UsageProto.Message(r.GetBlob(1), 20);
-                        if (reference == null) return;
-                        long generation;
-                        // Scalar zero is omitted by protobuf.
-                        UsageProto.Number(reference, 3, out generation);
-                        string model;
-                        if (generations.TryGetValue(generation, out model)) result[r.GetInt64(0).ToString(CultureInfo.InvariantCulture)] = model;
-                    })) return false;
-                    return result.Count > 0;
-                }
+                if (kv.Value != null && !string.IsNullOrEmpty(kv.Value.Model))
+                    stepModels[kv.Key] = kv.Value.Model;
             }
-            catch { return false; }
+            return stepModels.Count > 0;
         }
 
         private void ScanAntigravity()
@@ -2780,14 +2876,16 @@ namespace TokLens
                     catch { _failedExactTools.Add("Google Antigravity"); }
                 }
 
-                Dictionary<string, string> dbStepModels;
+                Dictionary<string, AgyDbStepInfo> dbStepInfo;
                 string latestDbModel;
-                TryLoadAntigravityDbStepModels(convDbPath, out dbStepModels, out latestDbModel);
+                TryLoadAntigravityDbStepInfo(convDbPath, out dbStepInfo, out latestDbModel);
 
                 List<UsageEvent> fileEvents;
                 if (seenSteps.Count == 0 && cur != null && cur.Events != null && cur.Events.Count > 0)
                 {
-                    fileEvents = new List<UsageEvent>(cur.Events);
+                    fileEvents = new List<UsageEvent>(cur.Events.Count);
+                    for (int k = 0; k < cur.Events.Count; k++)
+                        if (cur.Events[k] != null) fileEvents.Add(cur.Events[k].Clone());
                 }
                 else
                 {
@@ -2800,15 +2898,18 @@ namespace TokLens
                     }
                 }
 
-                // 优先以主库 gen_metadata 精确后端模型覆盖每步，次之使用会话级明确选型或最近真实模型
+                // 优先以主库 gen_metadata 精确后端模型、实测请求耗时与真实上下文上限覆盖每步
                 for (int k = 0; k < fileEvents.Count; k++)
                 {
                     UsageEvent fev = fileEvents[k];
                     if (fev == null) continue;
-                    string resolved = "";
-                    if (!string.IsNullOrEmpty(fev.DedupKey) && dbStepModels.TryGetValue(fev.DedupKey, out resolved) && !string.IsNullOrEmpty(resolved))
+                    AgyDbStepInfo stepMeta = null;
+                    if (!string.IsNullOrEmpty(fev.DedupKey))
+                        dbStepInfo.TryGetValue(fev.DedupKey, out stepMeta);
+
+                    if (stepMeta != null && !string.IsNullOrEmpty(stepMeta.Model))
                     {
-                        fev.Model = UsageAccounting.AntigravityModel(resolved, fev.Model);
+                        fev.Model = UsageAccounting.AntigravityModel(stepMeta.Model, fev.Model);
                     }
                     else if (string.IsNullOrEmpty(fev.Model) || string.Equals(fev.Model, "unknown", StringComparison.OrdinalIgnoreCase))
                     {
@@ -2817,6 +2918,20 @@ namespace TokLens
                     else if (string.Equals(fev.Model, "orchestrator", StringComparison.OrdinalIgnoreCase))
                     {
                         fev.Model = "gemini-pro-orchestrator";
+                    }
+
+                    if (stepMeta != null)
+                    {
+                        if (stepMeta.DurationMs > 0)
+                        {
+                            fev.DurationMs = stepMeta.DurationMs;
+                            fev.TimingSource = "request";
+                        }
+                        if (stepMeta.ContextLimit > 0L)
+                        {
+                            fev.ActualContextLimit = stepMeta.ContextLimit;
+                            fev.ContextLimitEvidence = "antigravity:gen_metadata";
+                        }
                     }
                 }
 
@@ -2858,14 +2973,16 @@ namespace TokLens
                     if (ev == null) continue;
                     if (string.IsNullOrEmpty(ev.Model) || string.Equals(ev.Model, "unknown", StringComparison.OrdinalIgnoreCase))
                     {
-                        ev = new UsageEvent(ev.Tool, fallbackModel, ev.Date, ev.FreshInput, ev.Output, ev.CacheRead, ev.CacheWrite, ev.LoggedCostUsd, ev.Turns, ev.DedupKey, ev.TimestampMs, ev.DurationMs);
-                        item.Events[e] = ev;
+                        UsageEvent patched = ev.Clone();
+                        patched.Model = fallbackModel;
+                        item.Events[e] = patched;
                         modelPatched = true;
                     }
                     else if (string.Equals(ev.Model, "orchestrator", StringComparison.OrdinalIgnoreCase))
                     {
-                        ev = new UsageEvent(ev.Tool, "gemini-pro-orchestrator", ev.Date, ev.FreshInput, ev.Output, ev.CacheRead, ev.CacheWrite, ev.LoggedCostUsd, ev.Turns, ev.DedupKey, ev.TimestampMs, ev.DurationMs);
-                        item.Events[e] = ev;
+                        UsageEvent patched = ev.Clone();
+                        patched.Model = "gemini-pro-orchestrator";
+                        item.Events[e] = patched;
                         modelPatched = true;
                     }
                 }

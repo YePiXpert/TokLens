@@ -1658,7 +1658,7 @@ namespace TokLens
         public void Apply()
         {
             if (_grid == null) return;
-            foreach (DataGridColumn c in _dropOrder)
+            foreach (DataGridColumn c in _grid.Columns)
                 c.Visibility = _unavailable.Contains(c) ? Visibility.Collapsed : Visibility.Visible;
             double available = _grid.ActualWidth - 14.0; // 垂直滚动条的位置
             if (available <= 0) return;
@@ -1820,7 +1820,7 @@ namespace TokLens
             hbd.SetValue(Border.BackgroundProperty, new DynamicResourceExtension("BgCard"));
             hbd.SetValue(Border.BorderBrushProperty, new DynamicResourceExtension("BorderCard"));
             hbd.SetValue(Border.BorderThicknessProperty, new Thickness(0, 0, 0, 1));
-            hbd.SetValue(Border.PaddingProperty, new Thickness(12, 0, 12, 0));
+            hbd.SetValue(Border.PaddingProperty, new Thickness(10, 0, 10, 0));
 
             FrameworkElementFactory dock = new FrameworkElementFactory(typeof(DockPanel));
             FrameworkElementFactory sortTxt = new FrameworkElementFactory(typeof(TextBlock), "SortArrow");
@@ -1877,7 +1877,7 @@ namespace TokLens
             ControlTemplate cellTpl = new ControlTemplate(typeof(DataGridCell));
             FrameworkElementFactory cbd = new FrameworkElementFactory(typeof(Border));
             cbd.SetValue(Border.BackgroundProperty, Brushes.Transparent);
-            cbd.SetValue(Border.PaddingProperty, new Thickness(12, 0, 12, 0));
+            cbd.SetValue(Border.PaddingProperty, new Thickness(10, 0, 10, 0));
             FrameworkElementFactory ccp = new FrameworkElementFactory(typeof(ContentPresenter));
             ccp.SetValue(ContentPresenter.VerticalAlignmentProperty, VerticalAlignment.Center);
             cbd.AppendChild(ccp);
@@ -2068,7 +2068,7 @@ namespace TokLens
             hdrRight.Setters.Add(new Setter(Control.ForegroundProperty, new DynamicResourceExtension("FgMuted")));
             hdrRight.Setters.Add(new Setter(Control.FontSizeProperty, 11.0));
             hdrRight.Setters.Add(new Setter(Control.FontWeightProperty, FontWeights.SemiBold));
-            hdrRight.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(12, 0, 12, 0)));
+            hdrRight.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(10, 0, 10, 0)));
             hdrRight.Setters.Add(new Setter(Control.BorderThicknessProperty, new Thickness(0, 0, 0, 1)));
             hdrRight.Setters.Add(new Setter(Control.BorderBrushProperty, new DynamicResourceExtension("BorderCard")));
             col.HeaderStyle = hdrRight;
@@ -2452,6 +2452,316 @@ namespace TokLens
                 dismissToast();
             };
             autoTimer.Start();
+        }
+    }
+
+    internal sealed class DonutSlice
+    {
+        public string Label;
+        public double Value;
+        public string ColorHex;
+        public string ToolTip;
+    }
+
+    internal static class ChartArt
+    {
+        // 将坐标轴原始最大值向上取整为干净刻度上限（1 / 1.2 / 1.5 / 2 / 2.5 / 3 / 4 / 5 / 6 / 8 / 10 × 10^n）
+        public static double NiceAxisMax(double rawMax, int tickCount)
+        {
+            if (rawMax <= 0.0 || double.IsNaN(rawMax) || double.IsInfinity(rawMax))
+                return 1.0;
+            int steps = Math.Max(1, tickCount);
+            double stepRaw = rawMax / steps;
+            double mag = Math.Pow(10.0, Math.Floor(Math.Log10(stepRaw)));
+            double norm = stepRaw / mag;
+            double niceStep;
+            if (norm <= 1.0) niceStep = 1.0;
+            else if (norm <= 1.2) niceStep = 1.2;
+            else if (norm <= 1.5) niceStep = 1.5;
+            else if (norm <= 2.0) niceStep = 2.0;
+            else if (norm <= 2.5) niceStep = 2.5;
+            else if (norm <= 3.0) niceStep = 3.0;
+            else if (norm <= 4.0) niceStep = 4.0;
+            else if (norm <= 5.0) niceStep = 5.0;
+            else if (norm <= 6.0) niceStep = 6.0;
+            else if (norm <= 8.0) niceStep = 8.0;
+            else niceStep = 10.0;
+            return niceStep * mag * steps;
+        }
+
+        // 矢量环形占比图（支持单切片满环、多切片微间隙、中心主/副数值与切片悬停提示）
+        public static UIElement BuildDonutRing(
+            IList<DonutSlice> slices,
+            double diameter,
+            double thickness,
+            string centerValue,
+            string centerSub,
+            bool isDark)
+        {
+            Grid host = new Grid
+            {
+                Width = diameter,
+                Height = diameter,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            Canvas canvas = new Canvas { Width = diameter, Height = diameter };
+            double cx = diameter * 0.5;
+            double cy = diameter * 0.5;
+            double radius = Math.Max(8.0, (diameter - thickness) * 0.5 - 1.0);
+
+            // 底轨圆环
+            Ellipse track = new Ellipse
+            {
+                Width = radius * 2.0,
+                Height = radius * 2.0,
+                Stroke = DesignSystem.ThemeBrush("BgHoverStrong", isDark),
+                StrokeThickness = thickness
+            };
+            Canvas.SetLeft(track, cx - radius);
+            Canvas.SetTop(track, cy - radius);
+            canvas.Children.Add(track);
+
+            double total = 0.0;
+            List<DonutSlice> valid = new List<DonutSlice>();
+            if (slices != null)
+            {
+                for (int i = 0; i < slices.Count; i++)
+                {
+                    if (slices[i] != null && slices[i].Value > 0.0)
+                    {
+                        valid.Add(slices[i]);
+                        total += slices[i].Value;
+                    }
+                }
+            }
+
+            if (valid.Count == 1)
+            {
+                Ellipse full = new Ellipse
+                {
+                    Width = radius * 2.0,
+                    Height = radius * 2.0,
+                    Stroke = DesignSystem.BrushHex(valid[0].ColorHex),
+                    StrokeThickness = thickness,
+                    ToolTip = valid[0].ToolTip
+                };
+                Canvas.SetLeft(full, cx - radius);
+                Canvas.SetTop(full, cy - radius);
+                canvas.Children.Add(full);
+            }
+            else if (valid.Count > 1 && total > 0.0)
+            {
+                double startDeg = -90.0;
+                double gapDeg = valid.Count <= 6 ? 2.2 : 1.4;
+                for (int i = 0; i < valid.Count; i++)
+                {
+                    DonutSlice sl = valid[i];
+                    double sweepDeg = (sl.Value / total) * 360.0;
+                    double drawSweep = Math.Max(1.8, sweepDeg - gapDeg);
+                    if (drawSweep >= 359.5) drawSweep = 359.5;
+
+                    double a0 = (startDeg + gapDeg * 0.5) * Math.PI / 180.0;
+                    double a1 = (startDeg + gapDeg * 0.5 + drawSweep) * Math.PI / 180.0;
+                    Point p0 = new Point(cx + radius * Math.Cos(a0), cy + radius * Math.Sin(a0));
+                    Point p1 = new Point(cx + radius * Math.Cos(a1), cy + radius * Math.Sin(a1));
+
+                    PathFigure fig = new PathFigure { StartPoint = p0, IsClosed = false, IsFilled = false };
+                    fig.Segments.Add(new ArcSegment(
+                        p1,
+                        new Size(radius, radius),
+                        0.0,
+                        drawSweep > 180.0,
+                        SweepDirection.Clockwise,
+                        true));
+                    PathGeometry geo = new PathGeometry();
+                    geo.Figures.Add(fig);
+                    Path arc = new Path
+                    {
+                        Data = geo,
+                        Stroke = DesignSystem.BrushHex(sl.ColorHex),
+                        StrokeThickness = thickness,
+                        StrokeStartLineCap = PenLineCap.Flat,
+                        StrokeEndLineCap = PenLineCap.Flat,
+                        ToolTip = sl.ToolTip,
+                        Cursor = Cursors.Hand
+                    };
+                    canvas.Children.Add(arc);
+                    startDeg += sweepDeg;
+                }
+            }
+
+            host.Children.Add(canvas);
+
+            StackPanel center = new StackPanel
+            {
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center,
+                IsHitTestVisible = false,
+                MaxWidth = Math.Max(36.0, diameter - thickness * 2.0 - 10.0)
+            };
+            if (!string.IsNullOrEmpty(centerValue))
+            {
+                TextBlock cv = new TextBlock
+                {
+                    Text = centerValue,
+                    FontFamily = DesignSystem.FontDisplay,
+                    FontSize = diameter >= 106.0 ? 13.5 : 12.0,
+                    FontWeight = FontWeights.SemiBold,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    TextTrimming = TextTrimming.CharacterEllipsis
+                };
+                cv.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+                ModernControlsFactory.EnableTabularNumbers(cv, false);
+                center.Children.Add(cv);
+            }
+            if (!string.IsNullOrEmpty(centerSub))
+            {
+                TextBlock cs = new TextBlock
+                {
+                    Text = centerSub,
+                    FontSize = 10.0,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    Margin = new Thickness(0, 1, 0, 0),
+                    TextTrimming = TextTrimming.CharacterEllipsis
+                };
+                cs.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+                center.Children.Add(cs);
+            }
+            host.Children.Add(center);
+            return host;
+        }
+
+        // 紧凑矢量面积折线微图（带均线虚线、渐变阴影与峰值高亮圆点）
+        public static void RenderSparkline(
+            Canvas canvas,
+            IList<double> values,
+            IList<string> tooltips,
+            double width,
+            double height,
+            Color strokeColor,
+            bool isDark)
+        {
+            if (canvas == null) return;
+            canvas.Children.Clear();
+            if (values == null || values.Count == 0 || width < 40.0 || height < 20.0) return;
+
+            double padX = 6.0;
+            double padTop = 6.0;
+            double padBot = 5.0;
+            double plotW = Math.Max(16.0, width - padX * 2.0);
+            double plotH = Math.Max(10.0, height - padTop - padBot);
+
+            double maxVal = 0.0;
+            double sumVal = 0.0;
+            int peakIdx = 0;
+            int n = values.Count;
+            for (int i = 0; i < n; i++)
+            {
+                double v = values[i] > 0.0 ? values[i] : 0.0;
+                sumVal += v;
+                if (v >= maxVal) { maxVal = v; peakIdx = i; }
+            }
+            if (maxVal <= 0.0) maxVal = 1.0;
+            double avgVal = sumVal / n;
+
+            // 平均参考虚线
+            if (n >= 2 && avgVal > 0.0)
+            {
+                double avgY = padTop + plotH * (1.0 - Math.Min(1.0, avgVal / maxVal));
+                Line avgLine = new Line
+                {
+                    X1 = padX,
+                    X2 = padX + plotW,
+                    Y1 = avgY,
+                    Y2 = avgY,
+                    Stroke = DesignSystem.ThemeBrush("BorderStrong", isDark),
+                    StrokeThickness = 1.0,
+                    StrokeDashArray = new DoubleCollection(new double[] { 3.0, 3.0 }),
+                    Opacity = 0.75
+                };
+                canvas.Children.Add(avgLine);
+            }
+
+            Point[] pts = new Point[n];
+            for (int i = 0; i < n; i++)
+            {
+                double v = values[i] > 0.0 ? values[i] : 0.0;
+                double px = n == 1 ? (padX + plotW * 0.5) : (padX + (plotW * i) / (n - 1));
+                double py = padTop + plotH * (1.0 - Math.Min(1.0, v / maxVal));
+                pts[i] = new Point(px, py);
+            }
+
+            SolidColorBrush strokeBrush = new SolidColorBrush(strokeColor);
+            strokeBrush.Freeze();
+
+            if (n >= 2)
+            {
+                PathFigure areaFig = new PathFigure { StartPoint = new Point(pts[0].X, padTop + plotH), IsClosed = true, IsFilled = true };
+                areaFig.Segments.Add(new LineSegment(pts[0], false));
+                PathFigure lineFig = new PathFigure { StartPoint = pts[0], IsClosed = false, IsFilled = false };
+                for (int i = 0; i < n - 1; i++)
+                {
+                    Point p0 = pts[i], p1 = pts[i + 1];
+                    double dx = (p1.X - p0.X) * 0.38;
+                    Point c1 = new Point(p0.X + dx, p0.Y);
+                    Point c2 = new Point(p1.X - dx, p1.Y);
+                    areaFig.Segments.Add(new BezierSegment(c1, c2, p1, true));
+                    lineFig.Segments.Add(new BezierSegment(c1, c2, p1, true));
+                }
+                areaFig.Segments.Add(new LineSegment(new Point(pts[n - 1].X, padTop + plotH), false));
+
+                LinearGradientBrush fill = new LinearGradientBrush();
+                fill.StartPoint = new Point(0, 0);
+                fill.EndPoint = new Point(0, 1);
+                fill.GradientStops.Add(new GradientStop(Color.FromArgb(isDark ? (byte)70 : (byte)52, strokeColor.R, strokeColor.G, strokeColor.B), 0.0));
+                fill.GradientStops.Add(new GradientStop(Color.FromArgb(0, strokeColor.R, strokeColor.G, strokeColor.B), 1.0));
+                fill.Freeze();
+
+                PathGeometry ag = new PathGeometry(); ag.Figures.Add(areaFig);
+                canvas.Children.Add(new Path { Data = ag, Fill = fill, IsHitTestVisible = false });
+
+                PathGeometry lg = new PathGeometry(); lg.Figures.Add(lineFig);
+                canvas.Children.Add(new Path { Data = lg, Stroke = strokeBrush, StrokeThickness = 1.8, StrokeLineJoin = PenLineJoin.Round, IsHitTestVisible = false });
+            }
+
+            // 峰值点与末端点清晰高亮 + 逐点透明热区支持悬停看单笔详情
+            double hitW = n > 1 ? Math.Max(6.0, plotW / n) : plotW;
+            for (int i = 0; i < n; i++)
+            {
+                bool isHighlight = (i == peakIdx || i == n - 1);
+                if (isHighlight)
+                {
+                    double ds = i == peakIdx ? 6.5 : 5.5;
+                    Ellipse dot = new Ellipse
+                    {
+                        Width = ds,
+                        Height = ds,
+                        Fill = strokeBrush,
+                        Stroke = DesignSystem.ThemeBrush("BgCard", isDark),
+                        StrokeThickness = 1.4,
+                        IsHitTestVisible = false
+                    };
+                    Canvas.SetLeft(dot, pts[i].X - ds * 0.5);
+                    Canvas.SetTop(dot, pts[i].Y - ds * 0.5);
+                    canvas.Children.Add(dot);
+                }
+                if (tooltips != null && i < tooltips.Count && !string.IsNullOrEmpty(tooltips[i]))
+                {
+                    Rectangle hit = new Rectangle
+                    {
+                        Width = hitW,
+                        Height = height,
+                        Fill = Brushes.Transparent,
+                        ToolTip = tooltips[i],
+                        Cursor = Cursors.Hand
+                    };
+                    Canvas.SetLeft(hit, Math.Max(0.0, pts[i].X - hitW * 0.5));
+                    Canvas.SetTop(hit, 0.0);
+                    canvas.Children.Add(hit);
+                }
+            }
         }
     }
 }

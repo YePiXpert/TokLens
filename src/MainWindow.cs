@@ -537,6 +537,7 @@ namespace TokLens
 
         private Button[] _leftModeBtns;
         private Button _clearFilterBtn;
+        private Border _overviewDonutHost;
         private StackPanel _toolsStack;
 
         private TextBlock _trendTitleText;
@@ -558,6 +559,8 @@ namespace TokLens
         private TextBlock _overviewLiveTickerText;
         private DataGrid _overviewLiveGrid;
         private Border _overviewLiveEmpty;
+        private ResponsiveColumns _overviewColumns;
+        private DataGridColumn _overviewTierCol, _overviewTpsCol;
 
         // 视图 1（实时请求流）控件
         private TextBox _liveSearchInput;
@@ -566,19 +569,34 @@ namespace TokLens
         private Shapes.Path _livePauseIcon;
         private TextBlock _livePauseBtnText;
         private TextBlock _liveStreamSummaryText;
+        private Border _liveSparkCard;
+        private TextBlock _liveSparkTitleText;
+        private TextBlock _liveSparkStatsText;
+        private Canvas _liveSparkCanvas;
+        private List<double> _liveSparkValues = new List<double>();
+        private List<string> _liveSparkTooltips = new List<string>();
+        private bool _liveSparkIsTps = true;
         private DataGrid _liveGrid;
         private Border _liveEmptyOverlay;
         private TextBlock _liveEmptyTitle;
 
         // 视图 2（模型与工具账单）控件
+        private Border _modelDonutHost;
         private Grid _modelStackedBarGrid;
         private WrapPanel _modelLegendWrap;
+        private Grid _modelTokenCompGrid;
+        private WrapPanel _modelTokenLegendWrap;
         private TextBox _modelSearchInput;
         private TextBlock _modelCountSummaryText;
         private DataGrid _modelGrid;
         private Border _modelEmptyOverlay;
+        private ResponsiveColumns _modelColumns;
+        private DataGridColumn _modelTierCol;
 
         // 视图 7（设备与 VPS 集群）控件
+        private Border _deviceShareCard;
+        private Grid _deviceShareBarGrid;
+        private WrapPanel _deviceShareLegendWrap;
         private StackPanel _deviceCardsStack;
         private TextBlock _deviceClusterSummaryText;
         private DataGrid _machineGrid;
@@ -3381,9 +3399,9 @@ namespace TokLens
             // Row 1: 中部 Bento 双栏（左侧工具/设备消耗排行 + 右侧平滑面积折线 / 圆角柱状趋势图）
             Grid midGrid = new Grid();
             midGrid.Margin = new Thickness(0, 10, 0, 10);
-            midGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.05, GridUnitType.Star) });
+            midGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.16, GridUnitType.Star) });
             midGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(10) });
-            midGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.55, GridUnitType.Star) });
+            midGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.44, GridUnitType.Star) });
 
             // 左卡：工具 / 设备消耗构成排行
             Border rankCard = ModernControlsFactory.CreateCard(new Thickness(13, 10, 13, 10));
@@ -3444,15 +3462,37 @@ namespace TokLens
             Grid.SetRow(rankHead, 0);
             rankGrid.Children.Add(rankHead);
 
+            Grid rankBody = new Grid { Margin = new Thickness(0, 6, 0, 0) };
+            rankBody.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            rankBody.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            _overviewDonutHost = new Border
+            {
+                Margin = new Thickness(0, 0, 10, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Center
+            };
+            Grid.SetColumn(_overviewDonutHost, 0);
+            rankBody.Children.Add(_overviewDonutHost);
+
             ScrollViewer rankSv = new ScrollViewer
             {
                 VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
-                Margin = new Thickness(0, 6, 0, 0)
+                VerticalAlignment = VerticalAlignment.Center
             };
             _toolsStack = new StackPanel();
             rankSv.Content = _toolsStack;
-            Grid.SetRow(rankSv, 1);
-            rankGrid.Children.Add(rankSv);
+            Grid.SetColumn(rankSv, 1);
+            rankBody.Children.Add(rankSv);
+
+            rankBody.SizeChanged += delegate(object s, SizeChangedEventArgs e)
+            {
+                if (_overviewDonutHost != null)
+                    _overviewDonutHost.Visibility = e.NewSize.Width >= 320.0 ? Visibility.Visible : Visibility.Collapsed;
+            };
+
+            Grid.SetRow(rankBody, 1);
+            rankGrid.Children.Add(rankBody);
 
             rankCard.Child = rankGrid;
             Grid.SetColumn(rankCard, 0);
@@ -3747,31 +3787,17 @@ namespace TokLens
             return tb;
         }
 
-        // -------------------- 视图 1：实时请求流（100% 全高视口，同屏可看 18~24 行） --------------------
+        // -------------------- 视图 1：实时请求流（100% 全高视口，含紧凑速率走势条） --------------------
         private UIElement BuildLiveStreamView()
         {
             Grid g = new Grid();
             g.Margin = new Thickness(16, 12, 16, 14);
             g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(38) });
+            g.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-            // 顶部工具栏：即时搜索框 (Ctrl+F) + 暂停/恢复刷新按钮 + 最新请求动态摘要
-            DockPanel toolbar = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
-
-            StackPanel rightBar = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-
-            _liveStreamSummaryText = new TextBlock
-            {
-                Text = "实时监听中",
-                FontSize = DesignSystem.TextCaption,
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 10, 0),
-                MaxWidth = 420,
-                TextTrimming = TextTrimming.CharacterEllipsis
-            };
-            _liveStreamSummaryText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
-            ModernControlsFactory.EnableTabularNumbers(_liveStreamSummaryText, false);
-            rightBar.Children.Add(_liveStreamSummaryText);
+            // 顶部工具栏：左侧搜索框 + 右侧暂停按钮 + 中间弹性最新请求摘要（不写死 MaxWidth 防止截断）
+            DockPanel toolbar = new DockPanel { Margin = new Thickness(0, 0, 0, 8), LastChildFill = true };
 
             _livePauseBtn = ModernControlsFactory.CreateButton("", "secondary");
             _livePauseBtn.Height = 30;
@@ -3802,13 +3828,11 @@ namespace TokLens
                     UpdateLivePauseButtonVisual();
                 }
             };
-            rightBar.Children.Add(_livePauseBtn);
-
-            DockPanel.SetDock(rightBar, Dock.Right);
-            toolbar.Children.Add(rightBar);
+            DockPanel.SetDock(_livePauseBtn, Dock.Right);
+            toolbar.Children.Add(_livePauseBtn);
 
             StackPanel leftBar = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            Border searchWrap = CreateSearchInputWithIcon("过滤工具、模型名称或请求时间... (Ctrl+F)", 260, out _liveSearchInput);
+            Border searchWrap = CreateSearchInputWithIcon("过滤工具、模型名称或请求时间... (Ctrl+F)", 246, out _liveSearchInput);
             _liveSearchInput.TextChanged += delegate(object s, TextChangedEventArgs e)
             {
                 _liveSearchQuery = (_liveSearchInput.Text ?? "").Trim();
@@ -3833,10 +3857,64 @@ namespace TokLens
                 RefreshDashboardView();
             };
             leftBar.Children.Add(_liveClearFilterBtn);
-
+            DockPanel.SetDock(leftBar, Dock.Left);
             toolbar.Children.Add(leftBar);
+
+            _liveStreamSummaryText = new TextBlock
+            {
+                Text = "实时监听中",
+                FontSize = DesignSystem.TextCaption,
+                VerticalAlignment = VerticalAlignment.Center,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(12, 0, 12, 0),
+                TextTrimming = TextTrimming.CharacterEllipsis
+            };
+            _liveStreamSummaryText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            ModernControlsFactory.EnableTabularNumbers(_liveStreamSummaryText, false);
+            toolbar.Children.Add(_liveStreamSummaryText);
+
             Grid.SetRow(toolbar, 0);
             g.Children.Add(toolbar);
+
+            // 紧凑实时输出速率 / 规模走势微图卡片（无数据时自动隐藏，不占空间）
+            _liveSparkCard = ModernControlsFactory.CreateCard(new Thickness(14, 9, 14, 9));
+            _liveSparkCard.Margin = new Thickness(0, 0, 0, 10);
+            _liveSparkCard.Visibility = Visibility.Collapsed;
+            Grid sparkGrid = new Grid();
+            sparkGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            sparkGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(16) });
+            sparkGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            StackPanel sparkLeft = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            _liveSparkTitleText = new TextBlock
+            {
+                Text = "近期请求输出速率走势",
+                FontSize = DesignSystem.TextBody,
+                FontWeight = FontWeights.SemiBold
+            };
+            _liveSparkTitleText.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            sparkLeft.Children.Add(_liveSparkTitleText);
+
+            _liveSparkStatsText = new TextBlock
+            {
+                Text = "",
+                FontFamily = DesignSystem.FontMono,
+                FontSize = DesignSystem.TextCaption,
+                Margin = new Thickness(0, 4, 0, 0)
+            };
+            _liveSparkStatsText.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
+            ModernControlsFactory.EnableTabularNumbers(_liveSparkStatsText, false);
+            sparkLeft.Children.Add(_liveSparkStatsText);
+            Grid.SetColumn(sparkLeft, 0);
+            sparkGrid.Children.Add(sparkLeft);
+
+            _liveSparkCanvas = new Canvas { Height = 44, ClipToBounds = true, Background = Brushes.Transparent };
+            _liveSparkCanvas.SizeChanged += delegate(object s, SizeChangedEventArgs e) { RedrawLiveSparkline(); };
+            Grid.SetColumn(_liveSparkCanvas, 2);
+            sparkGrid.Children.Add(_liveSparkCanvas);
+            _liveSparkCard.Child = sparkGrid;
+            Grid.SetRow(_liveSparkCard, 1);
+            g.Children.Add(_liveSparkCard);
 
             Border tableCard = ModernControlsFactory.CreateCard(new Thickness(0));
             Grid body = new Grid();
@@ -3851,7 +3929,7 @@ namespace TokLens
             body.Children.Add(_liveEmptyOverlay);
 
             tableCard.Child = body;
-            Grid.SetRow(tableCard, 1);
+            Grid.SetRow(tableCard, 2);
             g.Children.Add(tableCard);
             return g;
         }
@@ -3884,11 +3962,24 @@ namespace TokLens
             g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(38) });
             g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-            // 顶部：Top 模型多色堆叠占比分布条卡片
-            Border distCard = ModernControlsFactory.CreateCard(new Thickness(14, 10, 14, 10));
+            // 顶部：双栏视觉构成分析卡（左：环形占比图 + 模型堆叠条；右：Token 四分量构成条）
+            Border distCard = ModernControlsFactory.CreateCard(new Thickness(14, 11, 14, 11));
             distCard.Margin = new Thickness(0, 0, 0, 10);
-            StackPanel distSp = new StackPanel();
+            Grid distCols = new Grid();
+            distCols.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            distCols.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.45, GridUnitType.Star) });
+            distCols.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(16) });
+            distCols.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1.0, GridUnitType.Star) });
 
+            _modelDonutHost = new Border
+            {
+                Margin = new Thickness(0, 0, 14, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            Grid.SetColumn(_modelDonutHost, 0);
+            distCols.Children.Add(_modelDonutHost);
+
+            StackPanel distSp = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
             DockPanel distHead = new DockPanel();
             _modelCountSummaryText = new TextBlock
             {
@@ -3903,7 +3994,7 @@ namespace TokLens
 
             TextBlock distTitle = new TextBlock
             {
-                Text = "主力模型账单构成分布",
+                Text = "主力模型账单构成",
                 FontSize = DesignSystem.TextBody,
                 FontWeight = FontWeights.SemiBold,
                 VerticalAlignment = VerticalAlignment.Center
@@ -3914,8 +4005,8 @@ namespace TokLens
 
             Border barFrame = new Border
             {
-                Height = 10,
-                CornerRadius = new CornerRadius(5),
+                Height = 9,
+                CornerRadius = new CornerRadius(4.5),
                 Margin = new Thickness(0, 8, 0, 7),
                 ClipToBounds = true
             };
@@ -3926,8 +4017,48 @@ namespace TokLens
 
             _modelLegendWrap = new WrapPanel { Orientation = Orientation.Horizontal };
             distSp.Children.Add(_modelLegendWrap);
+            Grid.SetColumn(distSp, 1);
+            distCols.Children.Add(distSp);
 
-            distCard.Child = distSp;
+            // 右栏：Token 四分量堆叠构成（新输入 / 缓存读 / 缓存写 / 输出）
+            Border rightSep = new Border
+            {
+                Width = 1,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 2, 0, 2)
+            };
+            rightSep.SetResourceReference(Border.BackgroundProperty, "BorderSubtle");
+            Grid.SetColumn(rightSep, 2);
+            distCols.Children.Add(rightSep);
+
+            StackPanel tokCompSp = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+            TextBlock tokCompTitle = new TextBlock
+            {
+                Text = "Token 结构与缓存复用",
+                FontSize = DesignSystem.TextBody,
+                FontWeight = FontWeights.SemiBold
+            };
+            tokCompTitle.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            tokCompSp.Children.Add(tokCompTitle);
+
+            Border tokBarFrame = new Border
+            {
+                Height = 9,
+                CornerRadius = new CornerRadius(4.5),
+                Margin = new Thickness(0, 8, 0, 7),
+                ClipToBounds = true
+            };
+            tokBarFrame.SetResourceReference(Border.BackgroundProperty, "BgHoverStrong");
+            _modelTokenCompGrid = new Grid();
+            tokBarFrame.Child = _modelTokenCompGrid;
+            tokCompSp.Children.Add(tokBarFrame);
+
+            _modelTokenLegendWrap = new WrapPanel { Orientation = Orientation.Horizontal };
+            tokCompSp.Children.Add(_modelTokenLegendWrap);
+            Grid.SetColumn(tokCompSp, 3);
+            distCols.Children.Add(tokCompSp);
+
+            distCard.Child = distCols;
             Grid.SetRow(distCard, 0);
             g.Children.Add(distCard);
 
@@ -3982,16 +4113,49 @@ namespace TokLens
             return g;
         }
 
-        // -------------------- 视图 3：设备与 VPS 集群（100% 全高，OrbStack 风格卡片 + 对比表） --------------------
+        // -------------------- 视图 3：设备与 VPS 集群（多设备占比条 + 卡片 + 对比表） --------------------
         private UIElement BuildDevicesView()
         {
             Grid g = new Grid();
             g.Margin = new Thickness(16, 12, 16, 14);
             g.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
+            g.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
             g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(30) });
             g.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
 
-            // 顶部：OrbStack 风格设备状态卡片横向滚动列
+            // 顶部：多设备消耗占比分布条（>= 2 台设备且有消耗时显示）
+            _deviceShareCard = ModernControlsFactory.CreateCard(new Thickness(14, 10, 14, 10));
+            _deviceShareCard.Margin = new Thickness(0, 0, 0, 10);
+            _deviceShareCard.Visibility = Visibility.Collapsed;
+            StackPanel shareSp = new StackPanel();
+            TextBlock shareTitle = new TextBlock
+            {
+                Text = "多设备消耗占比分布",
+                FontSize = DesignSystem.TextBody,
+                FontWeight = FontWeights.SemiBold
+            };
+            shareTitle.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            shareSp.Children.Add(shareTitle);
+
+            Border devBarFrame = new Border
+            {
+                Height = 9,
+                CornerRadius = new CornerRadius(4.5),
+                Margin = new Thickness(0, 7, 0, 6),
+                ClipToBounds = true
+            };
+            devBarFrame.SetResourceReference(Border.BackgroundProperty, "BgHoverStrong");
+            _deviceShareBarGrid = new Grid();
+            devBarFrame.Child = _deviceShareBarGrid;
+            shareSp.Children.Add(devBarFrame);
+
+            _deviceShareLegendWrap = new WrapPanel { Orientation = Orientation.Horizontal };
+            shareSp.Children.Add(_deviceShareLegendWrap);
+            _deviceShareCard.Child = shareSp;
+            Grid.SetRow(_deviceShareCard, 0);
+            g.Children.Add(_deviceShareCard);
+
+            // 设备状态卡片行
             ScrollViewer cardsSv = new ScrollViewer
             {
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Auto,
@@ -4000,7 +4164,7 @@ namespace TokLens
             };
             _deviceCardsStack = new StackPanel { Orientation = Orientation.Horizontal };
             cardsSv.Content = _deviceCardsStack;
-            Grid.SetRow(cardsSv, 0);
+            Grid.SetRow(cardsSv, 1);
             g.Children.Add(cardsSv);
 
             // 中部标题与集群摘要行
@@ -4024,14 +4188,14 @@ namespace TokLens
             };
             listHdr.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
             bar.Children.Add(listHdr);
-            Grid.SetRow(bar, 1);
+            Grid.SetRow(bar, 2);
             g.Children.Add(bar);
 
             // 底部全高设备对比 DataGrid
             Border tableCard = ModernControlsFactory.CreateCard(new Thickness(0));
             _machineGrid = CreateMachineDataGrid();
             tableCard.Child = _machineGrid;
-            Grid.SetRow(tableCard, 2);
+            Grid.SetRow(tableCard, 3);
             g.Children.Add(tableCard);
 
             return g;
@@ -4326,45 +4490,49 @@ namespace TokLens
 
             if (compactOverviewMode)
             {
-                // 概览只做快览：明细列（缓存、耗时、速率）留给「请求明细」页
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "时间", "TimeText", "TimestampMs", new DataGridLength(88), false, true, false));
-                dg.Columns.Add(ModernDataGridFactory.MakeBadgeColumn("AI 工具", "Tool", "Tool", new DataGridLength(128)));
+                // 概览快览：补齐速率列，空档位列自动隐藏，AI 工具不截断
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "时间", "TimeText", "TimestampMs", new DataGridLength(84), false, true, false));
+                dg.Columns.Add(ModernDataGridFactory.MakeBadgeColumn("AI 工具", "Tool", "Tool", new DataGridLength(140)));
                 DataGridColumn modelCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "模型", "Model", "Model", new DataGridLength(1.45, DataGridLengthUnitType.Star), false, true, true);
-                modelCol.MinWidth = 132.0;
+                modelCol.MinWidth = 160.0;
                 dg.Columns.Add(modelCol);
-                dg.Columns.Add(ModernDataGridFactory.MakeTierColumn("服务档位", new DataGridLength(144)));
-                DataGridColumn quickOutputCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "输出", "OutputText", "Output", new DataGridLength(72), true, true, false);
+                DataGridColumn tierCol = ModernDataGridFactory.MakeTierColumn("服务档位", new DataGridLength(122));
+                dg.Columns.Add(tierCol);
+                DataGridColumn quickOutputCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "输出", "OutputText", "Output", new DataGridLength(68), true, true, false);
                 dg.Columns.Add(quickOutputCol);
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "总 Token", "TotalTokensText", "TotalTokens", new DataGridLength(88), true, true, true));
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "金额", "FormattedCost", "CostUsd", new DataGridLength(88), true, true, true));
-                ModernDataGridFactory.EnableResponsiveColumns(dg, quickOutputCol);
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "总 Token", "TotalTokensText", "TotalTokens", new DataGridLength(84), true, true, true));
+                DataGridColumn quickTpsCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "速率", "TpsText", "Tps", new DataGridLength(102), true, true, false);
+                dg.Columns.Add(quickTpsCol);
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "金额", "FormattedCost", "CostUsd", new DataGridLength(86), true, true, true));
+                _overviewTierCol = tierCol; _overviewTpsCol = quickTpsCol;
+                _overviewColumns = ModernDataGridFactory.EnableResponsiveColumns(dg, quickOutputCol, quickTpsCol);
             }
             else
             {
-                // 完整明细的列比较多：窗口变窄时，按下面的顺序依次收起次要列，
-                // 时间、工具、模型、档位、总计与花费始终保留，不再出现表头和数字被截断的情况。
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "时间", "TimeText", "TimestampMs", new DataGridLength(88), false, true, false));
-                dg.Columns.Add(ModernDataGridFactory.MakeBadgeColumn("AI 工具", "Tool", "Tool", new DataGridLength(124)));
-                DataGridColumn modelCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "模型", "Model", "Model", new DataGridLength(1.3, DataGridLengthUnitType.Star), false, true, true);
-                modelCol.MinWidth = 132.0;
+                // 完整明细：修正耗时/速率/工具/总Token 截断，空档位列自动释放宽度给模型与速率
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "时间", "TimeText", "TimestampMs", new DataGridLength(84), false, true, false));
+                dg.Columns.Add(ModernDataGridFactory.MakeBadgeColumn("AI 工具", "Tool", "Tool", new DataGridLength(140)));
+                DataGridColumn modelCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "模型", "Model", "Model", new DataGridLength(1.45, DataGridLengthUnitType.Star), false, true, true);
+                modelCol.MinWidth = 176.0;
                 dg.Columns.Add(modelCol);
-                dg.Columns.Add(ModernDataGridFactory.MakeTierColumn("服务档位", new DataGridLength(144)));
-                DataGridColumn freshCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "新输入", "FreshInputText", "FreshInput", new DataGridLength(62), true, true, false);
-                DataGridColumn readCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存读", "CacheReadText", "CacheRead", new DataGridLength(70), true, true, false);
+                DataGridColumn tierCol = ModernDataGridFactory.MakeTierColumn("服务档位", new DataGridLength(122));
+                dg.Columns.Add(tierCol);
+                DataGridColumn freshCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "新输入", "FreshInputText", "FreshInput", new DataGridLength(68), true, true, false);
+                DataGridColumn readCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存读", "CacheReadText", "CacheRead", new DataGridLength(76), true, true, false);
                 DataGridColumn writeCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存写", "CacheWriteText", "CacheWrite", new DataGridLength(70), true, true, false);
-                DataGridColumn outputCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "输出", "OutputText", "Output", new DataGridLength(62), true, true, false);
-                DataGridColumn durationCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "耗时", "DurationText", "DurationMs", new DataGridLength(58), true, true, false);
-                DataGridColumn tpsCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "速率", "TpsText", "Tps", new DataGridLength(76), true, true, false);
+                DataGridColumn outputCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "输出", "OutputText", "Output", new DataGridLength(68), true, true, false);
+                DataGridColumn durationCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "耗时", "DurationText", "DurationMs", new DataGridLength(74), true, true, false);
+                DataGridColumn tpsCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "速率", "TpsText", "Tps", new DataGridLength(108), true, true, false);
                 dg.Columns.Add(freshCol);
                 dg.Columns.Add(readCol);
                 dg.Columns.Add(writeCol);
                 dg.Columns.Add(outputCol);
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "总 Token", "TotalTokensText", "TotalTokens", new DataGridLength(74), true, true, true));
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "总 Token", "TotalTokensText", "TotalTokens", new DataGridLength(84), true, true, true));
                 dg.Columns.Add(durationCol);
                 dg.Columns.Add(tpsCol);
-                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "金额", "FormattedCost", "CostUsd", new DataGridLength(80), true, true, true));
-                _liveDurationCol = durationCol; _liveTpsCol = tpsCol;
-                _liveColumns = ModernDataGridFactory.EnableResponsiveColumns(dg, writeCol, freshCol, durationCol, tpsCol, readCol, outputCol);
+                dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "金额", "FormattedCost", "CostUsd", new DataGridLength(86), true, true, true));
+                _liveTierCol = tierCol; _liveDurationCol = durationCol; _liveTpsCol = tpsCol;
+                _liveColumns = ModernDataGridFactory.EnableResponsiveColumns(dg, writeCol, freshCol, readCol, durationCol, outputCol, tpsCol);
             }
 
             ContextMenu cm = new ContextMenu();
@@ -4444,28 +4612,30 @@ namespace TokLens
             // 同一模型会按档位与金额来源拆成多行，所以金额来源用短标签始终保留（完整说明在悬停提示里），
             // 否则几行看起来一模一样。
             DataGridColumn modelNameCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "模型", "Model", "Model", new DataGridLength(1.65, DataGridLengthUnitType.Star), false, true, true);
-            modelNameCol.MinWidth = 136.0;
+            modelNameCol.MinWidth = 176.0;
             dg.Columns.Add(modelNameCol);
-            dg.Columns.Add(ModernDataGridFactory.MakeTierColumn("服务档位", new DataGridLength(144)));
-            DataGridTextColumn basisCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "金额来源", "CostBasisShortLabel", "CostBasisLabel", new DataGridLength(86), false, false, false);
+            DataGridColumn modelTierCol = ModernDataGridFactory.MakeTierColumn("服务档位", new DataGridLength(122));
+            dg.Columns.Add(modelTierCol);
+            DataGridTextColumn basisCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "金额来源", "CostBasisShortLabel", "CostBasisLabel", new DataGridLength(82), false, false, false);
             basisCol.ElementStyle.Setters.Add(new Setter(FrameworkElement.ToolTipProperty, new Binding("CostBasisLabel")));
             dg.Columns.Add(basisCol);
-            dg.Columns.Add(ModernDataGridFactory.MakeBadgeColumn("工具", "Tool", "Tool", new DataGridLength(120)));
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "请求", "Turns", "Turns", new DataGridLength(56), true, true, false));
+            dg.Columns.Add(ModernDataGridFactory.MakeBadgeColumn("工具", "Tool", "Tool", new DataGridLength(140)));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "请求", "Turns", "Turns", new DataGridLength(60), true, true, false));
             DataGridColumn freshCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "新输入", "FreshInputText", "FreshInput", new DataGridLength(76), true, true, false);
-            DataGridColumn readCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存读", "CacheReadText", "CacheRead", new DataGridLength(78), true, true, false);
+            DataGridColumn readCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "缓存读", "CacheReadText", "CacheRead", new DataGridLength(80), true, true, false);
             DataGridColumn outputCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "输出", "OutputText", "Output", new DataGridLength(72), true, true, false);
-            DataGridColumn hitCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "命中率", "CacheHitText", "CacheRead", new DataGridLength(70), true, true, false);
+            DataGridColumn hitCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "命中率", "CacheHitText", "CacheRead", new DataGridLength(72), true, true, false);
             // 单价列按百万输入单价排序（SortMemberPath = InputPerM），不是按花费
-            DataGridColumn rateCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "单价 $/M", "RateLabel", "InputPerM", new DataGridLength(104), true, true, false);
+            DataGridColumn rateCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "单价 $/M", "RateLabel", "InputPerM", new DataGridLength(108), true, true, false);
             dg.Columns.Add(freshCol);
             dg.Columns.Add(readCol);
             dg.Columns.Add(outputCol);
             dg.Columns.Add(hitCol);
             dg.Columns.Add(rateCol);
-            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "金额", "FormattedCost", "CostUsd", new DataGridLength(96), true, true, true));
+            dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "金额", "FormattedCost", "CostUsd", new DataGridLength(92), true, true, true));
             dg.Columns.Add(ModernDataGridFactory.MakeShareBarColumn("占比", "ShareText", "BarRatio", "BarRatio", new DataGridLength(112)));
-            ModernDataGridFactory.EnableResponsiveColumns(dg, rateCol, freshCol, hitCol, readCol, outputCol);
+            _modelTierCol = modelTierCol;
+            _modelColumns = ModernDataGridFactory.EnableResponsiveColumns(dg, freshCol, rateCol, hitCol, readCol, outputCol);
 
             ContextMenu cm = new ContextMenu();
             cm.Resources = Resources;
@@ -4544,7 +4714,7 @@ namespace TokLens
             DataGridColumn nameCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "设备名称", "MachineName", "MachineName", new DataGridLength(1.35, DataGridLengthUnitType.Star), false, false, true);
             nameCol.MinWidth = 138.0;
             dg.Columns.Add(nameCol);
-            DataGridColumn typeCol = ModernDataGridFactory.MakeBadgeColumn("节点类型", "TypeBadge", "TypeBadge", new DataGridLength(104));
+            DataGridColumn typeCol = ModernDataGridFactory.MakeBadgeColumn("节点类型", "TypeBadge", "TypeBadge", new DataGridLength(122));
             dg.Columns.Add(typeCol);
             dg.Columns.Add(ModernDataGridFactory.MakeTextOrMonoColumn(dg, "在线状态", "StatusText", "IsOnline", new DataGridLength(98), false, false, false));
             DataGridColumn osCol = ModernDataGridFactory.MakeTextOrMonoColumn(dg, "操作系统", "OsInfo", "OsInfo", new DataGridLength(1.15, DataGridLengthUnitType.Star), false, false, false);
@@ -4786,6 +4956,10 @@ namespace TokLens
             if (_activeView == ViewOverview)
             {
                 Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(RedrawChart));
+            }
+            else if (_activeView == ViewLiveStream)
+            {
+                Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(RedrawLiveSparkline));
             }
         }
 
@@ -5225,10 +5399,17 @@ namespace TokLens
                 MachineRowView mv = new MachineRowView();
                 mv.MachineId = ns.MachineId;
                 mv.MachineName = string.IsNullOrWhiteSpace(ns.MachineName) ? ns.MachineId : ns.MachineName;
-                bool isVps = string.Equals(ns.MachineType, "vps", StringComparison.OrdinalIgnoreCase) ||
-                             string.Equals(ns.MachineType, "linux", StringComparison.OrdinalIgnoreCase);
+                string mt = ns.MachineType ?? "";
+                bool isVps = mt.IndexOf("vps", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                             mt.IndexOf("linux", StringComparison.OrdinalIgnoreCase) >= 0;
                 mv.TypeBadge = ns.IsLocal ? "Windows 本机" : (isVps ? "Linux VPS" : "远端电脑");
-                mv.OsInfo = string.IsNullOrWhiteSpace(ns.OsInfo) ? (isVps ? "Linux" : "Windows") : ns.OsInfo;
+                string rawOs = string.IsNullOrWhiteSpace(ns.OsInfo) ? (isVps ? "Linux" : "Windows") : ns.OsInfo.Trim();
+                if (rawOs.StartsWith("Microsoft Windows NT 6.2.", StringComparison.OrdinalIgnoreCase) ||
+                    rawOs.StartsWith("Microsoft Windows NT 10.0.", StringComparison.OrdinalIgnoreCase))
+                    rawOs = "Windows 10/11";
+                else if (rawOs.StartsWith("Microsoft Windows NT ", StringComparison.OrdinalIgnoreCase))
+                    rawOs = "Windows " + rawOs.Substring(21);
+                mv.OsInfo = rawOs;
                 string statusLbl;
                 mv.IsOnline = ParseOnlineState(ns, out statusLbl);
                 mv.StatusText = statusLbl;
@@ -5601,8 +5782,15 @@ namespace TokLens
             _kpiTokVal.Text = FormatterUtil.FormatTokens(totAllTokens);
             _kpiTokSub.Text = string.Format(
                 CultureInfo.InvariantCulture,
-                "新增 {0} · 缓存读 {1} · 输出 {2}",
+                "新 {0} · 缓读 {1} · 出 {2}",
                 FormatterUtil.FormatTokens(totFi + totCw),
+                FormatterUtil.FormatTokens(totCr),
+                FormatterUtil.FormatTokens(totOut));
+            _kpiTokSub.ToolTip = string.Format(
+                CultureInfo.InvariantCulture,
+                "新增输入 {0} · 缓存写 {1} · 缓存读 {2} · 输出 {3}",
+                FormatterUtil.FormatTokens(totFi),
+                FormatterUtil.FormatTokens(totCw),
                 FormatterUtil.FormatTokens(totCr),
                 FormatterUtil.FormatTokens(totOut));
 
@@ -5700,6 +5888,20 @@ namespace TokLens
             }
 
             RenderModelStackedBar(allModels, totCostUsd);
+            if (_modelColumns != null)
+            {
+                bool anyModelTier = false;
+                for (int i = 0; i < filteredModels.Count; i++)
+                {
+                    if (filteredModels[i] != null && !string.Equals(filteredModels[i].ServiceTierKind, "unknown", StringComparison.Ordinal))
+                    {
+                        anyModelTier = true;
+                        break;
+                    }
+                }
+                _modelColumns.SetAvailable(_modelTierCol, anyModelTier);
+                _modelColumns.Apply();
+            }
             if (_modelCountSummaryText != null)
             {
                 _modelCountSummaryText.Text = string.Format(
@@ -5844,16 +6046,114 @@ namespace TokLens
             RedrawChart();
         }
 
-        // 完整明细表的次要列由它统一决定显隐（宽度不够，或没有计时数据），见 CreateLiveStreamDataGrid
+        // 完整明细表的次要列由它统一决定显隐（宽度不够，或没有计时/档位数据），见 CreateLiveStreamDataGrid
         private ResponsiveColumns _liveColumns;
-        private DataGridColumn _liveDurationCol, _liveTpsCol;
+        private DataGridColumn _liveTierCol, _liveDurationCol, _liveTpsCol;
 
-        private void SetTimingColumnsVisible(bool visible)
+        private void SetTimingColumnsVisible(bool visible, bool anyTier)
         {
             if (_liveColumns == null) return;
+            _liveColumns.SetAvailable(_liveTierCol, anyTier);
             _liveColumns.SetAvailable(_liveDurationCol, visible);
             _liveColumns.SetAvailable(_liveTpsCol, visible);
             _liveColumns.Apply();
+        }
+
+        private void RedrawLiveSparkline()
+        {
+            if (_liveSparkCanvas == null) return;
+            Color stroke = DesignSystem.ThemeColor(_liveSparkIsTps ? "SemanticSuccess" : "AccentText", _isDark);
+            ChartArt.RenderSparkline(
+                _liveSparkCanvas,
+                _liveSparkValues,
+                _liveSparkTooltips,
+                _liveSparkCanvas.ActualWidth,
+                _liveSparkCanvas.ActualHeight,
+                stroke,
+                _isDark);
+        }
+
+        private void UpdateLiveSparkline(List<LiveRequestRowView> rows)
+        {
+            if (_liveSparkCard == null || _liveSparkCanvas == null) return;
+            _liveSparkValues.Clear();
+            _liveSparkTooltips.Clear();
+
+            if (rows == null || rows.Count == 0)
+            {
+                _liveSparkCard.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            List<LiveRequestRowView> timed = new List<LiveRequestRowView>();
+            for (int i = 0; i < rows.Count && timed.Count < 36; i++)
+            {
+                if (rows[i] != null && rows[i].DurationMs > 0 && rows[i].Tps > 0.0)
+                    timed.Add(rows[i]);
+            }
+
+            if (timed.Count >= 2)
+            {
+                _liveSparkIsTps = true;
+                timed.Reverse(); // 按时间从旧到新自左向右绘制
+                double sumTps = 0.0, maxTps = 0.0;
+                List<int> durs = new List<int>(timed.Count);
+                for (int i = 0; i < timed.Count; i++)
+                {
+                    LiveRequestRowView r = timed[i];
+                    _liveSparkValues.Add(r.Tps);
+                    _liveSparkTooltips.Add(string.Format(
+                        CultureInfo.InvariantCulture,
+                        "{0} · {1}\n速率 {2} · 耗时 {3} · 输出 {4}",
+                        r.TimeText, r.Model, r.TpsText, r.DurationText, r.OutputText));
+                    sumTps += r.Tps;
+                    if (r.Tps > maxTps) maxTps = r.Tps;
+                    durs.Add(r.DurationMs);
+                }
+                durs.Sort();
+                int medianDur = durs[durs.Count / 2];
+                double avgTps = sumTps / timed.Count;
+                _liveSparkTitleText.Text = string.Format(CultureInfo.InvariantCulture, "近期 {0} 笔实测速率走势", timed.Count);
+                _liveSparkStatsText.Text = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "均速 {0} · 峰值 {1} · 中位耗时 {2}",
+                    FormatterUtil.FormatTps(avgTps),
+                    FormatterUtil.FormatTps(maxTps),
+                    FormatterUtil.FormatDuration(medianDur));
+                _liveSparkCard.Visibility = Visibility.Visible;
+                RedrawLiveSparkline();
+            }
+            else
+            {
+                int sampleCount = Math.Min(36, rows.Count);
+                if (sampleCount < 2)
+                {
+                    _liveSparkCard.Visibility = Visibility.Collapsed;
+                    return;
+                }
+                _liveSparkIsTps = false;
+                long sumOut = 0L, maxOut = 0L;
+                for (int i = sampleCount - 1; i >= 0; i--)
+                {
+                    LiveRequestRowView r = rows[i];
+                    if (r == null) continue;
+                    _liveSparkValues.Add((double)Math.Max(0L, r.Output));
+                    _liveSparkTooltips.Add(string.Format(
+                        CultureInfo.InvariantCulture,
+                        "{0} · {1}\n输出 {2} · 总计 {3} · {4}",
+                        r.TimeText, r.Model, r.OutputText, r.TotalTokensText, r.FormattedCost));
+                    sumOut += r.Output;
+                    if (r.Output > maxOut) maxOut = r.Output;
+                }
+                _liveSparkTitleText.Text = string.Format(CultureInfo.InvariantCulture, "近期 {0} 笔输出规模走势", _liveSparkValues.Count);
+                _liveSparkStatsText.Text = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "均输出 {0} · 峰值 {1} · 暂无实测计时",
+                    FormatterUtil.FormatTokens(sumOut / Math.Max(1, _liveSparkValues.Count)),
+                    FormatterUtil.FormatTokens(maxOut));
+                _liveSparkCard.Visibility = Visibility.Visible;
+                RedrawLiveSparkline();
+            }
         }
 
         private void RefreshLiveRequestGrids(string cutoffDateStr)
@@ -5941,28 +6241,42 @@ namespace TokLens
                     CultureInfo.InvariantCulture,
                     "最新 {0} · {1} ({2}) · 输出 {3}{4} · {5}",
                     top.TimeText,
-                    top.Tool,
+                    HudTelemetry.ShortTool(top.Tool),
                     top.Model,
                     top.OutputText,
                     hasTps ? " · " + top.TpsText : "",
                     top.FormattedCost);
-                if (_overviewLiveTickerText != null) _overviewLiveTickerText.Text = summary;
-                if (_liveStreamSummaryText != null) _liveStreamSummaryText.Text = summary;
-
+                if (_overviewLiveTickerText != null) { _overviewLiveTickerText.Text = summary; _overviewLiveTickerText.ToolTip = summary; }
+                if (_liveStreamSummaryText != null) { _liveStreamSummaryText.Text = summary; _liveStreamSummaryText.ToolTip = summary; }
             }
             else
             {
                 string fallback = viewingRemoteOnly
                     ? "当前已锁定远端节点（云同步仅传输按日聚合脱敏账单，不含单笔请求时间戳）"
                     : "本机日志监听中 · 仅在日志提供可靠计时时显示请求均速";
-                if (_overviewLiveTickerText != null) _overviewLiveTickerText.Text = fallback;
-                if (_liveStreamSummaryText != null) _liveStreamSummaryText.Text = fallback;
+                if (_overviewLiveTickerText != null) { _overviewLiveTickerText.Text = fallback; _overviewLiveTickerText.ToolTip = null; }
+                if (_liveStreamSummaryText != null) { _liveStreamSummaryText.Text = fallback; _liveStreamSummaryText.ToolTip = null; }
             }
 
             if (_liveClearFilterBtn != null)
             {
                 bool hasLiveFilter = (!string.IsNullOrEmpty(_liveSearchQuery) || _selectedTool != null || _selectedDate != null);
                 _liveClearFilterBtn.Visibility = hasLiveFilter ? Visibility.Visible : Visibility.Collapsed;
+            }
+
+            if (_overviewColumns != null)
+            {
+                bool anyOvTiming = false, anyOvTier = false;
+                for (int i = 0; i < overviewPreviewRows.Count; i++)
+                {
+                    LiveRequestRowView lr = overviewPreviewRows[i];
+                    if (lr == null) continue;
+                    if (lr.DurationMs > 0) anyOvTiming = true;
+                    if (!string.Equals(lr.ServiceTierKind, "unknown", StringComparison.Ordinal)) anyOvTier = true;
+                }
+                _overviewColumns.SetAvailable(_overviewTierCol, anyOvTier);
+                _overviewColumns.SetAvailable(_overviewTpsCol, anyOvTiming);
+                _overviewColumns.Apply();
             }
 
             ModernDataGridFactory.UpdateItemsPreservingState(
@@ -5980,13 +6294,16 @@ namespace TokLens
             UpdateLivePauseButtonVisual();
             if (!_livePaused)
             {
-                // 列表里没有任何一条带可靠计时时，「耗时 / 速率」整列都是「—」，直接隐藏
-                bool anyTiming = false;
+                // 列表里没有任何一条带可靠计时或已知档位时，自动隐藏对应空列释放空间
+                bool anyTiming = false, anyTier = false;
                 foreach (LiveRequestRowView lr in allLiveRows)
                 {
-                    if (lr.DurationMs > 0) { anyTiming = true; break; }
+                    if (lr == null) continue;
+                    if (lr.DurationMs > 0) anyTiming = true;
+                    if (!string.Equals(lr.ServiceTierKind, "unknown", StringComparison.Ordinal)) anyTier = true;
                 }
-                SetTimingColumnsVisible(anyTiming);
+                SetTimingColumnsVisible(anyTiming, anyTier);
+                UpdateLiveSparkline(allLiveRows);
 
                 ModernDataGridFactory.UpdateItemsPreservingState(
                     _liveGrid,
@@ -6010,11 +6327,15 @@ namespace TokLens
         {
             if (_toolsStack == null) return;
             _toolsStack.Children.Clear();
+            List<DonutSlice> slices = new List<DonutSlice>();
+            double sumUsd = 0.0;
+            long sumTok = 0L;
 
             if (_leftRankByMachine)
             {
                 if (machines == null || machines.Count == 0)
                 {
+                    if (_overviewDonutHost != null) _overviewDonutHost.Child = null;
                     _toolsStack.Children.Add(MakeMutedHintRow("暂无多设备账单数据"));
                     return;
                 }
@@ -6024,6 +6345,19 @@ namespace TokLens
                     MachineRowView mv = machines[i];
                     bool isSel = (_selectedMachineId != null && string.Equals(_selectedMachineId, mv.MachineId, StringComparison.OrdinalIgnoreCase));
                     string rightVal = _rankByCost ? mv.FormattedMoney : mv.TotalTokensText;
+                    sumUsd += mv.CostUsd;
+                    sumTok += mv.TotalTokens;
+                    double sv = _rankByCost ? mv.CostUsd : (double)mv.TotalTokens;
+                    if (sv > 0.0)
+                    {
+                        slices.Add(new DonutSlice
+                        {
+                            Label = mv.MachineName,
+                            Value = sv,
+                            ColorHex = mv.ColorHex,
+                            ToolTip = mv.MachineName + " · " + rightVal + " (" + mv.ShareText + ")"
+                        });
+                    }
 
                     Border item = CreateInteractiveRankRow(
                         mv.MachineName,
@@ -6040,11 +6374,18 @@ namespace TokLens
                         });
                     _toolsStack.Children.Add(item);
                 }
+                if (_overviewDonutHost != null)
+                {
+                    string cVal = _rankByCost ? FormatterUtil.FormatMoney(sumUsd, _isCny, _usdToCny) : FormatterUtil.FormatTokens(sumTok);
+                    _overviewDonutHost.Child = ChartArt.BuildDonutRing(
+                        slices, 96.0, 11.5, cVal, machines.Count.ToString(CultureInfo.InvariantCulture) + " 台设备", _isDark);
+                }
             }
             else
             {
                 if (tools == null || tools.Count == 0)
                 {
+                    if (_overviewDonutHost != null) _overviewDonutHost.Child = null;
                     _toolsStack.Children.Add(MakeMutedHintRow("当前时间与设备范围内暂无活跃工具记录"));
                     return;
                 }
@@ -6056,6 +6397,19 @@ namespace TokLens
                     string rightVal = _rankByCost ? tv.FormattedMoney : tv.FormattedTokens;
                     string pctTxt = tv.SharePercent.ToString("F1", CultureInfo.InvariantCulture) + "%";
                     string subBadge = string.Format(CultureInfo.InvariantCulture, "{0} 模型", tv.ModelCount);
+                    sumUsd += tv.CostUsd;
+                    sumTok += tv.TotalTokens;
+                    double sv = _rankByCost ? tv.CostUsd : (double)tv.TotalTokens;
+                    if (sv > 0.0)
+                    {
+                        slices.Add(new DonutSlice
+                        {
+                            Label = tv.Tool,
+                            Value = sv,
+                            ColorHex = tv.ColorHex,
+                            ToolTip = tv.Tool + " · " + rightVal + " (" + pctTxt + ")"
+                        });
+                    }
 
                     Border item = CreateInteractiveRankRow(
                         tv.Tool,
@@ -6071,6 +6425,12 @@ namespace TokLens
                             RefreshDashboardView();
                         });
                     _toolsStack.Children.Add(item);
+                }
+                if (_overviewDonutHost != null)
+                {
+                    string cVal = _rankByCost ? FormatterUtil.FormatMoney(sumUsd, _isCny, _usdToCny) : FormatterUtil.FormatTokens(sumTok);
+                    _overviewDonutHost.Child = ChartArt.BuildDonutRing(
+                        slices, 96.0, 11.5, cVal, tools.Count.ToString(CultureInfo.InvariantCulture) + " 款工具", _isDark);
                 }
             }
         }
@@ -6089,9 +6449,10 @@ namespace TokLens
             {
                 CornerRadius = new CornerRadius(7),
                 BorderThickness = new Thickness(1),
-                Padding = new Thickness(9, 6, 9, 6),
-                Margin = new Thickness(0, 0, 2, 4),
-                Cursor = Cursors.Hand
+                Padding = new Thickness(7, 4, 7, 4),
+                Margin = new Thickness(0, 0, 2, 2),
+                Cursor = Cursors.Hand,
+                ToolTip = string.IsNullOrEmpty(subBadge) ? (name + " · " + valueText + " (" + shareText + ")") : (name + " · " + subBadge + " · " + valueText + " (" + shareText + ")")
             };
 
             if (isSelected)
@@ -6127,7 +6488,38 @@ namespace TokLens
             };
 
             StackPanel sp = new StackPanel();
-            DockPanel topRow = new DockPanel();
+            Grid topRow = new Grid();
+            topRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            topRow.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            Grid leftGrid = new Grid { Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center };
+            leftGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            leftGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            Shapes.Ellipse dot = new Shapes.Ellipse
+            {
+                Width = 7,
+                Height = 7,
+                Fill = DesignSystem.BrushHex(dotHex),
+                Margin = new Thickness(0, 0, 6, 0),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            Grid.SetColumn(dot, 0);
+            leftGrid.Children.Add(dot);
+
+            TextBlock nameTb = new TextBlock
+            {
+                Text = name,
+                FontSize = DesignSystem.TextBody,
+                FontWeight = FontWeights.Medium,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            nameTb.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
+            Grid.SetColumn(nameTb, 1);
+            leftGrid.Children.Add(nameTb);
+            Grid.SetColumn(leftGrid, 0);
+            topRow.Children.Add(leftGrid);
 
             StackPanel rightSp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
             TextBlock valTb = new TextBlock
@@ -6146,7 +6538,7 @@ namespace TokLens
                 Text = shareText,
                 FontFamily = DesignSystem.FontMono,
                 FontSize = DesignSystem.TextCaption,
-                Width = 44,
+                Width = 42,
                 TextAlignment = TextAlignment.Right,
                 Margin = new Thickness(6, 0, 0, 0),
                 VerticalAlignment = VerticalAlignment.Center
@@ -6154,60 +6546,22 @@ namespace TokLens
             pctTb.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
             rightSp.Children.Add(pctTb);
 
-            DockPanel.SetDock(rightSp, Dock.Right);
+            Grid.SetColumn(rightSp, 1);
             topRow.Children.Add(rightSp);
-
-            StackPanel leftSp = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-            Shapes.Ellipse dot = new Shapes.Ellipse
-            {
-                Width = 7,
-                Height = 7,
-                Fill = DesignSystem.BrushHex(dotHex),
-                Margin = new Thickness(0, 0, 7, 0),
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            leftSp.Children.Add(dot);
-
-            TextBlock nameTb = new TextBlock
-            {
-                Text = name,
-                FontSize = DesignSystem.TextBody,
-                FontWeight = FontWeights.Medium,
-                MaxWidth = 148,
-                TextTrimming = TextTrimming.CharacterEllipsis,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            nameTb.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
-            leftSp.Children.Add(nameTb);
-
-            if (!string.IsNullOrEmpty(subBadge))
-            {
-                TextBlock badgeTb = new TextBlock
-                {
-                    Text = subBadge,
-                    FontSize = DesignSystem.TextCaption,
-                    Margin = new Thickness(6, 1, 0, 0),
-                    VerticalAlignment = VerticalAlignment.Center
-                };
-                badgeTb.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
-                leftSp.Children.Add(badgeTb);
-            }
-
-            topRow.Children.Add(leftSp);
             sp.Children.Add(topRow);
 
-            Grid barTrack = new Grid { Height = 3.5, Margin = new Thickness(14, 5, 0, 0) };
+            Grid barTrack = new Grid { Height = 4.0, Margin = new Thickness(13, 4, 0, 0) };
             barTrack.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0.01, barRatio), GridUnitType.Star) });
             barTrack.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0.0, 1.0 - barRatio), GridUnitType.Star) });
 
-            Border bgRail = new Border { CornerRadius = new CornerRadius(1.8) };
+            Border bgRail = new Border { CornerRadius = new CornerRadius(2.2) };
             bgRail.SetResourceReference(Border.BackgroundProperty, "BgHoverStrong");
             Grid.SetColumnSpan(bgRail, 2);
             barTrack.Children.Add(bgRail);
 
             Border fgFill = new Border
             {
-                CornerRadius = new CornerRadius(1.8),
+                CornerRadius = new CornerRadius(2.2),
                 Background = DesignSystem.BrushHex(dotHex)
             };
             Grid.SetColumn(fgFill, 0);
@@ -6237,9 +6591,16 @@ namespace TokLens
             _modelStackedBarGrid.Children.Clear();
             _modelStackedBarGrid.ColumnDefinitions.Clear();
             _modelLegendWrap.Children.Clear();
-
-            if (models == null || models.Count == 0 || totalCostUsd <= 0.0)
+            if (_modelTokenCompGrid != null)
             {
+                _modelTokenCompGrid.Children.Clear();
+                _modelTokenCompGrid.ColumnDefinitions.Clear();
+            }
+            if (_modelTokenLegendWrap != null) _modelTokenLegendWrap.Children.Clear();
+
+            if (models == null || models.Count == 0)
+            {
+                if (_modelDonutHost != null) _modelDonutHost.Child = null;
                 _modelLegendWrap.Children.Add(new TextBlock
                 {
                     Text = "暂无模型账单占比数据",
@@ -6249,9 +6610,59 @@ namespace TokLens
                 return;
             }
 
+            long totFi = 0L, totCr = 0L, totCw = 0L, totOut = 0L;
+            for (int i = 0; i < models.Count; i++)
+            {
+                if (models[i] == null) continue;
+                totFi += Math.Max(0L, models[i].FreshInput);
+                totCr += Math.Max(0L, models[i].CacheRead);
+                totCw += Math.Max(0L, models[i].CacheWrite);
+                totOut += Math.Max(0L, models[i].Output);
+            }
+            long totAll = totFi + totCr + totCw + totOut;
+
+            // 渲染右栏 Token 四分量结构条
+            if (_modelTokenCompGrid != null && _modelTokenLegendWrap != null && totAll > 0L)
+            {
+                string[] labels = new string[] { "缓存读", "新输入", "缓存写", "输出" };
+                long[] vals = new long[] { totCr, totFi, totCw, totOut };
+                string[] colorKeys = new string[] { "ChartCacheRead", "ChartFresh", "SemanticWarning", "ChartOutput" };
+                int segCol = 0;
+                for (int k = 0; k < 4; k++)
+                {
+                    if (vals[k] <= 0L) continue;
+                    double frac = (double)vals[k] / totAll;
+                    string hex = DesignSystem.ThemeHex(colorKeys[k], _isDark);
+                    string pct = (frac * 100.0).ToString("F1", CultureInfo.InvariantCulture) + "%";
+                    _modelTokenCompGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0.015, frac), GridUnitType.Star) });
+                    Border seg = new Border
+                    {
+                        Background = DesignSystem.BrushHex(hex),
+                        Margin = new Thickness(segCol == 0 ? 0 : 1.5, 0, 0, 0),
+                        ToolTip = labels[k] + " · " + FormatterUtil.FormatTokens(vals[k]) + " (" + pct + ")"
+                    };
+                    Grid.SetColumn(seg, segCol++);
+                    _modelTokenCompGrid.Children.Add(seg);
+                    _modelTokenLegendWrap.Children.Add(MakeLegendChip(hex, labels[k] + " " + FormatterUtil.FormatTokens(vals[k]), pct));
+                }
+            }
+
+            if (totalCostUsd <= 0.0)
+            {
+                if (_modelDonutHost != null) _modelDonutHost.Child = null;
+                _modelLegendWrap.Children.Add(new TextBlock
+                {
+                    Text = "暂无已计价模型占比数据",
+                    FontSize = DesignSystem.TextCaption,
+                    Foreground = DesignSystem.ThemeBrush("FgMuted", _isDark)
+                });
+                return;
+            }
+
             string[] palette = DesignSystem.GetChartPalette(_isDark);
             int topCount = Math.Min(6, models.Count);
             double coveredUsd = 0.0;
+            List<DonutSlice> donutSlices = new List<DonutSlice>();
 
             for (int i = 0; i < topCount; i++)
             {
@@ -6262,6 +6673,17 @@ namespace TokLens
                 if (i > 0 && i < palette.Length && string.Equals(hex, DesignSystem.GetProviderColorHex(models[i - 1].Model + " " + models[i - 1].Tool, _isDark), StringComparison.OrdinalIgnoreCase))
                 {
                     hex = palette[i % palette.Length];
+                }
+
+                if (m.CostUsd > 0.0)
+                {
+                    donutSlices.Add(new DonutSlice
+                    {
+                        Label = m.Model,
+                        Value = m.CostUsd,
+                        ColorHex = hex,
+                        ToolTip = m.Model + " (" + m.Tool + ") · " + m.FormattedCost + " · " + m.ShareText
+                    });
                 }
 
                 _modelStackedBarGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(ratio, GridUnitType.Star) });
@@ -6281,6 +6703,15 @@ namespace TokLens
             if (models.Count > topCount && restUsd > 0.0001)
             {
                 double restRatio = Math.Max(0.01, restUsd / totalCostUsd);
+                string otherHex = DesignSystem.ThemeHex("ChartOther", _isDark);
+                string restPct = (restUsd * 100.0 / totalCostUsd).ToString("F1", CultureInfo.InvariantCulture) + "%";
+                donutSlices.Add(new DonutSlice
+                {
+                    Label = "其余模型",
+                    Value = restUsd,
+                    ColorHex = otherHex,
+                    ToolTip = string.Format(CultureInfo.InvariantCulture, "其余 {0} 个模型 · {1}", models.Count - topCount, restPct)
+                });
                 _modelStackedBarGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(restRatio, GridUnitType.Star) });
                 Border otherSeg = new Border
                 {
@@ -6290,8 +6721,18 @@ namespace TokLens
                 Grid.SetColumn(otherSeg, topCount);
                 _modelStackedBarGrid.Children.Add(otherSeg);
 
-                string restPct = (restUsd * 100.0 / totalCostUsd).ToString("F1", CultureInfo.InvariantCulture) + "%";
-                _modelLegendWrap.Children.Add(MakeLegendChip(DesignSystem.ThemeHex("ChartOther", _isDark), string.Format(CultureInfo.InvariantCulture, "其余 {0} 个模型", models.Count - topCount), restPct));
+                _modelLegendWrap.Children.Add(MakeLegendChip(otherHex, string.Format(CultureInfo.InvariantCulture, "其余 {0} 个模型", models.Count - topCount), restPct));
+            }
+
+            if (_modelDonutHost != null)
+            {
+                _modelDonutHost.Child = ChartArt.BuildDonutRing(
+                    donutSlices,
+                    86.0,
+                    11.0,
+                    FormatterUtil.FormatMoney(totalCostUsd, _isCny, _usdToCny),
+                    models.Count.ToString(CultureInfo.InvariantCulture) + " 项",
+                    _isDark);
             }
         }
 
@@ -6300,7 +6741,7 @@ namespace TokLens
             StackPanel sp = new StackPanel
             {
                 Orientation = Orientation.Horizontal,
-                Margin = new Thickness(0, 2, 14, 2),
+                Margin = new Thickness(0, 2, 12, 2),
                 VerticalAlignment = VerticalAlignment.Center
             };
             sp.Children.Add(new Shapes.Ellipse
@@ -6317,8 +6758,9 @@ namespace TokLens
                 Text = label,
                 FontFamily = DesignSystem.FontMono,
                 FontSize = DesignSystem.TextCaption,
-                MaxWidth = 170,
-                TextTrimming = TextTrimming.CharacterEllipsis
+                MaxWidth = 220,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                ToolTip = label
             };
             nameTb.SetResourceReference(TextBlock.ForegroundProperty, "FgSecondary");
             sp.Children.Add(nameTb);
@@ -6340,6 +6782,43 @@ namespace TokLens
             if (_deviceCardsStack == null) return;
             _deviceCardsStack.Children.Clear();
 
+            // 顶部多设备消耗占比分布条（>= 2 台设备且有消耗时显示）
+            if (_deviceShareCard != null && _deviceShareBarGrid != null && _deviceShareLegendWrap != null)
+            {
+                _deviceShareBarGrid.Children.Clear();
+                _deviceShareBarGrid.ColumnDefinitions.Clear();
+                _deviceShareLegendWrap.Children.Clear();
+                double totalDevCost = 0.0;
+                if (machines != null)
+                    for (int i = 0; i < machines.Count; i++) totalDevCost += Math.Max(0.0, machines[i].CostUsd);
+
+                if (machines != null && machines.Count >= 2 && totalDevCost > 0.0)
+                {
+                    int colIdx = 0;
+                    for (int i = 0; i < machines.Count; i++)
+                    {
+                        MachineRowView mv = machines[i];
+                        if (mv.CostUsd <= 0.0) continue;
+                        double ratio = Math.Max(0.01, mv.CostUsd / totalDevCost);
+                        _deviceShareBarGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(ratio, GridUnitType.Star) });
+                        Border seg = new Border
+                        {
+                            Background = DesignSystem.BrushHex(mv.ColorHex),
+                            Margin = new Thickness(colIdx == 0 ? 0 : 1.5, 0, 0, 0),
+                            ToolTip = mv.MachineName + " · " + mv.FormattedMoney + " (" + mv.ShareText + ")"
+                        };
+                        Grid.SetColumn(seg, colIdx++);
+                        _deviceShareBarGrid.Children.Add(seg);
+                        _deviceShareLegendWrap.Children.Add(MakeLegendChip(mv.ColorHex, mv.MachineName + " " + mv.FormattedMoney, mv.ShareText));
+                    }
+                    _deviceShareCard.Visibility = colIdx > 0 ? Visibility.Visible : Visibility.Collapsed;
+                }
+                else
+                {
+                    _deviceShareCard.Visibility = Visibility.Collapsed;
+                }
+            }
+
             if (machines != null)
             {
                 for (int i = 0; i < machines.Count; i++)
@@ -6347,8 +6826,8 @@ namespace TokLens
                     MachineRowView mv = machines[i];
                     bool isSelected = (_selectedMachineId != null && string.Equals(_selectedMachineId, mv.MachineId, StringComparison.OrdinalIgnoreCase));
 
-                    Border card = ModernControlsFactory.CreateCard(new Thickness(13, 11, 13, 10));
-                    card.Width = 238;
+                    Border card = ModernControlsFactory.CreateCard(new Thickness(12, 10, 12, 9));
+                    card.Width = 212;
                     card.Margin = new Thickness(0, 0, 10, 2);
                     card.Cursor = Cursors.Hand;
 
@@ -6374,8 +6853,8 @@ namespace TokLens
 
                     StackPanel titleRow = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
                     bool isLinux = mv.TypeBadge != null && mv.TypeBadge.IndexOf("Linux", StringComparison.OrdinalIgnoreCase) >= 0;
-                    Shapes.Path nodeIcon = UiIcons.CreateIcon(isLinux ? UiIcons.Terminal : UiIcons.Devices, 14.5, "AccentText");
-                    nodeIcon.Margin = new Thickness(0, 0, 6, 0);
+                    Shapes.Path nodeIcon = UiIcons.CreateIcon(isLinux ? UiIcons.Terminal : UiIcons.Devices, 14.0, "AccentText");
+                    nodeIcon.Margin = new Thickness(0, 0, 5, 0);
                     titleRow.Children.Add(nodeIcon);
 
                     TextBlock nameTb = new TextBlock
@@ -6383,8 +6862,9 @@ namespace TokLens
                         Text = mv.MachineName,
                         FontSize = DesignSystem.TextLabel,
                         FontWeight = FontWeights.SemiBold,
-                        MaxWidth = 112,
-                        TextTrimming = TextTrimming.CharacterEllipsis
+                        MaxWidth = 98,
+                        TextTrimming = TextTrimming.CharacterEllipsis,
+                        ToolTip = mv.MachineName
                     };
                     nameTb.SetResourceReference(TextBlock.ForegroundProperty, "FgPrimary");
                     titleRow.Children.Add(nameTb);
@@ -6394,10 +6874,11 @@ namespace TokLens
                     // OS 与工具信息
                     TextBlock osTb = new TextBlock
                     {
-                        Text = mv.OsInfo + " · " + mv.ToolCount.ToString(CultureInfo.InvariantCulture) + " 款活跃工具",
+                        Text = mv.OsInfo + " · " + mv.ToolCount.ToString(CultureInfo.InvariantCulture) + " 款工具",
                         FontSize = DesignSystem.TextCaption,
-                        Margin = new Thickness(0, 6, 0, 6),
-                        TextTrimming = TextTrimming.CharacterEllipsis
+                        Margin = new Thickness(0, 5, 0, 6),
+                        TextTrimming = TextTrimming.CharacterEllipsis,
+                        ToolTip = mv.OsInfo + " · " + mv.ToolsSummary
                     };
                     osTb.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
                     sp.Children.Add(osTb);
@@ -6426,6 +6907,21 @@ namespace TokLens
                     ModernControlsFactory.EnableTabularNumbers(costTb, false);
                     bot.Children.Add(costTb);
                     sp.Children.Add(bot);
+
+                    // 底部占比彩色进度条
+                    Grid miniTrack = new Grid { Height = 3.5, Margin = new Thickness(0, 7, 0, 0) };
+                    double ratioClamped = Math.Max(0.02, Math.Min(1.0, mv.BarRatio));
+                    miniTrack.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(ratioClamped, GridUnitType.Star) });
+                    miniTrack.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(Math.Max(0.0, 1.0 - ratioClamped), GridUnitType.Star) });
+                    Border mRail = new Border { CornerRadius = new CornerRadius(1.8) };
+                    mRail.SetResourceReference(Border.BackgroundProperty, "BgHoverStrong");
+                    Grid.SetColumnSpan(mRail, 2);
+                    miniTrack.Children.Add(mRail);
+                    Border mFill = new Border { CornerRadius = new CornerRadius(1.8), Background = DesignSystem.BrushHex(mv.ColorHex) };
+                    Grid.SetColumn(mFill, 0);
+                    miniTrack.Children.Add(mFill);
+                    sp.Children.Add(miniTrack);
+
                     card.Child = sp;
 
                     MachineRowView captured = mv;
@@ -6440,8 +6936,8 @@ namespace TokLens
             }
 
             // 末尾引导卡片：+ 接入新电脑 / Linux VPS
-            Border addCard = ModernControlsFactory.CreateCard(new Thickness(14, 11, 14, 10));
-            addCard.Width = 200;
+            Border addCard = ModernControlsFactory.CreateCard(new Thickness(12, 10, 12, 9));
+            addCard.Width = 186;
             addCard.Margin = new Thickness(0, 0, 4, 2);
             addCard.Cursor = Cursors.Hand;
             addCard.SetResourceReference(Border.BackgroundProperty, "BgSurface");
@@ -6564,14 +7060,17 @@ namespace TokLens
             double plotW = Math.Max(20.0, w - leftPad - rightPad);
             double plotH = Math.Max(20.0, h - topPad - bottomPad);
 
-            double maxVal = 0.0;
+            double rawMax = 0.0;
+            double sumVal = 0.0;
             for (int i = 0; i < _currentDailyAsc.Count; i++)
             {
                 DailyRowView d = _currentDailyAsc[i];
                 double v = _rankByCost ? (_isCny ? d.CostCny : d.CostUsd) : (double)d.TotalTokens;
-                if (v > maxVal) maxVal = v;
+                sumVal += v;
+                if (v > rawMax) rawMax = v;
             }
-            if (maxVal <= 0.0) maxVal = 1.0;
+            int yTicks = 3;
+            double maxVal = ChartArt.NiceAxisMax(rawMax, yTicks);
 
             Brush gridBrush = DesignSystem.ThemeBrush("BorderSubtle", _isDark);
             Brush axisTextBrush = DesignSystem.ThemeBrush("FgMuted", _isDark);
@@ -6580,8 +7079,7 @@ namespace TokLens
             Brush barBrush = DesignSystem.ThemeBrush("ChartBarFill", _isDark);
             Brush barHoverBrush = TryFindResource("ChartBarHover") as Brush ?? strokeBrush;
 
-            // Y 轴水平参考线与刻度标签
-            int yTicks = 3;
+            // Y 轴干净整刻度参考线与标签（底线实线，辅助线柔和虚线）
             for (int t = 0; t <= yTicks; t++)
             {
                 double frac = (double)t / yTicks;
@@ -6596,6 +7094,7 @@ namespace TokLens
                     Stroke = gridBrush,
                     StrokeThickness = 1.0
                 };
+                if (t > 0) gl.StrokeDashArray = new DoubleCollection(new double[] { 2.5, 3.5 });
                 _chartCanvas.Children.Add(gl);
 
                 double tickVal = maxVal * frac;
@@ -6603,8 +7102,8 @@ namespace TokLens
                 if (_rankByCost)
                 {
                     string sym = _isCny ? "¥" : "$";
-                    yLabelText = tickVal >= 100.0
-                        ? (sym + tickVal.ToString("F0", CultureInfo.InvariantCulture))
+                    yLabelText = tickVal >= 10.0
+                        ? (sym + tickVal.ToString("0.#", CultureInfo.InvariantCulture))
                         : (sym + tickVal.ToString("0.##", CultureInfo.InvariantCulture));
                 }
                 else
@@ -6626,7 +7125,48 @@ namespace TokLens
                 _chartCanvas.Children.Add(yLbl);
             }
 
+            // 周期日均参考虚线（>= 3 天且有数据时叠加）
             int n = _currentDailyAsc.Count;
+            if (n >= 3 && sumVal > 0.0)
+            {
+                double avgVal = sumVal / n;
+                double avgY = topPad + plotH * (1.0 - Math.Min(1.0, avgVal / maxVal));
+                Shapes.Line avgLine = new Shapes.Line
+                {
+                    X1 = leftPad,
+                    X2 = leftPad + plotW,
+                    Y1 = avgY,
+                    Y2 = avgY,
+                    Stroke = DesignSystem.ThemeBrush("BorderStrong", _isDark),
+                    StrokeThickness = 1.0,
+                    StrokeDashArray = new DoubleCollection(new double[] { 4.0, 3.0 }),
+                    Opacity = 0.7
+                };
+                _chartCanvas.Children.Add(avgLine);
+
+                string avgText = _rankByCost
+                    ? ("日均 " + (_isCny ? "¥" : "$") + (avgVal >= 100.0 ? avgVal.ToString("F0", CultureInfo.InvariantCulture) : avgVal.ToString("0.#", CultureInfo.InvariantCulture)))
+                    : ("日均 " + FormatterUtil.FormatTokens((long)Math.Round(avgVal)));
+                Border avgChip = new Border
+                {
+                    CornerRadius = new CornerRadius(3),
+                    Padding = new Thickness(4, 1, 4, 1),
+                    Background = DesignSystem.ThemeBrush("BgCard", _isDark),
+                    Opacity = 0.9,
+                    IsHitTestVisible = false,
+                    Child = new TextBlock
+                    {
+                        Text = avgText,
+                        FontFamily = DesignSystem.FontMono,
+                        FontSize = 10.0,
+                        Foreground = axisTextBrush
+                    }
+                };
+                Canvas.SetLeft(avgChip, leftPad + 4.0);
+                Canvas.SetTop(avgChip, Math.Max(topPad, avgY - 16.0));
+                _chartCanvas.Children.Add(avgChip);
+            }
+
             double slotW = plotW / n;
             Point[] pts = new Point[n];
 
@@ -6665,7 +7205,7 @@ namespace TokLens
                 LinearGradientBrush areaFill = new LinearGradientBrush();
                 areaFill.StartPoint = new Point(0, 0);
                 areaFill.EndPoint = new Point(0, 1);
-                areaFill.GradientStops.Add(new GradientStop(Color.FromArgb(_isDark ? (byte)76 : (byte)52, accentColor.R, accentColor.G, accentColor.B), 0.0));
+                areaFill.GradientStops.Add(new GradientStop(Color.FromArgb(_isDark ? (byte)86 : (byte)58, accentColor.R, accentColor.G, accentColor.B), 0.0));
                 areaFill.GradientStops.Add(new GradientStop(Color.FromArgb(2, accentColor.R, accentColor.G, accentColor.B), 1.0));
                 areaFill.Freeze();
 
@@ -6680,12 +7220,13 @@ namespace TokLens
                 {
                     Data = strokeGeo,
                     Stroke = strokeBrush,
-                    StrokeThickness = 2.0,
+                    StrokeThickness = 2.2,
                     StrokeLineJoin = PenLineJoin.Round
                 };
                 _chartCanvas.Children.Add(linePath);
 
-                // 数据点圆点（单日选中态高亮放大）
+                // 数据点圆点（描边呼吸环 + 单日选中态高亮放大）
+                Brush cardBgBrush = DesignSystem.ThemeBrush("BgCard", _isDark);
                 if (n <= 45 || _selectedDate != null)
                 {
                     for (int i = 0; i < n; i++)
@@ -6693,12 +7234,14 @@ namespace TokLens
                         bool isLockedDay = (_selectedDate != null && string.Equals(_currentDailyAsc[i].Date, _selectedDate, StringComparison.Ordinal));
                         if (n > 45 && !isLockedDay) continue;
 
-                        double rSize = isLockedDay ? 8.0 : 5.0;
+                        double rSize = isLockedDay ? 9.0 : 6.0;
                         Shapes.Ellipse dot = new Shapes.Ellipse
                         {
                             Width = rSize,
                             Height = rSize,
-                            Fill = isLockedDay ? DesignSystem.ThemeBrush("SemanticWarning", _isDark) : strokeBrush
+                            Fill = isLockedDay ? DesignSystem.ThemeBrush("SemanticWarning", _isDark) : strokeBrush,
+                            Stroke = cardBgBrush,
+                            StrokeThickness = 1.5
                         };
                         Canvas.SetLeft(dot, pts[i].X - rSize * 0.5);
                         Canvas.SetTop(dot, pts[i].Y - rSize * 0.5);
@@ -6708,9 +7251,15 @@ namespace TokLens
             }
             else
             {
-                // 圆角细柱图（或仅 1 天数据时的优雅柱状展示）
+                // 垂直渐变圆角细柱图（或仅 1 天数据时的优雅柱状展示）
                 double gap = n > 45 ? 1.5 : (n > 20 ? 3.0 : 5.0);
-                double barW = Math.Max(2.5, Math.Min(26.0, slotW - gap));
+                double barW = Math.Max(3.0, Math.Min(26.0, slotW - gap));
+                LinearGradientBrush barGrad = new LinearGradientBrush();
+                barGrad.StartPoint = new Point(0, 0);
+                barGrad.EndPoint = new Point(0, 1);
+                barGrad.GradientStops.Add(new GradientStop(accentColor, 0.0));
+                barGrad.GradientStops.Add(new GradientStop(Color.FromArgb(_isDark ? (byte)165 : (byte)185, accentColor.R, accentColor.G, accentColor.B), 1.0));
+                barGrad.Freeze();
 
                 for (int i = 0; i < n; i++)
                 {
@@ -6724,8 +7273,8 @@ namespace TokLens
                     {
                         Width = barW,
                         Height = bh,
-                        CornerRadius = new CornerRadius(Math.Min(4.0, barW * 0.45), Math.Min(4.0, barW * 0.45), 0, 0),
-                        Background = isLockedDay ? DesignSystem.ThemeBrush("SemanticWarning", _isDark) : barBrush,
+                        CornerRadius = new CornerRadius(Math.Min(4.5, barW * 0.45), Math.Min(4.5, barW * 0.45), 0, 0),
+                        Background = isLockedDay ? (Brush)DesignSystem.ThemeBrush("SemanticWarning", _isDark) : (Brush)barGrad,
                         Opacity = (_selectedDate != null && !isLockedDay) ? 0.45 : 1.0
                     };
                     Canvas.SetLeft(bar, bx);

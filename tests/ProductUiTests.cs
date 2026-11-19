@@ -94,14 +94,14 @@ internal static class ProductUiTests
             Func<string> contextText=delegate{return Field<TextBlock>(hud,"_context").Text;};
             Capture(surface,Path.Combine(output,"hud-capsule-light.png"),250,56);
             Check(contextText()=="23%"&&Field<TextBlock>(hud,"_scope").Text.Contains("标称"),"context explicitly identifies nominal model limit");
-            Check(Field<TextBlock>(hud,"_status").Text.Contains("请求"),"recent activity has a text status");
+            Check(Field<TextBlock>(hud,"_status").Text.Contains("请求")&&Field<TextBlock>(hud,"_status").Text.Contains("82.4 t/s"),"recent activity shows text status and measured capsule TPS");
             sample.ContextLimit=0;hud.UpdateTelemetry(sample);Check(contextText().Contains("234")&&!contextText().Contains("%"),"unknown limit shows absolute tokens");
             sample.ContextLimit=1000000;sample.RequestedServiceTier="fast";hud.UpdateTelemetry(sample);
             Call(hud,"OpenCard");Popup card=Field<Popup>(hud,"_cardPopup");Check(card.IsOpen&&!card.StaysOpen,"click-open panel supports outside dismissal");
             Call(hud,"RenderCard");Check(Field<TextBlock>(hud,"_cardTier").Text.Contains("请求")&&Field<TextBlock>(hud,"_cardTier").Text.Contains("未知"),"requested Fast is distinguished from actual execution");
             sample.Alert=true;sample.AlertText="近 15 分钟估值较活跃时段基线高";hud.UpdateTelemetry(sample);Call(hud,"RenderCard");
             Check(contextText()=="23%"&&Field<TextBlock>(hud,"_cardAlert").Visibility==Visibility.Visible,"alert explains the condition without hiding context");
-            Check(Field<Canvas>(hud,"_chart").Children.Count==24&&Field<TextBlock>(hud,"_cardTiming").Text.Contains("82.4"),"card renders full trend and measured request speed");
+            Check(Field<Canvas>(hud,"_chart").Children.Count==24&&Field<TextBlock>(hud,"_cardTiming").Text.Contains("82.4")&&Field<TextBlock>(hud,"_cardTiming").Text.Contains("tok/s"),"card renders full trend and dedicated measured request speed row");
             hud.SetAlert("",DateTime.MinValue);hud.SetTheme(true);Call(hud,"RenderCard");Capture((FrameworkElement)card.Child,Path.Combine(output,"hud-card-dark.png"),348,450);
             Capture(surface,Path.Combine(output,"hud-capsule-dark.png"),250,56);
             Call(hud,"CloseCard");Check(!card.IsOpen,"explicit dismissal closes the panel");

@@ -245,6 +245,18 @@ namespace TokLens
             DockPanel.SetDock(searchIcon, Dock.Left);
             searchDock.Children.Add(searchIcon);
 
+            Grid searchInputHost = new Grid { Margin = new Thickness(6, 0, 0, 0) };
+            TextBlock searchPlaceholder = new TextBlock
+            {
+                Text = "搜索工作区或路径...",
+                FontFamily = DesignSystem.FontUi,
+                FontSize = DesignSystem.TextCaption,
+                VerticalAlignment = VerticalAlignment.Center,
+                IsHitTestVisible = false
+            };
+            searchPlaceholder.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
+            searchInputHost.Children.Add(searchPlaceholder);
+
             _searchBox = new TextBox
             {
                 BorderThickness = new Thickness(0),
@@ -252,16 +264,17 @@ namespace TokLens
                 FontFamily = DesignSystem.FontUi,
                 FontSize = DesignSystem.TextCaption,
                 VerticalContentAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(6, 0, 0, 0),
                 ToolTip = "按工作区名、路径或工具过滤"
             };
             _searchBox.SetResourceReference(Control.ForegroundProperty, "FgPrimary");
             _searchBox.TextChanged += delegate(object s, TextChangedEventArgs e)
             {
                 _searchQuery = (_searchBox.Text ?? "").Trim();
+                searchPlaceholder.Visibility = string.IsNullOrEmpty(_searchBox.Text) ? Visibility.Visible : Visibility.Collapsed;
                 RenderEntries();
             };
-            searchDock.Children.Add(_searchBox);
+            searchInputHost.Children.Add(_searchBox);
+            searchDock.Children.Add(searchInputHost);
             searchWrap.Child = searchDock;
             toolRow.Children.Add(searchWrap);
 

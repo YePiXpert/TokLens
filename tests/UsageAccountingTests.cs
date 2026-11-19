@@ -97,6 +97,12 @@ internal static class UsageAccountingTests
     { List<byte> b = new List<byte>(); while (n >= 128) { b.Add((byte)((n & 127) | 128)); n >>= 7; } b.Add((byte)n); return b.ToArray(); }
     private static byte[] Field(int tag, byte[] bytes)
     { List<byte> b = new List<byte>(Varint((ulong)((tag << 3) | 2))); b.AddRange(Varint((ulong)bytes.Length)); b.AddRange(bytes); return b.ToArray(); }
+    private static byte[] VarintField(int tag, ulong val)
+    { List<byte> b = new List<byte>(Varint((ulong)(tag << 3))); b.AddRange(Varint(val)); return b.ToArray(); }
+    private static byte[] ConcatBytes(params byte[][] parts)
+    { List<byte> b = new List<byte>(); foreach (byte[] p in parts) if (p != null) b.AddRange(p); return b.ToArray(); }
+    private static byte[] ProtoDuration(long sec, long nanos)
+    { List<byte> b = new List<byte>(); if (sec > 0) b.AddRange(VarintField(1, (ulong)sec)); if (nanos > 0) b.AddRange(VarintField(2, (ulong)nanos)); return b.ToArray(); }
     private static void NativeModels()
     {
         byte[] response = Field(19, Encoding.UTF8.GetBytes("gemini-4-carbon"));
@@ -256,13 +262,79 @@ internal static class UsageAccountingTests
         Check(known && unknown, "ZCode does not invent a default GLM model");
         Check(scan.ReconciledPartitions.Count == 1,"ZCode request IDs certify its day partition");
     }
+    private static void AntigravityTimingAndContext(string root)
+    {
+        string home = Path.Combine(root, "agy-timing-home");
+        string convId = "aa11bb22-3344-5566-7788-9900aabbccdd";
+        string logsDir = Path.Combine(home, ".gemini", "antigravity", "brain", convId, ".system_generated", "logs");
+        string convsDir = Path.Combine(home, ".gemini", "antigravity", "conversations");
+        Directory.CreateDirectory(logsDir);
+        Directory.CreateDirectory(convsDir);
+
+        string dbPath = Path.Combine(convsDir, convId + ".db");
+        using (WinSqlite db = WinSqlite.OpenReadWrite(dbPath))
+        {
+            db.ExecRequired("CREATE TABLE gen_metadata(idx INTEGER PRIMARY KEY,data BLOB)");
+            db.ExecRequired("CREATE TABLE steps(idx INTEGER PRIMARY KEY,step_type INTEGER,metadata BLOB)");
+
+            // gen 0: TTFT 4.5s + stream 15.5s = 20000ms, actual context limit = 512000
+            byte[] resp0 = ConcatBytes(
+                Field(9, Field(10, ConcatBytes(VarintField(1, 50000), VarintField(4, 512000)))),
+                Field(11, ProtoDuration(4, 500000000)),
+                Field(12, ProtoDuration(15, 500000000)),
+                Field(19, Encoding.UTF8.GetBytes("gemini-4-neon")),
+                Field(21, Encoding.UTF8.GetBytes("Gemini 4 Neon (XHigh)"))
+            );
+            byte[] gen0 = Field(1, resp0);
+            db.ExecRequired("INSERT INTO gen_metadata VALUES(0,X'" + BitConverter.ToString(gen0).Replace("-", "") + "')");
+
+            // step 10 (PLANNER_RESPONSE) -> gen 0 (scalar zero omitted)
+            byte[] step10 = Field(20, new byte[0]);
+            db.ExecRequired("INSERT INTO steps VALUES(10,15,X'" + BitConverter.ToString(step10).Replace("-", "") + "')");
+
+            // gen 1: no duration fields in gen_metadata, fallback to steps.metadata timestamps (1795000010.200 -> 1795000015.700 = 5500ms)
+            byte[] resp1 = ConcatBytes(
+                Field(9, Field(10, VarintField(4, 256000))),
+                Field(19, Encoding.UTF8.GetBytes("gemini-4-carbon"))
+            );
+            byte[] gen1 = Field(1, resp1);
+            db.ExecRequired("INSERT INTO gen_metadata VALUES(1,X'" + BitConverter.ToString(gen1).Replace("-", "") + "')");
+
+            byte[] step12 = ConcatBytes(
+                Field(1, ProtoDuration(1795000010, 200000000)),
+                Field(7, ProtoDuration(1795000015, 700000000)),
+                Field(20, VarintField(3, 1))
+            );
+            db.ExecRequired("INSERT INTO steps VALUES(12,15,X'" + BitConverter.ToString(step12).Replace("-", "") + "')");
+        }
+
+        string line10 = Json.Serialize(Obj("step_index", 10, "type", "PLANNER_RESPONSE", "status", "DONE", "created_at", "2026-11-19T05:00:00Z", "input_tokens", 10000, "cache_read_tokens", 490000, "output_tokens", 2000));
+        string line12 = Json.Serialize(Obj("step_index", 12, "type", "PLANNER_RESPONSE", "status", "DONE", "created_at", "2026-11-19T05:01:00Z", "input_tokens", 5000, "cache_read_tokens", 100000, "output_tokens", 550));
+        File.WriteAllLines(Path.Combine(logsDir, "transcript.jsonl"), new string[] { line10, line12 });
+
+        ResetStore();
+        ScanResult scan = new TokenScanner(home, false).Run();
+        Check(scan.RecentRequests.Count == 2, "Antigravity DB timing scan parses both steps");
+        RecentRequestRecord r10 = null, r12 = null;
+        foreach (RecentRequestRecord r in scan.RecentRequests)
+        {
+            if (r.Output == 2000) r10 = r;
+            if (r.Output == 550) r12 = r;
+        }
+        Check(r10 != null && r10.Model == "gemini-4-neon-xhigh" && r10.DurationMs == 20000 && r10.TimingSource == "request" && r10.ActualContextLimit == 512000 && r10.ContextLimitEvidence == "antigravity:gen_metadata", "Antigravity gen_metadata yields measured duration (TTFT+stream) and actual 512K context limit");
+        Check(r12 != null && r12.Model == "gemini-4-carbon" && r12.DurationMs == 5500 && r12.TimingSource == "request" && r12.ActualContextLimit == 256000, "Antigravity steps.metadata timestamps act as fallback when gen_metadata omits duration");
+
+        // Second scan hits v2 cursor cache and preserves timing + context limit
+        ScanResult cached = new TokenScanner(home, false).Run();
+        Check(cached.RecentRequests.Count == 2 && cached.RecentRequests[0].TimingSource == "request" && cached.RecentRequests[0].DurationMs == 5500 && cached.RecentRequests[0].ActualContextLimit == 256000, "Antigravity measured timing and context limit survive cursor cache reload");
+    }
     public static int Main()
     {
         AppContext.SetSwitch("Switch.System.IO.UseLegacyPathHandling", false);
         AppContext.SetSwitch("Switch.System.IO.BlockLongPaths", false);
         string root = Path.Combine(Path.GetTempPath(), "TokLens_UsageTests_" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root); Environment.SetEnvironmentVariable("TOKLENS_CONFIG_DIR", Path.Combine(root, "store"));
-        try { Codex(); Merges(); NativeModels(); Integration(root); ForkedHistory(root); ZCodeModels(root); StoreFailures(root); LongPaths(root); Console.WriteLine("PASS: " + _checks + " accounting assertions"); return 0; }
+        try { Codex(); Merges(); NativeModels(); Integration(root); AntigravityTimingAndContext(root); ForkedHistory(root); ZCodeModels(root); StoreFailures(root); LongPaths(root); Console.WriteLine("PASS: " + _checks + " accounting assertions"); return 0; }
         catch (Exception ex) { Console.Error.WriteLine(ex); Console.Error.WriteLine("Fixtures: " + root); return 1; }
         finally { Environment.SetEnvironmentVariable("TOKLENS_CONFIG_DIR", null); }
     }

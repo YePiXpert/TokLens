@@ -336,7 +336,7 @@ namespace TokLens
             _divider.Visibility = showTiers ? Visibility.Visible : (hint.Length > 0 ? Visibility.Visible : Visibility.Collapsed);
             _tierCaption.Visibility = showTiers ? Visibility.Visible : Visibility.Collapsed;
             _tierChips.Visibility = order.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-            _hint.Text = hint; _hint.Visibility = hint.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+            _hint.Text = hint; _hint.Visibility = (hint.Length > 0 && order.Count == 0) ? Visibility.Visible : Visibility.Collapsed;
 
             _updated.Text = result != null && result.AccountingUpdatedMs > 0 ? "更新于 " + ClockTime(result.AccountingUpdatedMs, true) : "";
             FitToWidth();

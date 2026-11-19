@@ -109,7 +109,7 @@ namespace TokLens
         private readonly TextBlock _title, _context, _status, _scope;
         private readonly Ellipse _statusDot;
         private readonly Popup _cardPopup;
-        private readonly TextBlock _cardModel, _cardScope, _cardContext, _cardTier, _cardToday, _cardHour, _cardHealth, _cardAlert, _cardTiming, _cardCoverage;
+        private readonly TextBlock _cardModel, _cardScope, _cardContext, _cardTier, _cardTiming, _cardNote, _cardToday, _cardHour, _cardHealth, _cardAlert, _cardCoverage;
         private readonly ComboBox _sessionPicker;
         private readonly Canvas _chart;
         private readonly Button _muteButton;
@@ -159,9 +159,9 @@ namespace TokLens
             };
             panel.Children.Add(_sessionPicker);
             _cardModel = Text("等待请求", 14, true); panel.Children.Add(_cardModel);
-            _cardScope = Text("", 11, false); _cardScope.Margin = new Thickness(0, 4, 0, 10); _cardScope.TextWrapping = TextWrapping.Wrap; panel.Children.Add(_cardScope);
-            _cardContext = Line(panel, "请求输入上下文"); _cardTier = Line(panel, "服务档位");
-            _cardTiming = Text("", 11, false); _cardTiming.Margin = new Thickness(0, 6, 0, 12); _cardTiming.TextWrapping = TextWrapping.Wrap; panel.Children.Add(_cardTiming);
+            _cardScope = Text("", 11, false); _cardScope.Margin = new Thickness(0, 3, 0, 8); _cardScope.TextWrapping = TextWrapping.Wrap; panel.Children.Add(_cardScope);
+            _cardContext = Line(panel, "请求输入上下文"); _cardTier = Line(panel, "服务档位"); _cardTiming = Line(panel, "最近输出速率");
+            _cardNote = Text("", 10, false); _cardNote.Margin = new Thickness(0, 5, 0, 10); _cardNote.TextWrapping = TextWrapping.Wrap; panel.Children.Add(_cardNote);
             Border divider = new Border { Height = 1, Margin = new Thickness(0, 0, 0, 10) }; divider.SetResourceReference(Border.BackgroundProperty, "BorderSubtle"); panel.Children.Add(divider);
             panel.Children.Add(Text("本机全部工具 · 记录 / API 估值", 12, true));
             _cardToday = Line(panel, "今日记录 / 估值"); _cardHour = Line(panel, "近 15 分钟折合每小时");
@@ -253,6 +253,15 @@ namespace TokLens
             long age = AgeSeconds();
             return age <= 60 ? "刚有请求" : (age <= 300 ? "最近 " + (age / 60) + " 分钟前" : "空闲 · " + Ago(age));
         }
+        private string CapsuleStatus()
+        {
+            string health = Health();
+            if (_data.Alert) return "消耗提示 · " + health;
+            bool stale = _lastSuccessUtc != DateTime.MinValue && (_clockUtc - _lastSuccessUtc).TotalSeconds > 45;
+            if (_scanError.Length > 0 || stale || _data.TimestampMs <= 0 || _data.Tps <= 0) return health;
+            string tpsShort = UsageTiming.FormatNumber(_data.Tps) + " t/s";
+            return _data.IsRecent(_clockUtc) ? (health + " · " + tpsShort) : ("空闲 · " + tpsShort);
+        }
         private void Render()
         {
             if (_title == null) return;
@@ -260,13 +269,14 @@ namespace TokLens
             _title.Text = has ? (_preferences.SessionKey.Length > 0 ? "固定 · " : "最新 · ") + HudTelemetry.ShortTool(_data.Tool) + " · " + HudTelemetry.SessionLabel(_data.Workspace, _data.SessionId) : "TokLens · 本机";
             _context.Text = ContextValue();
             _scope.Text = _data.ContextLimit > 0 ? (_data.ContextLimitIsActual ? "输入 / 会话上限" : "输入 / 标称上限") : "请求输入";
-            _status.Text = (_data.Alert ? "消耗提示 · " : "") + Health();
+            _status.Text = CapsuleStatus();
             _status.TextTrimming = TextTrimming.CharacterEllipsis; _status.MaxWidth = 142;
             _statusDot.Fill = new SolidColorBrush(_data.Alert || _scanError.Length > 0 ? Color.FromRgb(220, 145, 61) : (_data.IsRecent(_clockUtc) ? Color.FromRgb(62, 173, 140) : Color.FromRgb(136, 148, 163)));
             _surface.Opacity = _preferences.Opacity;
             string scope = _preferences.SessionKey.Length > 0 ? "已固定会话" : "最新请求（本机）";
-            _surface.ToolTip = scope + " · " + _title.Text + "\n" + _scope.Text + " " + ContextValue() + " · " + Health() + "\n单击详情 · 拖动移动 · 右键设置";
-            System.Windows.Automation.AutomationProperties.SetHelpText(_surface, scope + "；" + _title.Text + "；" + _scope.Text + " " + ContextValue() + "；" + Health());
+            string tpsTip = _data.Tps > 0 ? " · 均速 " + FormatterUtil.FormatTps(_data.Tps) : "";
+            _surface.ToolTip = scope + " · " + _title.Text + "\n" + _scope.Text + " " + ContextValue() + " · " + Health() + tpsTip + "\n单击详情 · 拖动移动 · 右键设置";
+            System.Windows.Automation.AutomationProperties.SetHelpText(_surface, scope + "；" + _title.Text + "；" + _scope.Text + " " + ContextValue() + "；" + Health() + tpsTip);
         }
         private string ContextValue()
         {
@@ -286,8 +296,28 @@ namespace TokLens
             _cardContext.Text = _data.ContextTokens > 0 ? FormatterUtil.FormatTokens(_data.ContextTokens) + (_data.ContextLimit > 0 ? " / " + FormatterUtil.FormatTokens(_data.ContextLimit) : " · 上限未知") : "—";
             _cardContext.ToolTip = _data.ContextLimitIsActual ? "本次请求输入与日志上报的会话上限；不是套餐额度。" : "分子为最新请求输入，分母为价格库的模型标称上限；不代表工具实际可用上下文或套餐额度。";
             _cardTier.Text = _data.TierLabel; _cardTier.ToolTip = _data.TierEvidence;
-            _cardTiming.Text = _data.ContextLimitIsActual ? "上限由会话日志提供。" : "标称上限仅作参照；未获会话实际配置。";
-            if (_data.TimestampMs > 0) _cardTiming.Text += _data.Tps > 0 ? " 最近请求均速 " + FormatterUtil.FormatTps(_data.Tps) + "（含等待，非流式速度）。" : " 日志未提供可靠请求计时。";
+            if (_data.TimestampMs > 0)
+            {
+                if (_data.Tps > 0)
+                {
+                    _cardTiming.Text = FormatterUtil.FormatTps(_data.Tps) + " · " + FormatterUtil.FormatDuration(_data.DurationMs);
+                    _cardTiming.ToolTip = "按整次请求输出 Token 与日志实测总耗时计算的均速（含首字/思考等待，非纯流式速率）。";
+                }
+                else
+                {
+                    _cardTiming.Text = "未提供可靠计时";
+                    _cardTiming.ToolTip = "当前会话日志未提供可靠的单次请求耗时，不进行估算。";
+                }
+            }
+            else
+            {
+                _cardTiming.Text = "—";
+                _cardTiming.ToolTip = null;
+            }
+            if (_data.TimestampMs > 0 && _data.Tps > 0)
+                _cardNote.Text = (_data.ContextLimitIsActual ? "上限由会话日志提供" : "标称上限仅作参照") + "；均速含首字等待（非流式）。";
+            else
+                _cardNote.Text = _data.ContextLimitIsActual ? "上限由会话日志提供。" : "标称上限仅作参照；未获会话实际配置。";
             _cardToday.Text = _data.UnpricedRequests > 0 && !_data.TodayHasPricedAmount ? "—" : Money(_data.TodayUsd) + (_data.UnpricedRequests > 0 ? " *" : "");
             _cardToday.ToolTip = _data.UnpricedRequests > 0 ? "仅包含已计价部分；今日 " + _data.UnpricedRequests + " 次请求未计价。金额含日志记录和 API 估值，不代表订阅实付。" : "日志记录金额与 API 估值的合计，不代表订阅实付。";
             _cardHour.Text = _data.Last15UnpricedRequests > 0 && _data.Last15PricedRequests == 0 ? "— · 未计价" : Money(_data.Last15Usd * 4) + "/h" + (_data.Last15UnpricedRequests > 0 ? "（已计价部分）" : "");

@@ -530,6 +530,7 @@ namespace TokLens
                             };
                             mtb.SetResourceReference(TextBlock.ForegroundProperty, "FgMuted");
                             Grid.SetColumn(mtb, c);
+                            Grid.SetColumnSpan(mtb, Math.Min(4, HeatmapWeeks - c));
                             _heatmapMonthHeaderGrid.Children.Add(mtb);
                             lastPlacedCol = c;
                         }
