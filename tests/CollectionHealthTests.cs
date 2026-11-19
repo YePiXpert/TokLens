@@ -11,8 +11,8 @@ using TokLens;
 
 // What the overview's collection strip is allowed to say, and where its facts come from:
 // the delivered tier Anthropic reports in message.usage, one health row per real tool, and
-// a first-launch window that leaves room on the screen. Also what the sessions view states:
-// facts from the log about each real session, with no simulated savings.
+// a first-launch window that leaves room on the screen. Also verifies that legacy session
+// analysis and standalone session view types remain removed from the build.
 internal static class CollectionHealthTests
 {
     private static int checks;
@@ -222,50 +222,17 @@ internal static class CollectionHealthTests
         Check(!WindowPlacementStore.TryLoad(out saved, out maximized), "a damaged file falls back to the default size");
     }
 
-    private static RecentRequestRecord Req(string tool, string session, string workspace, string model, long at, long fresh, long read, long output, double usd, string basis)
+    private static void SessionViewsAreRemoved()
     {
-        return new RecentRequestRecord { Tool = tool, SessionId = session, Workspace = workspace, Model = model, TimestampMs = at, FreshInput = fresh, CacheRead = read, Output = output, CostUsd = usd, CostBasis = basis };
-    }
-
-    private static void SessionsFollowTheLog()
-    {
-        long t0 = 1795000000000L;
-        List<RecentRequestRecord> recent = new List<RecentRequestRecord>();
-        // two sessions of the same tool running side by side
-        recent.Add(Req("Claude Code", "s-a", @"C:\work\alpha", "claude-opus-5-5", t0, 1000, 9000, 50, 0.10, "estimated_tier_price"));
-        recent.Add(Req("Claude Code", "s-b", @"C:\work\beta", "claude-opus-5-5", t0 + 60000, 500, 500, 10, 0.02, "estimated_tier_price"));
-        recent.Add(Req("Claude Code", "s-a", @"C:\work\alpha", "claude-haiku-5-5", t0 + 120000, 2000, 18000, 70, 0.20, "estimated_tier_price"));
-        recent.Add(Req("Claude Code", "s-a", @"C:\work\alpha", "claude-opus-5-5", t0 + 180000, 100, 100, 5, 0, "unpriced"));
-        // a tool whose log carries no session id
-        recent.Add(Req("Kimi Code", "", "", "kimi-k3", t0, 100, 0, 10, 0.01, "estimated_standard"));
-        recent.Add(Req("Kimi Code", "", "", "kimi-k3", t0 + 10 * 60000, 100, 0, 10, 0.01, "estimated_standard"));
-        recent.Add(Req("Kimi Code", "", "", "kimi-k3", t0 + 40 * 60000, 100, 0, 10, 0.01, "estimated_standard"));
-
-        List<SessionRow> rows = SessionList.Build(recent, false, 7);
-        Check(rows.Count == 4, "requests are grouped by their own session id, and unidentified ones are split at a gap over 25 minutes: " + rows.Count);
-        SessionRow a = rows.Find(delegate(SessionRow r) { return r.SessionId == "s-a"; });
-        SessionRow b = rows.Find(delegate(SessionRow r) { return r.SessionId == "s-b"; });
-        Check(a != null && b != null && a.Requests == 3 && b.Requests == 1, "two sessions running side by side are not merged into one");
-        Check(a.PeakContext == 20000 && Math.Abs(a.CacheHitRate - 27100.0 / 30200.0) < 1e-9, "peak context and cache hit rate come from the session's own requests");
-        Check(a.Model == "claude-opus-5-5 +1" && a.ModelHint.Contains("claude-haiku-5-5") && b.ModelHint == null, "the model column names the most used model and how many others there were");
-        Check(Math.Abs(a.CostUsd - 0.30) < 1e-9 && a.FormattedCost == "$0.300" && a.UnpricedRequests == 1 && a.CostHint.Contains("1 次请求未计价"), "an unpriced request is not counted as free; the amount says it covers the priced part");
-        Check(a.Label == "alpha · s-a" && a.LabelHint.Contains(@"C:\work\alpha"), "a session is labelled by its project folder");
-        Check(rows[0].Tool == "Kimi Code" && rows[0].Requests == 1 && rows[0].EndMs == t0 + 40 * 60000, "the most recently active session comes first");
-        SessionRow early = rows.Find(delegate(SessionRow r) { return r.Tool == "Kimi Code" && r.Requests == 2; });
-        Check(early != null && early.SessionId == "" && early.LabelHint.Contains("没有会话标识"), "a session without an id says how it was grouped");
-        Check(SessionList.FormatSpan(0, 0) == "—" && SessionList.FormatSpan(t0, t0) == SessionList.FormatSpan(0, t0) && SessionList.FormatSpan(t0, t0 + 3600000).Contains(" → "), "start and end are shown, never an invented duration");
-
-        List<RecentRequestRecord> unpriced = new List<RecentRequestRecord> { Req("Claude Code", "s-c", "", "no-such-model", t0, 10, 0, 1, 0, "unpriced") };
-        Check(SessionList.Build(unpriced, false, 7)[0].FormattedCost == "未计价", "a session with no priced request shows no amount at all");
-        Check(SessionList.Build(null, false, 7).Count == 0 && SessionList.Build(new List<RecentRequestRecord>(), true, 7).Count == 0, "no requests, no sessions");
-
-        Assembly app = typeof(SessionList).Assembly;
-        Check(app.GetType("TokLens.ContextBloatAnalyzer") == null && app.GetType("TokLens.SessionBloatAnalyzerView") == null && typeof(SessionRow).GetProperty("EstimatedCompactSavingsUsd") == null,
-            "the compaction simulator, its thresholds and its savings figure are gone");
-
-        SessionListView view = new SessionListView();
-        view.Render(recent, false, 7);
-        Check(view.CaptionText.Contains("7 次请求") && view.CaptionText.Contains("4 个会话") && view.CaptionText.Contains("更早的请求不在这张表里"), "the table says how much history it covers: " + view.CaptionText);
+        Assembly app = typeof(MainWindow).Assembly;
+        Check(
+            app.GetType("TokLens.ContextBloatAnalyzer") == null &&
+            app.GetType("TokLens.SessionBloatAnalyzerView") == null &&
+            app.GetType("TokLens.SessionList") == null &&
+            app.GetType("TokLens.SessionListView") == null &&
+            app.GetType("TokLens.SessionRow") == null &&
+            typeof(MainWindow).GetField("_sessionView", BindingFlags.NonPublic | BindingFlags.Instance) == null,
+            "session analysis and standalone session view are completely removed from the build");
     }
 
     [STAThread]
@@ -281,7 +248,7 @@ internal static class CollectionHealthTests
             UpgradeRereadsClaudeLogs(root);
             StripSaysOnlyWhatItKnows();
             WindowLeavesRoom(root);
-            SessionsFollowTheLog();
+            SessionViewsAreRemoved();
             Console.WriteLine("PASS: " + checks + " collection health assertions"); return 0;
         }
         catch (Exception error) { Console.Error.WriteLine(error); return 1; }

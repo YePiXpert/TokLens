@@ -168,7 +168,7 @@ namespace TokLens
                         evRunaway.Title = "近期 API 估值升高";
                         evRunaway.Message = string.Format(
                             CultureInfo.InvariantCulture,
-                            "本机近 15 分钟 {0} 次请求，API 估值 {1}（{2}）。主要来源：{3} + {4}（{5}，占 {6:F0}%）。可查看近期会话确认是否符合预期；这是估值提醒，不代表实付或 Agent 失控。",
+                            "本机近 15 分钟 {0} 次请求，API 估值 {1}（{2}）。主要来源：{3} + {4}（{5}，占 {6:F0}%）。可查看请求明细确认是否符合预期；这是估值提醒，不代表实付或 Agent 失控。",
                             m.Last15MinRequests,
                             cost15Str,
                             compareText,

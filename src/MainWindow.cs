@@ -333,12 +333,11 @@ namespace TokLens
         private const int ViewModels = 2;
         private const int ViewProjects = 3;
         private const int ViewInsights = 4;
-        private const int ViewSessions = 5;
-        private const int ViewDevices = 6;
-        private const int ViewDailyExport = 7;
-        private const int ViewDoctor = 8;
-        private const int ViewSettings = 9;
-        private const int TotalViewCount = 10;
+        private const int ViewDevices = 5;
+        private const int ViewDailyExport = 6;
+        private const int ViewDoctor = 7;
+        private const int ViewSettings = 8;
+        private const int TotalViewCount = 9;
 
         private const double SidebarExpandedWidth = 200.0;
         private const double SidebarCollapsedWidth = 58.0;
@@ -355,7 +354,6 @@ namespace TokLens
             "模型与工具",
             "项目",
             "订阅与费用",
-            "会话",
             "设备",
             "每日汇总",
             "环境检查",
@@ -510,7 +508,6 @@ namespace TokLens
         private ProjectAttributionView _projectView;
         private SubscriptionCostsView _subscriptionView;
         private UsageHeatmapView _heatmapView;
-        private SessionListView _sessionView;
         private DiagnosticsDoctorView _doctorView;
         private SyncSettingsView _settingsView;
         private bool _doctorLoadedOnce = false;
@@ -1755,9 +1752,6 @@ namespace TokLens
                 if (_settingsView != null) _settingsView.ReloadFromConfig();
             });
             _viewPages[ViewInsights] = _subscriptionView;
-            _sessionView = new SessionListView();
-            _sessionView.Margin = new Thickness(16, 12, 16, 14);
-            _viewPages[ViewSessions] = _sessionView;
             _viewPages[ViewDevices] = BuildDevicesView();
             _viewPages[ViewDailyExport] = BuildDailyExportView();
             _doctorView = new DiagnosticsDoctorView(_homeDir, ShowToastSafe);
@@ -1809,7 +1803,7 @@ namespace TokLens
         private static readonly int[][] PageViews = new int[][]
         {
             new int[] { ViewOverview },
-            new int[] { ViewLiveStream, ViewSessions },
+            new int[] { ViewLiveStream },
             new int[] { ViewModels, ViewProjects, ViewDailyExport },
             new int[] { ViewDevices },
             new int[] { ViewInsights },
@@ -2575,15 +2569,12 @@ namespace TokLens
 
             // 项目页读取本机工作区全部历史；订阅按账户记实付，与设备和时间范围都无关。它们不跟随顶部筛选，
             // 所以不显示时间范围和导出（导出内容按时间筛选生成，放在这里会让人误以为导出的是本页数据）。
-            // 会话视图只汇总本机最近的请求，同样不跟随设备和时间筛选。
-            bool ownScope = (v == ViewProjects || v == ViewInsights || v == ViewSessions);
+            bool ownScope = (v == ViewProjects || v == ViewInsights);
             _deviceSelectorBtn.Visibility = ownScope ? Visibility.Collapsed : Visibility.Visible;
             _rangeContainer.Visibility = ownScope ? Visibility.Collapsed : Visibility.Visible;
             _exportMenuBtn.Visibility = ownScope ? Visibility.Collapsed : Visibility.Visible;
 
-            string scope = "";
-            if (v == ViewProjects) scope = "范围：本机工作区 · 全部历史";
-            else if (v == ViewSessions) scope = "范围：本机 · 最近的请求";
+            string scope = v == ViewProjects ? "范围：本机工作区 · 全部历史" : "";
             _pageScopeText.Text = scope;
             _pageScopeText.Visibility = string.IsNullOrEmpty(scope) ? Visibility.Collapsed : Visibility.Visible;
         }
@@ -6957,9 +6948,6 @@ namespace TokLens
             {
                 List<RecordBucket> machineRows = _latestSpecialistMachineRows ?? new List<RecordBucket>();
                 List<RecordBucket> activeRows = _latestSpecialistActiveRows ?? new List<RecordBucket>();
-                List<RecentRequestRecord> recentList = (_scanResult != null && _scanResult.RecentRequests != null)
-                    ? _scanResult.RecentRequests
-                    : new List<RecentRequestRecord>();
 
                 if (_activeView == ViewProjects && _projectView != null)
                 {
@@ -6978,10 +6966,6 @@ namespace TokLens
                     // 日历固定看近 365 天：按设备筛选，不跟随顶部时间范围。
                     List<RecordBucket> heatRows = _latestFullHistoryMachineRows ?? machineRows;
                     _heatmapView.Render(heatRows, _isCny, _usdToCny, _isDark, _latestReferenceDate);
-                }
-                else if (_activeView == ViewSessions && _sessionView != null)
-                {
-                    _sessionView.Render(recentList, _isCny, _usdToCny);
                 }
                 else if (_activeView == ViewDoctor && _doctorView != null)
                 {
